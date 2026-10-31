@@ -11,6 +11,7 @@ import {
 } from './sam';
 import { ImagerOutputError, type Imager } from './imager';
 import { readAudioDataUrl, TranscriberOutputError, type Transcriber } from './transcriber';
+import type { VoiceAgent } from './agent';
 import { MAX_NARRATION_TEXT, NarratorOutputError, type CachedNarrator } from './narrator';
 import { fixturePlanner, PlannerOutputError, type Planner } from './planner';
 import type { ContinuityEvidenceStatus, SegmentationResult } from '../src/types';
@@ -32,6 +33,7 @@ interface Options {
   transcriber?: Transcriber;
   narrator?: Pick<CachedNarrator, 'model' | 'voice' | 'cached' | 'speak'>;
   narrationCharLimit?: number;
+  agent?: VoiceAgent;
 }
 
 const MAX_FRAMES = 48;
@@ -72,6 +74,7 @@ export function createApp(options: Options) {
       imageModel: options.imager?.model ?? null,
       transcribeModel: options.transcriber?.model ?? null,
       narrationModel: options.narrator?.model ?? null,
+      agentReady: Boolean(options.agent),
     });
   });
 
@@ -499,6 +502,27 @@ export function createApp(options: Options) {
     } catch (error) {
       if (controller.signal.aborted) return;
       if (error instanceof NarratorOutputError) return res.status(502).json({ error: error.message });
+      next(error);
+    }
+  });
+
+  /**
+   * Voice agent endpoint: `POST /api/agent/session` returns a signed link for one
+   * conversation. Each link counts against the session request limit.
+   */
+  app.post('/api/agent/session', async (req, res, next) => {
+    if (!hasValidSession(req))
+      return res.status(403).json({ error: 'Refresh the page before talking to the agent.' });
+    if (!options.agent)
+      return res.status(501).json({ error: 'No voice agent is connected. Set AGENT_PROVIDER in .env.local.' });
+    if (requestsUsed >= options.settings().requestLimit)
+      return res
+        .status(429)
+        .json({ error: 'The session request limit has been reached. No further call was sent.' });
+    try {
+      requestsUsed++;
+      res.json({ signedUrl: await options.agent.signedUrl() });
+    } catch (error) {
       next(error);
     }
   });

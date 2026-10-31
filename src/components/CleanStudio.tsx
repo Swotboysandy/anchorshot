@@ -3,6 +3,7 @@ import {DashboardLayout} from './DashboardLayout';
 import { Tabs as BeTabs, TabsList as BeTabsList, TabsTrigger as BeTabsTrigger, TabsContent as BeTabsContent } from './ui/beui-tabs';
 import { CreationComposer } from './CreationComposer';
 import { VoiceOverlay } from './VoiceOverlay';
+import type { AgentTools } from '../services/voiceAgent';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
 import { Button } from './ui/button';
@@ -159,6 +160,36 @@ export function CleanStudio(p: Props) {
     if (p.playing) p.onPlay();
     setWorkspace(value);
   };
+
+  // Real studio actions the voice agent may call; each returns what happened so the agent can say it.
+  const agentTools: AgentTools = {
+    set_direction: ({ text }) => {
+      if (typeof text !== 'string' || !text.trim()) return 'No direction was given.';
+      p.onTranscript(text.trim());
+      return 'Direction saved to the script.';
+    },
+    generate_storyboard: () => {
+      if (p.processing) return 'A storyboard is already being generated.';
+      p.onGenerate();
+      return 'Storyboard generation started.';
+    },
+    run_command: ({ command }) => {
+      if (typeof command !== 'string' || !command.trim()) return 'No command was given.';
+      p.onCommand(command.trim());
+      return `Ran: ${command.trim()}`;
+    },
+    select_shot: ({ number }) => {
+      const shot = p.shots.find((s) => s.shotNumber === Number(number));
+      if (!shot) return `There is no shot ${number}.`;
+      p.onSelect(shot.id);
+      return shot.spokenDescription;
+    },
+    describe_storyboard: () =>
+      p.shots.length
+        ? p.shots.map((s) => `Shot ${s.shotNumber}, ${s.status}: ${s.promptDescription}`).join('\n')
+        : 'The storyboard is empty.',
+  };
+
   return (
     <div className={hasStory ? "clean-studio dark editor-shell" : "clean-studio dark"}>
       <a className="clean-skip" href="#clean-main">
@@ -458,6 +489,7 @@ export function CleanStudio(p: Props) {
       <VoiceOverlay
         open={voiceOpen}
         onOpenChange={setVoiceOpen}
+        agentTools={agentTools}
       />
     </div>
   );
