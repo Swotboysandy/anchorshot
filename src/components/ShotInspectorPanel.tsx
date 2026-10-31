@@ -98,7 +98,6 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
       aria-label={`Inspector for Shot ${activeShot.shotNumber}`}
       className="w-full xl:w-[360px] shrink-0 bg-[#1E232B] border-2 border-[#323A46] rounded-lg p-5 flex flex-col gap-5"
     >
-      <details className="generation-disclosure"><summary>Generate new media</summary><LocalGenerationPanel isProcessing={isProcessing} shotId={activeShot.id} shotNumber={activeShot.shotNumber} initialPrompt={activeShot.promptDescription} onUseImage={onUseLocalImage} /></details>
       {/* Top Shot Status Header */}
       <div className="flex flex-col gap-3 border-b border-[#323A46] pb-4">
         <div className="flex items-center justify-between gap-2">
@@ -135,7 +134,7 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
             <div className="flex items-center justify-between">
               <span className="flex items-center gap-2 text-sm font-bold text-[#FDE047]">
                 <AlertTriangle className="w-5 h-5 text-[#F59E0B] shrink-0" aria-hidden="true" />
-                <span>Continuity Discrepancy Flagged</span>
+                <span>Continuity problem</span>
               </span>
               <kbd className="px-2 py-0.5 text-xs font-mono font-bold bg-[#0F172A] text-[#FDE047] rounded">
                 [Y] to Fix
@@ -208,6 +207,8 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
                 </span>
                 <span>{activeShot.pixelVerification.outsideDriftPercent}% DRIFT</span>
               </div>
+              <details>
+              <summary className="cursor-pointer text-[#94A3B8]">Pixel check details</summary>
               <div className="grid grid-cols-2 gap-1 text-[#E2E8F0] pt-1">
                 <span>Inside Mask Changed:</span>
                 <span className="text-right font-bold">
@@ -228,6 +229,7 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
                 <span>Rule Revision:</span>
                 <span className="text-right">Rev {activeShot.pixelVerification.ruleRevision}</span>
               </div>
+              </details>
               {isRepaired && onToggleBeforeComparison && (
                 <button
                   type="button"
@@ -254,7 +256,7 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
         <div className="flex items-center justify-between">
           <h3 id="sam-studio-heading" className="text-base font-semibold text-white flex items-center gap-2">
             <Layers className="w-4 h-4 text-[#38BDF8]" aria-hidden="true" />
-            <span>Anchor selection</span>
+            <span>Fix it</span>
           </h3>
           <button
             type="button"
@@ -268,7 +270,9 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
         </div>
 
         {currentMask ? (
-          <div className="p-3 bg-[#16191E] border border-[#323A46] rounded flex flex-col gap-1.5 text-xs font-mono text-[#E2E8F0] tabular-nums">
+          <details>
+          <summary className="cursor-pointer text-xs text-[#94A3B8]">Mask details</summary>
+          <div className="mt-2 p-3 bg-[#16191E] border border-[#323A46] rounded flex flex-col gap-1.5 text-xs font-mono text-[#E2E8F0] tabular-nums">
             <div className="flex items-center justify-between gap-2">
               <span>TARGET: &ldquo;{activeShot.proposedFix?.targetObject || 'cup'}&rdquo;</span>
               <span
@@ -289,6 +293,7 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
               BBOX: X:{currentMask.box.x}% Y:{currentMask.box.y}% W:{currentMask.box.width}% H:{currentMask.box.height}%
             </div>
           </div>
+          </details>
         ) : (
           <button
             type="button"
@@ -366,7 +371,7 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
         {/* Target Color Swatch Selector for Masked Recolor */}
         <div className="flex flex-col gap-2">
           <span className="text-xs font-mono text-[#E2E8F0]">
-            SELECT TARGET CONTINUITY COLOR:
+            Recolor the {activeShot.proposedFix?.targetObject || 'object'} to:
           </span>
           <div className="grid grid-cols-3 gap-2">
             {COLOR_SWATCH_OPTIONS.map((swatch) => {
@@ -515,12 +520,12 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
       </section>
 
       {/* Meta Model API Execution Log */}
-      <section aria-labelledby="model-telemetry-heading" className="flex flex-col gap-2">
-        <h3 id="model-telemetry-heading" className="text-sm font-semibold text-[#E2E8F0] flex items-center gap-2">
+      <details aria-labelledby="model-telemetry-heading" className="flex flex-col gap-2">
+        <summary id="model-telemetry-heading" className="cursor-pointer text-sm font-semibold text-[#E2E8F0] flex items-center gap-2">
           <Cpu className="w-4 h-4 text-[#38BDF8]" aria-hidden="true" />
-          <span>Offline Fixture Pipeline Log</span>
-        </h3>
-        <div className="bg-[#16191E] border border-[#323A46] rounded p-2.5 max-h-36 overflow-y-auto flex flex-col gap-2 font-mono text-xs">
+          <span>Technical log</span>
+        </summary>
+        <div className="mt-2 bg-[#16191E] border border-[#323A46] rounded p-2.5 max-h-36 overflow-y-auto flex flex-col gap-2 font-mono text-xs">
           {modelLogs.slice(0, 5).map((log) => (
             <div key={log.id} className="border-b border-[#323A46]/60 pb-1.5 last:border-none last:pb-0">
               <div className="flex items-center justify-between text-[#38BDF8]">
@@ -533,7 +538,8 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
             </div>
           ))}
         </div>
-      </section>
+      </details>
+            <details className="generation-disclosure"><summary>Generate new media</summary><LocalGenerationPanel isProcessing={isProcessing} shotId={activeShot.id} shotNumber={activeShot.shotNumber} initialPrompt={activeShot.promptDescription} onUseImage={onUseLocalImage} /></details>
     </aside>
   );
 };
