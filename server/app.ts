@@ -10,6 +10,7 @@ import {
   type CheckedInput,
 } from './sam';
 import { ImagerOutputError, type Imager } from './imager';
+import { readAudioDataUrl, TranscriberOutputError, type Transcriber } from './transcriber';
 import { fixturePlanner, PlannerOutputError, type Planner } from './planner';
 import type { ContinuityEvidenceStatus, SegmentationResult } from '../src/types';
 
@@ -27,6 +28,7 @@ interface Options {
   ) => Promise<SegmentationResult>;
   planner?: Planner;
   imager?: Imager;
+  transcriber?: Transcriber;
 }
 
 const MAX_FRAMES = 48;
@@ -39,6 +41,7 @@ export function createApp(options: Options) {
   let requestsUsed = 0;
   let active = false;
   let imageActive = false;
+  let transcribeActive = false;
   const frames = new Map<string, Buffer>();
 
   app.disable('x-powered-by');
@@ -63,6 +66,7 @@ export function createApp(options: Options) {
       requestLimit: settings.requestLimit,
       tracksStored: trackStore.listTracks().length,
       imageModel: options.imager?.model ?? null,
+      transcribeModel: options.transcriber?.model ?? null,
     });
   });
 
@@ -323,9 +327,41 @@ export function createApp(options: Options) {
    * Meta Muse Voice Transcribe Endpoint: `POST /api/muse/transcribe`
    * Server-side gateway for `muse-voice-transcribe-1.0` with explicit offline fixture provenance.
    */
-  app.post('/api/muse/transcribe', (req, res) => {
+  app.post('/api/muse/transcribe', async (req, res, next) => {
     if (!hasValidSession(req))
       return res.status(403).json({ error: 'Refresh the page before transcribing.' });
+    if (req.body?.audio !== undefined) {
+      if (!options.transcriber)
+        return res.status(501).json({
+          error: 'No transcription model is connected. Set TRANSCRIBE_PROVIDER in .env.local.',
+        });
+      const clip = readAudioDataUrl(req.body.audio);
+      if (typeof clip === 'string') return res.status(400).json({ error: clip });
+      if (transcribeActive)
+        return res.status(409).json({ error: 'A recording is already being transcribed.' });
+      if (requestsUsed >= options.settings().requestLimit)
+        return res
+          .status(429)
+          .json({ error: 'The session request limit has been reached. No further call was sent.' });
+      transcribeActive = true;
+      const controller = new AbortController();
+      res.on('close', () => {
+        if (!res.writableEnded) controller.abort();
+      });
+      try {
+        requestsUsed++;
+        const result = await options.transcriber.transcribe(clip, controller.signal);
+        if (!controller.signal.aborted) res.json(result);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        if (error instanceof TranscriberOutputError)
+          return res.status(502).json({ error: error.message });
+        next(error);
+      } finally {
+        transcribeActive = false;
+      }
+      return;
+    }
     const text =
       typeof req.body?.text === 'string' && req.body.text.trim()
         ? req.body.text.trim()

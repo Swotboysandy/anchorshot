@@ -88,12 +88,82 @@ class SpeechRecognitionService {
   private isListeningState: boolean = false;
   private currentOptions: SpeechRecognitionOptions | null = null;
   private simulationTimer: ReturnType<typeof setTimeout> | null = null;
+  private backendModel: string | null = null;
+  private backendSession = '';
+  private recorder: MediaRecorder | null = null;
+
+  /**
+   * Asks the local server whether a transcription model is connected. When one
+   * is, dictation records audio and sends it there instead of the browser engine.
+   */
+  public async connectBackend(): Promise<string | null> {
+    try {
+      const health = await (await fetch('/api/health')).json();
+      this.backendModel = typeof health?.transcribeModel === 'string' ? health.transcribeModel : null;
+      this.backendSession = typeof health?.sessionToken === 'string' ? health.sessionToken : '';
+    } catch {
+      this.backendModel = null;
+    }
+    return this.backendModel;
+  }
+
+  private canRecordForBackend(): boolean {
+    return Boolean(this.backendModel) && typeof MediaRecorder !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia);
+  }
+
+  /** Records until stopListening(), then transcribes the clip with the server's model. */
+  private startBackendRecording(options: SpeechRecognitionOptions): boolean {
+    const model = this.backendModel!;
+    this.isListeningState = true;
+    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+      if (!this.isListeningState) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      const chunks: Blob[] = [];
+      const recorder = new MediaRecorder(stream);
+      this.recorder = recorder;
+      recorder.ondataavailable = (event) => event.data.size && chunks.push(event.data);
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        const clip = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+        try {
+          const audio = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(new Error('The recording could not be read.'));
+            reader.readAsDataURL(clip);
+          });
+          const res = await fetch('/api/muse/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Anchorshot-Session': this.backendSession },
+            body: JSON.stringify({ audio }),
+          });
+          const result = await res.json().catch(() => ({}));
+          if (!res.ok || typeof result.transcript !== 'string')
+            throw new Error(result.error || `${model} could not transcribe the recording.`);
+          options.onResult?.(result.transcript, true);
+        } catch (error) {
+          options.onError?.((error as Error).message);
+        }
+      };
+      recorder.start();
+      speechService.playEarcon('recordStart');
+      options.onStateChange?.(true);
+    }).catch(() => {
+      this.isListeningState = false;
+      options.onError?.('Microphone access was blocked. Allow the microphone or type the direction instead.');
+      options.onStateChange?.(false);
+    });
+    return true;
+  }
 
   /**
    * Check if native browser Speech Recognition is supported in the current environment.
    */
   public isSupported(): boolean {
     if (typeof window === 'undefined') return false;
+    if (this.canRecordForBackend()) return true;
     const win = window as unknown as {
       SpeechRecognition?: SpeechRecognitionConstructor;
       webkitSpeechRecognition?: SpeechRecognitionConstructor;
@@ -114,6 +184,8 @@ class SpeechRecognitionService {
     }
 
     this.currentOptions = options;
+
+    if (this.canRecordForBackend()) return this.startBackendRecording(options);
 
     if (!this.isSupported()) {
       const errorMsg = 'Browser Speech Recognition is not supported in this browser. Use local voice simulation or typed input.';
@@ -204,6 +276,11 @@ class SpeechRecognitionService {
     if (this.simulationTimer) {
       clearTimeout(this.simulationTimer);
       this.simulationTimer = null;
+    }
+
+    if (this.recorder) {
+      if (this.recorder.state !== 'inactive') this.recorder.stop();
+      this.recorder = null;
     }
 
     if (this.recognition) {
