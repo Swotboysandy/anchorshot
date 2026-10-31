@@ -1,5 +1,5 @@
 import {LocalGenerationPanel} from './LocalGenerationPanel';
-import {isLocalImage} from '../services/localGeneration';
+import {isGeneratedImage} from '../services/localGeneration';
 import React, { useState } from 'react';
 import {
   AlertTriangle,
@@ -125,7 +125,7 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
         </div>
 
         {/* High-Contrast Status Banner */}
-        {isLocalImage(activeShot.currentImageUrl) ? <p className="text-sm text-[#FDE047]">Generated image — continuity unreviewed. Sample masks cannot be applied to this image.</p> : isMismatch ? (
+        {isGeneratedImage(activeShot.currentImageUrl) ? <p className="text-sm text-[#FDE047]">Generated image — continuity unreviewed. Sample masks cannot be applied to this image.</p> : isMismatch ? (
           <div
             role="region"
             aria-live="polite"
@@ -250,7 +250,7 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
       </div>
 
       {/* SAM 3.1 Segmentation & Pixel Recolor Studio */}
-      {!isLocalImage(activeShot.currentImageUrl) && <section aria-labelledby="sam-studio-heading" className="flex flex-col gap-3 border-b border-[#323A46] pb-4">
+      {!isGeneratedImage(activeShot.currentImageUrl) && <section aria-labelledby="sam-studio-heading" className="flex flex-col gap-3 border-b border-[#323A46] pb-4">
         <div className="flex items-center justify-between">
           <h3 id="sam-studio-heading" className="text-base font-semibold text-white flex items-center gap-2">
             <Layers className="w-4 h-4 text-[#38BDF8]" aria-hidden="true" />

@@ -20,6 +20,7 @@ export interface GeneratedFrame extends CheckedInput {
   seed: number;
 }
 export interface Imager {
+  model: string;
   generate(request: FrameRequest, signal?: AbortSignal): Promise<GeneratedFrame>;
 }
 
@@ -49,6 +50,7 @@ type Images = Pick<OpenAI['images'], 'generate'>;
 /** Any endpoint that serves OpenAI-style `/images/generations` with base64 output. */
 export function openAiImager(options: { model: string; images: Images; size?: string }): Imager {
   return {
+    model: options.model,
     async generate({ prompt, targetObject, seed }, signal) {
       const response = await options.images.generate(
         {

@@ -29,6 +29,8 @@ interface Options {
   imager?: Imager;
 }
 
+const MAX_FRAMES = 48;
+
 export function createApp(options: Options) {
   const app = express();
   const sessionToken = randomBytes(24).toString('hex');
@@ -37,6 +39,7 @@ export function createApp(options: Options) {
   let requestsUsed = 0;
   let active = false;
   let imageActive = false;
+  const frames = new Map<string, Buffer>();
 
   app.disable('x-powered-by');
   app.use('/api', (req, res, next) => {
@@ -59,6 +62,7 @@ export function createApp(options: Options) {
       requestsUsed,
       requestLimit: settings.requestLimit,
       tracksStored: trackStore.listTracks().length,
+      imageModel: options.imager?.model ?? null,
     });
   });
 
@@ -405,7 +409,12 @@ export function createApp(options: Options) {
         },
         controller.signal,
       );
-      if (!controller.signal.aborted) res.json(frame);
+      if (controller.signal.aborted) return;
+      const { image, ...details } = frame;
+      // Keep the latest frames by content hash; the browser loads them by URL.
+      frames.set(frame.sourceHash, Buffer.from(image.slice(image.indexOf(',') + 1), 'base64'));
+      if (frames.size > MAX_FRAMES) frames.delete(frames.keys().next().value!);
+      res.json({ ...details, url: `/api/muse/frames/${frame.sourceHash}.png` });
     } catch (error) {
       if (controller.signal.aborted) return;
       if (error instanceof ImagerOutputError) return res.status(502).json({ error: error.message });
@@ -413,6 +422,12 @@ export function createApp(options: Options) {
     } finally {
       imageActive = false;
     }
+  });
+
+  app.get('/api/muse/frames/:file', (req, res) => {
+    const frame = frames.get(/^([a-f0-9]{64})\.png$/.exec(req.params.file)?.[1] ?? '');
+    if (!frame) return res.status(404).json({ error: 'This generated frame is no longer available.' });
+    res.type('png').send(frame);
   });
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API endpoint.' }));

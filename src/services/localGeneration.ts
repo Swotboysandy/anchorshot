@@ -15,3 +15,5 @@ export async function localRequest<T>(route: string, body?: unknown): Promise<T>
 }
 export const localAsset = (job: LocalJob, name: string) => `/api/local-ai/jobs/${job.id}/assets/${name}`;
 export const isLocalImage = (url: string) => url.startsWith('/api/local-ai/jobs/');
+/** Any model-drawn frame (local GPU or a connected image model): no sample masks apply. */
+export const isGeneratedImage = (url: string) => isLocalImage(url) || url.startsWith('/api/muse/frames/');

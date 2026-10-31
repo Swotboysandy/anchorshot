@@ -1,6 +1,6 @@
 import {loadLocal,saveLocal} from './services/projectStorage';
 import {CleanStudio} from './components/CleanStudio';
-import {isLocalImage} from './services/localGeneration';
+import {isGeneratedImage, isLocalImage} from './services/localGeneration';
 import { useReducedMotion } from 'motion/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -159,11 +159,21 @@ export default function App() {
           'Running muse-spark-1.3 shot planner and muse-image-1.0 storyboard synthesis...',
       }));
 
-      const { rules, shots } = await metaModelClient.generateStoryboardFromTranscript(
-        targetTranscript,
-        undefined,
-        injectDiscrepancy
-      );
+      let rules: ContinuityRule[];
+      let shots: StoryboardShot[];
+      try {
+        ({ rules, shots } = await metaModelClient.generateStoryboardFromTranscript(
+          targetTranscript,
+          undefined,
+          injectDiscrepancy
+        ));
+      } catch (error) {
+        const message = `Storyboard generation failed: ${(error as Error).message}`;
+        speechService.playEarcon('mismatch');
+        setProjectState((prev) => ({ ...prev, isProcessing: false, statusAnnouncement: message }));
+        speechService.speak(message, true);
+        return;
+      }
 
       const mismatchShot = shots.find((s) => s.status === 'mismatch');
       speechService.playEarcon(mismatchShot ? 'mismatch' : 'consistent');
@@ -207,8 +217,8 @@ export default function App() {
     async (shotId: string, customColor?: string) => {
       const targetShot = projectState.shots.find((s) => s.id === shotId);
       if (!targetShot) return;
-      if (isLocalImage(targetShot.currentImageUrl)) {
-        announceStatus('Local AI image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.', true);
+      if (isGeneratedImage(targetShot.currentImageUrl)) {
+        announceStatus('Generated image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.', true);
         return;
       }
 
@@ -278,8 +288,8 @@ export default function App() {
     async (shotId: string, targetObject: string) => {
       const targetShot = projectState.shots.find((s) => s.id === shotId);
       if (!targetShot) return;
-      if (isLocalImage(targetShot.currentImageUrl)) {
-        announceStatus('Local AI image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.', true);
+      if (isGeneratedImage(targetShot.currentImageUrl)) {
+        announceStatus('Generated image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.', true);
         return;
       }
 
@@ -341,7 +351,7 @@ export default function App() {
             ? {
                 ...s,
                 currentImageUrl: rev.imageUrl,
-                status: isLocalImage(rev.imageUrl) ? 'uncertain' : isInitialMismatch ? 'mismatch' : 'consistent',
+                status: isGeneratedImage(rev.imageUrl) ? 'uncertain' : isInitialMismatch ? 'mismatch' : 'consistent',
                 proposedFix: undefined,
                 pixelVerification: rev.pixelVerification,
                 discrepancyMessage: isInitialMismatch
@@ -361,10 +371,10 @@ export default function App() {
     (shotId: string, newPrompt: string, newDuration: number) => {
       const targetShot = projectState.shots.find((s) => s.id === shotId);
       if (!targetShot) return;
-      if (isLocalImage(targetShot.currentImageUrl)) {
+      if (isGeneratedImage(targetShot.currentImageUrl)) {
         setProjectState(prev => ({...prev, shots: prev.shots.map(shot => shot.id === shotId ? {
           ...shot, promptDescription: newPrompt, durationSeconds: newDuration,
-          spokenDescription: `Shot ${shot.shotNumber}. ${newPrompt}. Local AI image, continuity unreviewed.`,
+          spokenDescription: `Shot ${shot.shotNumber}. ${newPrompt}. Generated image, continuity unreviewed.`,
         } : shot)}));
         return;
       }
@@ -460,7 +470,7 @@ export default function App() {
       // Re-audit all shots against the new expected color
       const updatedShots: StoryboardShot[] = [];
       for (const shot of projectState.shots) {
-        if (isLocalImage(shot.currentImageUrl)) { updatedShots.push({...shot, status: 'uncertain', proposedFix: undefined}); continue; }
+        if (isGeneratedImage(shot.currentImageUrl)) { updatedShots.push({...shot, status: 'uncertain', proposedFix: undefined}); continue; }
         const mask =
           shot.proposedFix?.mask ||
           (await metaModelClient.segmentObjectWithSam3(shot.shotNumber, targetObject));

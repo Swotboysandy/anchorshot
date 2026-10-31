@@ -68,9 +68,16 @@ describe('/api/muse/image', () => {
       settings: () => ({ key: '', requestLimit: 1 }),
       imager: openAiImager({ model: 'm', images: images as never }),
     });
+    expect((await request(app).get('/api/health')).body.imageModel).toBe('m');
     const first = await post(app, shot);
     expect(first.status).toBe(200);
     expect(first.body).toMatchObject({ model: 'm', concept: 'cup', seed: 3 });
+    expect(first.body.image).toBeUndefined();
+    expect(first.body.url).toBe(`/api/muse/frames/${first.body.sourceHash}.png`);
+    const served = await request(app).get(first.body.url);
+    expect(served.status).toBe(200);
+    expect(served.headers['content-type']).toMatch(/image\/png/);
+    expect((await request(app).get('/api/muse/frames/../secret.png')).status).toBe(404);
     expect((await post(app, shot)).status).toBe(429);
     expect(images.generate).toHaveBeenCalledTimes(1);
   });
