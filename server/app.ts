@@ -9,6 +9,7 @@ import {
   UserError,
   type CheckedInput,
 } from './sam';
+import { fixturePlanner, PlannerOutputError, type Planner } from './planner';
 import type { ContinuityEvidenceStatus, SegmentationResult } from '../src/types';
 
 interface Settings {
@@ -23,12 +24,14 @@ interface Options {
     signal: AbortSignal,
     revision?: number,
   ) => Promise<SegmentationResult>;
+  planner?: Planner;
 }
 
 export function createApp(options: Options) {
   const app = express();
   const sessionToken = randomBytes(24).toString('hex');
   const trackStore = new MaskTrackStore();
+  const planner = options.planner ?? fixturePlanner;
   let requestsUsed = 0;
   let active = false;
 
@@ -340,7 +343,7 @@ export function createApp(options: Options) {
    * Meta Muse Spark Continuity Rule & Shot Planner Endpoint: `POST /api/muse/spark`
    * Extracts versioned `ContinuityRule` records (`ruleRevision`) from transcript text.
    */
-  app.post('/api/muse/spark', (req, res) => {
+  app.post('/api/muse/spark', async (req, res, next) => {
     if (!hasValidSession(req))
       return res.status(403).json({ error: 'Refresh the page before running shot planning.' });
     const transcript = typeof req.body?.transcript === 'string' ? req.body.transcript : '';
@@ -353,65 +356,12 @@ export function createApp(options: Options) {
       req.body.previousRevision >= 0
         ? Math.floor(req.body.previousRevision)
         : 0;
-    const nextRevision = previousRevision + 1;
-    const lower = transcript.toLowerCase();
-
-    const knownObjects = ['cup', 'mug', 'umbrella', 'jacket', 'coat'];
-    let targetObject = 'cup';
-    for (const obj of knownObjects) {
-      if (lower.includes(obj)) {
-        targetObject = obj === 'mug' ? 'cup' : obj === 'coat' ? 'jacket' : obj;
-        break;
-      }
+    try {
+      res.json(await planner.plan(transcript, previousRevision + 1));
+    } catch (error) {
+      if (error instanceof PlannerOutputError) return res.status(502).json({ error: error.message });
+      next(error);
     }
-
-    const knownColors = [
-      'emerald',
-      'green',
-      'amber',
-      'yellow',
-      'gold',
-      'blue',
-      'cobalt',
-      'red',
-      'crimson',
-      'white',
-      'purple',
-      'cyan',
-    ];
-    let expectedValue = 'blue';
-    const ruleSentence = transcript.split('.')[0]?.toLowerCase() || lower;
-    for (const col of knownColors) {
-      if (ruleSentence.includes(col)) {
-        expectedValue =
-          col === 'cobalt'
-            ? 'blue'
-            : col === 'crimson'
-              ? 'red'
-              : col === 'yellow' || col === 'gold'
-                ? 'amber'
-                : col === 'green'
-                  ? 'emerald'
-                  : col;
-        break;
-      }
-    }
-
-    res.json({
-      model: 'muse-spark-1.3',
-      provenance: 'offline-fixture',
-      ruleRevision: nextRevision,
-      rules: [
-        {
-          id: `rule-${targetObject}-color`,
-          scope: 'all_shots',
-          targetObject,
-          property: 'color',
-          expectedValue,
-          revision: nextRevision,
-        },
-      ],
-    });
   });
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API endpoint.' }));
