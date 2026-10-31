@@ -9,6 +9,7 @@ import {
   UserError,
   type CheckedInput,
 } from './sam';
+import { ImagerOutputError, type Imager } from './imager';
 import { fixturePlanner, PlannerOutputError, type Planner } from './planner';
 import type { ContinuityEvidenceStatus, SegmentationResult } from '../src/types';
 
@@ -25,6 +26,7 @@ interface Options {
     revision?: number,
   ) => Promise<SegmentationResult>;
   planner?: Planner;
+  imager?: Imager;
 }
 
 export function createApp(options: Options) {
@@ -34,6 +36,7 @@ export function createApp(options: Options) {
   const planner = options.planner ?? fixturePlanner;
   let requestsUsed = 0;
   let active = false;
+  let imageActive = false;
 
   app.disable('x-powered-by');
   app.use('/api', (req, res, next) => {
@@ -361,6 +364,54 @@ export function createApp(options: Options) {
     } catch (error) {
       if (error instanceof PlannerOutputError) return res.status(502).json({ error: error.message });
       next(error);
+    }
+  });
+
+  /**
+   * Storyboard frame endpoint: `POST /api/muse/image`
+   * Uses the configured imager; each frame is checked as SAM input before it is returned.
+   * Shares the session request limit with SAM, so paid calls stay bounded.
+   */
+  app.post('/api/muse/image', async (req, res, next) => {
+    if (!hasValidSession(req))
+      return res.status(403).json({ error: 'Refresh the page before generating a frame.' });
+    if (!options.imager)
+      return res.status(501).json({
+        error: 'No image model is connected. Set IMAGE_PROVIDER in .env.local, or keep the offline frames.',
+      });
+    const { prompt, targetObject, seed } = req.body ?? {};
+    if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 2000)
+      return res.status(400).json({ error: 'Describe the shot in up to 2000 characters.' });
+    if (typeof targetObject !== 'string' || !targetObject.trim() || targetObject.length > 100)
+      return res.status(400).json({ error: 'Name the object to keep continuous, such as cup.' });
+    if (imageActive)
+      return res.status(409).json({ error: 'A frame is already generating. Wait for it to finish.' });
+    if (requestsUsed >= options.settings().requestLimit)
+      return res
+        .status(429)
+        .json({ error: 'The session request limit has been reached. No further call was sent.' });
+    imageActive = true;
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+    try {
+      requestsUsed++;
+      const frame = await options.imager.generate(
+        {
+          prompt: prompt.trim(),
+          targetObject: targetObject.trim(),
+          seed: Number.isInteger(seed) ? seed : 0,
+        },
+        controller.signal,
+      );
+      if (!controller.signal.aborted) res.json(frame);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (error instanceof ImagerOutputError) return res.status(502).json({ error: error.message });
+      next(error);
+    } finally {
+      imageActive = false;
     }
   });
 

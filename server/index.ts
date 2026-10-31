@@ -6,6 +6,7 @@ import express from 'express';
 import { parse } from 'dotenv';
 import { createApp } from './app';
 import { createLocalAi } from './localAi';
+import { imagerFromSettings } from './imager';
 import { plannerFromSettings } from './planner';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -35,7 +36,8 @@ function localSettings() {
 const app = express();
 const localAi = createLocalAi(root);
 app.use('/api/local-ai', localAi.app);
-app.use(createApp({ settings: localSettings, planner: plannerFromSettings(localSettings().values) }));
+app.use(createApp({ settings: localSettings, planner: plannerFromSettings(localSettings().values),
+  imager: imagerFromSettings(localSettings().values) }));
 const server = createServer(app);
 server.once('close', () => localAi.stop('Local server stopped.'));
 if (process.argv.includes('--production')) {
