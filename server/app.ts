@@ -11,6 +11,7 @@ import {
 } from './sam';
 import { ImagerOutputError, type Imager } from './imager';
 import { readAudioDataUrl, TranscriberOutputError, type Transcriber } from './transcriber';
+import { MAX_NARRATION_TEXT, NarratorOutputError, type CachedNarrator } from './narrator';
 import { fixturePlanner, PlannerOutputError, type Planner } from './planner';
 import type { ContinuityEvidenceStatus, SegmentationResult } from '../src/types';
 
@@ -29,6 +30,8 @@ interface Options {
   planner?: Planner;
   imager?: Imager;
   transcriber?: Transcriber;
+  narrator?: Pick<CachedNarrator, 'model' | 'voice' | 'cached' | 'speak'>;
+  narrationCharLimit?: number;
 }
 
 const MAX_FRAMES = 48;
@@ -42,6 +45,7 @@ export function createApp(options: Options) {
   let active = false;
   let imageActive = false;
   let transcribeActive = false;
+  let narrationCharsUsed = 0;
   const frames = new Map<string, Buffer>();
 
   app.disable('x-powered-by');
@@ -67,6 +71,7 @@ export function createApp(options: Options) {
       tracksStored: trackStore.listTracks().length,
       imageModel: options.imager?.model ?? null,
       transcribeModel: options.transcriber?.model ?? null,
+      narrationModel: options.narrator?.model ?? null,
     });
   });
 
@@ -464,6 +469,38 @@ export function createApp(options: Options) {
     const frame = frames.get(/^([a-f0-9]{64})\.png$/.exec(req.params.file)?.[1] ?? '');
     if (!frame) return res.status(404).json({ error: 'This generated frame is no longer available.' });
     res.type('png').send(frame);
+  });
+
+  /**
+   * Narration endpoint: `POST /api/muse/speak` returns MP3 for the given text.
+   * Cached clips are free; new text counts against a per-session character budget.
+   */
+  app.post('/api/muse/speak', async (req, res, next) => {
+    if (!hasValidSession(req))
+      return res.status(403).json({ error: 'Refresh the page before narration.' });
+    if (!options.narrator)
+      return res.status(501).json({ error: 'No narration voice is connected. The browser voice is used.' });
+    const text = typeof req.body?.text === 'string' ? req.body.text.replace(/\s+/g, ' ').trim() : '';
+    if (!text || text.length > MAX_NARRATION_TEXT)
+      return res.status(400).json({ error: `Narrate between 1 and ${MAX_NARRATION_TEXT} characters.` });
+    const fresh = !options.narrator.cached(text);
+    if (fresh && narrationCharsUsed + text.length > (options.narrationCharLimit ?? 20_000))
+      return res
+        .status(429)
+        .json({ error: 'The session narration budget has been reached. The browser voice is used.' });
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+    try {
+      if (fresh) narrationCharsUsed += text.length;
+      const audio = await options.narrator.speak(text, controller.signal);
+      if (!controller.signal.aborted) res.type('audio/mpeg').send(audio);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (error instanceof NarratorOutputError) return res.status(502).json({ error: error.message });
+      next(error);
+    }
   });
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API endpoint.' }));
