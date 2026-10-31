@@ -30,11 +30,25 @@ function anchorShotSamApiPlugin(): Plugin {
       const requestLimit =
         Number.isInteger(parsedLimit) && parsedLimit >= 0 && parsedLimit <= 100 ? parsedLimit : 25;
 
+      // Same model providers as server/index.ts, so `npm run dev` and `dev:server` behave alike.
+      const [{ plannerFromSettings }, { imagerFromSettings }, { transcriberFromSettings }, { narratorFromSettings }, { agentFromSettings }] =
+        await Promise.all([
+          import('./server/planner'),
+          import('./server/imager'),
+          import('./server/transcriber'),
+          import('./server/narrator'),
+          import('./server/agent'),
+        ]);
       const apiApp = createApp({
         settings: () => ({
           key: (process.env.META_API_KEY ?? localEnv.META_API_KEY ?? '').trim(),
           requestLimit,
         }),
+        planner: plannerFromSettings(localEnv),
+        imager: imagerFromSettings(localEnv),
+        transcriber: transcriberFromSettings(localEnv),
+        narrator: narratorFromSettings(localEnv, path.resolve(__dirname, '.artifacts/narration')),
+        agent: agentFromSettings(localEnv),
       });
       server.middlewares.use(apiApp);
     },
