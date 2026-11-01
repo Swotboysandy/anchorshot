@@ -13,6 +13,7 @@ import {
 import { DIRECTOR_PRESETS, metaModelClient } from './services/metaModels';
 import { speechService } from './services/speechService';
 import { exportAnimaticMp4 } from './services/animaticExport';
+import { parseVoiceCommand } from './services/voiceCommandParser';
 import { speechRecognitionService } from './services/speechRecognitionService';
 import {
   exportStoryboardAnimaticVideo,
@@ -569,72 +570,54 @@ export default function App() {
         await handleRebuildFromTranscript(true, trimmed);
         return;
       }
-      // Normalize: lower case and clean trailing punctuation
-      const lower = trimmed.toLowerCase().replace(/[.,!?;:]+$/g, '');
-
-      // Directives: Playback
-      if (lower.startsWith('play') || lower.includes('start animatic') || lower === 'play sequence') {
-        if (!projectState.isPlayingAnimatic) handleTogglePlayAnimatic();
-        return;
-      }
-      if (lower.startsWith('stop') || lower.startsWith('pause')) {
-        if (projectState.isPlayingAnimatic) handleTogglePlayAnimatic();
-        return;
-      }
-
-      // Directives: Help & Shortcuts
-      if (lower.includes('help') || lower.includes('shortcut') || lower.includes('hotkey')) {
-        setIsShortcutsModalOpen(true);
-        announceStatus('Opened keyboard and voice shortcuts dialog.', false);
-        return;
-      }
-
-      // Directives: Audit
-      if (lower.includes('audit') || lower.includes('check continuity')) {
-        await handleRunFullAudit();
-        return;
-      }
-
-      if (lower.includes('fix') || lower.includes('repair')) {
-        // Support numbers ("2", "two", "#2", etc.)
-        const numberWords: Record<string, number> = {
-          '1': 1, 'one': 1, '#1': 1,
-          '2': 2, 'two': 2, '#2': 2,
-          '3': 3, 'three': 3, '#3': 3,
-          '4': 4, 'four': 4, '#4': 4,
-        };
-        const shotMatch = lower.match(/(?:shot|#|\b)\s*(1|2|3|4|one|two|three|four)\b/i);
-        const targetShotNum = shotMatch ? numberWords[shotMatch[1].toLowerCase()] : null;
-        const targetShot =
-          (targetShotNum
-            ? projectState.shots.find((s) => s.shotNumber === targetShotNum)
-            : projectState.shots.find((s) => s.status === 'mismatch')) || activeShot;
-
-        if (targetShot) {
-          await handleApplyProposedFix(targetShot.id);
-        } else {
-          announceStatus('All shots are already consistent.', true);
+      const intent = parseVoiceCommand(trimmed);
+      const shotByNumber = (n?: number) => (n ? projectState.shots.find((s) => s.shotNumber === n) : undefined);
+      switch (intent.kind) {
+        case 'playback':
+          if ((intent.action === 'play') !== projectState.isPlayingAnimatic) handleTogglePlayAnimatic();
+          return;
+        case 'help':
+          setIsShortcutsModalOpen(true);
+          announceStatus('Opened keyboard and voice shortcuts dialog.', false);
+          return;
+        case 'audit':
+          await handleRunFullAudit();
+          return;
+        case 'narrate': {
+          const summary = projectState.shots.map((s) => s.spokenDescription).join(' ');
+          announceStatus(`Narrating full storyboard sequence: ${summary}`, true);
+          return;
         }
-        return;
+        case 'fix': {
+          if (intent.shotNumber && !shotByNumber(intent.shotNumber)) {
+            announceStatus(`There is no shot ${intent.shotNumber}.`, true);
+            return;
+          }
+          const targetShot =
+            shotByNumber(intent.shotNumber) ?? projectState.shots.find((s) => s.status === 'mismatch') ?? activeShot;
+          if (targetShot) await handleApplyProposedFix(targetShot.id, intent.color);
+          else announceStatus('All shots are already consistent.', true);
+          return;
+        }
+        case 'recolor': {
+          if (intent.shotNumber) {
+            const shot = shotByNumber(intent.shotNumber);
+            if (shot) await handleApplyProposedFix(shot.id, intent.color);
+            else announceStatus(`There is no shot ${intent.shotNumber}.`, true);
+            return;
+          }
+          await handleAddOrUpdateRule(intent.object || projectState.rules[0]?.targetObject || 'cup', intent.color);
+          return;
+        }
+        case 'rule_update':
+          await handleAddOrUpdateRule(projectState.rules[0]?.targetObject || 'cup', intent.color);
+          return;
+        case 'rebuild': {
+          const updatedTranscript = `${projectState.transcript} ${intent.transcript}`.trim();
+          await handleRebuildFromTranscript(false, updatedTranscript);
+          return;
+        }
       }
-
-      if (lower.includes('narrate') || lower.includes('read') || lower.includes('describe')) {
-        const summary = projectState.shots.map((s) => s.spokenDescription).join(' ');
-        announceStatus(`Narrating full storyboard sequence: ${summary}`, true);
-        return;
-      }
-
-      const colorMatch = lower.match(/\b(emerald|amber|blue|red|purple|white|green|yellow)\b/i);
-      if (colorMatch) {
-        const chosenColor = colorMatch[1].toLowerCase();
-        const targetObj = projectState.rules[0]?.targetObject || 'cup';
-        await handleAddOrUpdateRule(targetObj, chosenColor);
-        return;
-      }
-
-      // Default: append to transcript and rebuild sequence
-      const updatedTranscript = `${projectState.transcript} ${trimmed}`.trim();
-      await handleRebuildFromTranscript(false, updatedTranscript);
     },
     [
       projectState.shots,
