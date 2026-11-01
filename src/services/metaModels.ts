@@ -384,7 +384,8 @@ export class MetaModelClient {
       }
     }
 
-    if (Object.keys(parsedDescriptions).length === 0) {
+    // Without a planned shot list, each line of the direction becomes a shot description.
+    if (!plannedShots && Object.keys(parsedDescriptions).length === 0) {
       const lines = transcript
         .split(/[\r\n]+/)
         .map((l) => l.trim())
