@@ -7,6 +7,8 @@ class AccessibleAudioService {
   private audioCtx: AudioContext | null = null;
   private isMuted: boolean = false;
   private speechRate: number = 1.05;
+  // Narration is kept quieter than full scale so it sits under the user's own audio.
+  private narrationVolume: number = 0.5;
   private onSpeakingChange?: (speaking: boolean) => void;
   private serverVoice: string | null = null;
   private serverSession = '';
@@ -48,6 +50,7 @@ class AccessibleAudioService {
       if (generation !== this.speakGeneration || this.isMuted) return URL.revokeObjectURL(url);
       const audio = new Audio(url);
       audio.playbackRate = this.speechRate;
+      audio.volume = this.narrationVolume;
       const finish = () => {
         URL.revokeObjectURL(url);
         if (this.currentAudio === audio) this.currentAudio = null;
@@ -130,7 +133,7 @@ class AccessibleAudioService {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = this.speechRate;
       utterance.pitch = 1.0;
-      utterance.volume = 1.0;
+      utterance.volume = this.narrationVolume;
 
       const voices = window.speechSynthesis.getVoices();
       const localVoices = voices.filter(voice => voice.localService);
