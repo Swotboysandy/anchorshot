@@ -9,6 +9,12 @@ import {
   UserError,
   type CheckedInput,
 } from './sam';
+import { ImagerOutputError, type Imager } from './imager';
+import { readAudioDataUrl, TranscriberOutputError, type Transcriber } from './transcriber';
+import type { VoiceAgent } from './agent';
+import { AnimaticError, ffmpegAvailable, renderAnimatic, type AnimaticShot } from './animatic';
+import { MAX_NARRATION_TEXT, NarratorOutputError, type CachedNarrator } from './narrator';
+import { fixturePlanner, PlannerOutputError, type Planner } from './planner';
 import type { ContinuityEvidenceStatus, SegmentationResult } from '../src/types';
 
 interface Settings {
@@ -23,14 +29,30 @@ interface Options {
     signal: AbortSignal,
     revision?: number,
   ) => Promise<SegmentationResult>;
+  planner?: Planner;
+  imager?: Imager;
+  transcriber?: Transcriber;
+  narrator?: Pick<CachedNarrator, 'model' | 'voice' | 'cached' | 'speak'>;
+  narrationCharLimit?: number;
+  agent?: VoiceAgent;
+  renderAnimatic?: (shots: AnimaticShot[]) => Promise<Buffer>;
+  ffmpegAvailable?: () => Promise<boolean>;
 }
+
+const MAX_FRAMES = 48;
 
 export function createApp(options: Options) {
   const app = express();
   const sessionToken = randomBytes(24).toString('hex');
   const trackStore = new MaskTrackStore();
+  const planner = options.planner ?? fixturePlanner;
   let requestsUsed = 0;
   let active = false;
+  let imageActive = false;
+  let transcribeActive = false;
+  let narrationCharsUsed = 0;
+  let exportActive = false;
+  const frames = new Map<string, Buffer>();
 
   app.disable('x-powered-by');
   app.use('/api', (req, res, next) => {
@@ -53,6 +75,11 @@ export function createApp(options: Options) {
       requestsUsed,
       requestLimit: settings.requestLimit,
       tracksStored: trackStore.listTracks().length,
+      plannerLive: planner !== fixturePlanner,
+      imageModel: options.imager?.model ?? null,
+      transcribeModel: options.transcriber?.model ?? null,
+      narrationModel: options.narrator?.model ?? null,
+      agentReady: Boolean(options.agent),
     });
   });
 
@@ -313,9 +340,41 @@ export function createApp(options: Options) {
    * Meta Muse Voice Transcribe Endpoint: `POST /api/muse/transcribe`
    * Server-side gateway for `muse-voice-transcribe-1.0` with explicit offline fixture provenance.
    */
-  app.post('/api/muse/transcribe', (req, res) => {
+  app.post('/api/muse/transcribe', async (req, res, next) => {
     if (!hasValidSession(req))
       return res.status(403).json({ error: 'Refresh the page before transcribing.' });
+    if (req.body?.audio !== undefined) {
+      if (!options.transcriber)
+        return res.status(501).json({
+          error: 'No transcription model is connected. Set TRANSCRIBE_PROVIDER in .env.local.',
+        });
+      const clip = readAudioDataUrl(req.body.audio);
+      if (typeof clip === 'string') return res.status(400).json({ error: clip });
+      if (transcribeActive)
+        return res.status(409).json({ error: 'A recording is already being transcribed.' });
+      if (requestsUsed >= options.settings().requestLimit)
+        return res
+          .status(429)
+          .json({ error: 'The session request limit has been reached. No further call was sent.' });
+      transcribeActive = true;
+      const controller = new AbortController();
+      res.on('close', () => {
+        if (!res.writableEnded) controller.abort();
+      });
+      try {
+        requestsUsed++;
+        const result = await options.transcriber.transcribe(clip, controller.signal);
+        if (!controller.signal.aborted) res.json(result);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        if (error instanceof TranscriberOutputError)
+          return res.status(502).json({ error: error.message });
+        next(error);
+      } finally {
+        transcribeActive = false;
+      }
+      return;
+    }
     const text =
       typeof req.body?.text === 'string' && req.body.text.trim()
         ? req.body.text.trim()
@@ -340,7 +399,7 @@ export function createApp(options: Options) {
    * Meta Muse Spark Continuity Rule & Shot Planner Endpoint: `POST /api/muse/spark`
    * Extracts versioned `ContinuityRule` records (`ruleRevision`) from transcript text.
    */
-  app.post('/api/muse/spark', (req, res) => {
+  app.post('/api/muse/spark', async (req, res, next) => {
     if (!hasValidSession(req))
       return res.status(403).json({ error: 'Refresh the page before running shot planning.' });
     const transcript = typeof req.body?.transcript === 'string' ? req.body.transcript : '';
@@ -353,65 +412,180 @@ export function createApp(options: Options) {
       req.body.previousRevision >= 0
         ? Math.floor(req.body.previousRevision)
         : 0;
-    const nextRevision = previousRevision + 1;
-    const lower = transcript.toLowerCase();
-
-    const knownObjects = ['cup', 'mug', 'umbrella', 'jacket', 'coat'];
-    let targetObject = 'cup';
-    for (const obj of knownObjects) {
-      if (lower.includes(obj)) {
-        targetObject = obj === 'mug' ? 'cup' : obj === 'coat' ? 'jacket' : obj;
-        break;
-      }
+    try {
+      res.json(await planner.plan(transcript, previousRevision + 1));
+    } catch (error) {
+      if (error instanceof PlannerOutputError) return res.status(502).json({ error: error.message });
+      next(error);
     }
+  });
 
-    const knownColors = [
-      'emerald',
-      'green',
-      'amber',
-      'yellow',
-      'gold',
-      'blue',
-      'cobalt',
-      'red',
-      'crimson',
-      'white',
-      'purple',
-      'cyan',
-    ];
-    let expectedValue = 'blue';
-    const ruleSentence = transcript.split('.')[0]?.toLowerCase() || lower;
-    for (const col of knownColors) {
-      if (ruleSentence.includes(col)) {
-        expectedValue =
-          col === 'cobalt'
-            ? 'blue'
-            : col === 'crimson'
-              ? 'red'
-              : col === 'yellow' || col === 'gold'
-                ? 'amber'
-                : col === 'green'
-                  ? 'emerald'
-                  : col;
-        break;
-      }
-    }
-
-    res.json({
-      model: 'muse-spark-1.3',
-      provenance: 'offline-fixture',
-      ruleRevision: nextRevision,
-      rules: [
-        {
-          id: `rule-${targetObject}-color`,
-          scope: 'all_shots',
-          targetObject,
-          property: 'color',
-          expectedValue,
-          revision: nextRevision,
-        },
-      ],
+  /**
+   * Storyboard frame endpoint: `POST /api/muse/image`
+   * Uses the configured imager; each frame is checked as SAM input before it is returned.
+   * Shares the session request limit with SAM, so paid calls stay bounded.
+   */
+  app.post('/api/muse/image', async (req, res, next) => {
+    if (!hasValidSession(req))
+      return res.status(403).json({ error: 'Refresh the page before generating a frame.' });
+    if (!options.imager)
+      return res.status(501).json({
+        error: 'No image model is connected. Set IMAGE_PROVIDER in .env.local, or keep the offline frames.',
+      });
+    const { prompt, targetObject, seed } = req.body ?? {};
+    if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 2000)
+      return res.status(400).json({ error: 'Describe the shot in up to 2000 characters.' });
+    if (typeof targetObject !== 'string' || !targetObject.trim() || targetObject.length > 100)
+      return res.status(400).json({ error: 'Name the object to keep continuous, such as cup.' });
+    if (imageActive)
+      return res.status(409).json({ error: 'A frame is already generating. Wait for it to finish.' });
+    if (requestsUsed >= options.settings().requestLimit)
+      return res
+        .status(429)
+        .json({ error: 'The session request limit has been reached. No further call was sent.' });
+    imageActive = true;
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
     });
+    try {
+      requestsUsed++;
+      const frame = await options.imager.generate(
+        {
+          prompt: prompt.trim(),
+          targetObject: targetObject.trim(),
+          seed: Number.isInteger(seed) ? seed : 0,
+        },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      const { image, ...details } = frame;
+      // Keep the latest frames by content hash; the browser loads them by URL.
+      frames.set(frame.sourceHash, Buffer.from(image.slice(image.indexOf(',') + 1), 'base64'));
+      if (frames.size > MAX_FRAMES) frames.delete(frames.keys().next().value!);
+      res.json({ ...details, url: `/api/muse/frames/${frame.sourceHash}.png` });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (error instanceof ImagerOutputError) return res.status(502).json({ error: error.message });
+      next(error);
+    } finally {
+      imageActive = false;
+    }
+  });
+
+  app.get('/api/muse/frames/:file', (req, res) => {
+    const frame = frames.get(/^([a-f0-9]{64})\.png$/.exec(req.params.file)?.[1] ?? '');
+    if (!frame) return res.status(404).json({ error: 'This generated frame is no longer available.' });
+    res.type('png').send(frame);
+  });
+
+  /**
+   * Narration endpoint: `POST /api/muse/speak` returns MP3 for the given text.
+   * Cached clips are free; new text counts against a per-session character budget.
+   */
+  const withinNarrationBudget = (text: string) =>
+    !!options.narrator &&
+    (options.narrator.cached(text) ||
+      narrationCharsUsed + text.length <= (options.narrationCharLimit ?? 20_000));
+  const narrate = (text: string, signal?: AbortSignal) => {
+    if (!options.narrator!.cached(text)) narrationCharsUsed += text.length;
+    return options.narrator!.speak(text, signal);
+  };
+
+  app.post('/api/muse/speak', async (req, res, next) => {
+    if (!hasValidSession(req))
+      return res.status(403).json({ error: 'Refresh the page before narration.' });
+    if (!options.narrator)
+      return res.status(501).json({ error: 'No narration voice is connected. The browser voice is used.' });
+    const text = typeof req.body?.text === 'string' ? req.body.text.replace(/\s+/g, ' ').trim() : '';
+    if (!text || text.length > MAX_NARRATION_TEXT)
+      return res.status(400).json({ error: `Narrate between 1 and ${MAX_NARRATION_TEXT} characters.` });
+    if (!withinNarrationBudget(text))
+      return res
+        .status(429)
+        .json({ error: 'The session narration budget has been reached. The browser voice is used.' });
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+    try {
+      const audio = await narrate(text, controller.signal);
+      if (!controller.signal.aborted) res.type('audio/mpeg').send(audio);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (error instanceof NarratorOutputError) return res.status(502).json({ error: error.message });
+      next(error);
+    }
+  });
+
+  /**
+   * Voice agent endpoint: `POST /api/agent/session` returns a signed link for one
+   * conversation. Each link counts against the session request limit.
+   */
+  app.post('/api/agent/session', async (req, res, next) => {
+    if (!hasValidSession(req))
+      return res.status(403).json({ error: 'Refresh the page before talking to the agent.' });
+    if (!options.agent)
+      return res.status(501).json({ error: 'No voice agent is connected. Set AGENT_PROVIDER in .env.local.' });
+    if (requestsUsed >= options.settings().requestLimit)
+      return res
+        .status(429)
+        .json({ error: 'The session request limit has been reached. No further call was sent.' });
+    try {
+      requestsUsed++;
+      res.json({ signedUrl: await options.agent.signedUrl() });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Animatic export: `POST /api/export/animatic` with shots of
+   * `{image: data URL, seconds, narration?}` returns an H.264/AAC MP4. Narration uses
+   * the connected voice within its budget; shots without it stay silent.
+   */
+  app.post('/api/export/animatic', async (req, res, next) => {
+    if (!hasValidSession(req))
+      return res.status(403).json({ error: 'Refresh the page before exporting.' });
+    const shots = Array.isArray(req.body?.shots) ? req.body.shots : [];
+    if (!shots.length || shots.length > 12)
+      return res.status(400).json({ error: 'Export between 1 and 12 shots.' });
+    const parsed: AnimaticShot[] = [];
+    for (const shot of shots) {
+      const image =
+        typeof shot?.image === 'string'
+          ? /^data:image\/(?:png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(shot.image)?.[1]
+          : undefined;
+      const seconds = Number(shot?.seconds);
+      if (!image || !(seconds >= 0.5 && seconds <= 15))
+        return res.status(400).json({ error: 'Each shot needs a PNG, JPEG or WebP frame and 0.5 to 15 seconds.' });
+      parsed.push({ image: Buffer.from(image, 'base64'), seconds });
+    }
+    if (!(await (options.ffmpegAvailable ?? ffmpegAvailable)()))
+      return res.status(501).json({ error: 'MP4 export needs ffmpeg on this computer.' });
+    if (exportActive) return res.status(409).json({ error: 'An export is already running.' });
+    exportActive = true;
+    try {
+      let narrated = 0;
+      for (const [i, shot] of shots.entries()) {
+        const text = typeof shot.narration === 'string' ? shot.narration.replace(/\s+/g, ' ').trim() : '';
+        if (!text || text.length > MAX_NARRATION_TEXT || !withinNarrationBudget(text)) continue;
+        try {
+          parsed[i].narration = await narrate(text);
+          narrated++;
+        } catch {
+          /* A shot whose narration fails is exported silent rather than failing the film. */
+        }
+      }
+      const video = await (options.renderAnimatic ?? renderAnimatic)(parsed);
+      res.setHeader('X-Anchorshot-Narrated-Shots', String(narrated));
+      res.type('video/mp4').send(video);
+    } catch (error) {
+      if (error instanceof AnimaticError) return res.status(500).json({ error: 'The MP4 could not be encoded.' });
+      next(error);
+    } finally {
+      exportActive = false;
+    }
   });
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API endpoint.' }));

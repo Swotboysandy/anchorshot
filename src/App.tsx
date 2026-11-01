@@ -1,6 +1,6 @@
 import {loadLocal,saveLocal} from './services/projectStorage';
 import {CleanStudio} from './components/CleanStudio';
-import {isLocalImage} from './services/localGeneration';
+import {isGeneratedImage, isLocalImage} from './services/localGeneration';
 import { useReducedMotion } from 'motion/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -12,6 +12,7 @@ import {
 } from './types/framelock';
 import { DIRECTOR_PRESETS, metaModelClient } from './services/metaModels';
 import { speechService } from './services/speechService';
+import { exportAnimaticMp4 } from './services/animaticExport';
 import { speechRecognitionService } from './services/speechRecognitionService';
 import {
   exportStoryboardAnimaticVideo,
@@ -42,6 +43,7 @@ export default function App() {
   const [sessionProjects, setSessionProjects] = useState<ProjectState[]>([]);
   const [storageReady,setStorageReady]=useState(false);
   const [storageStatus,setStorageStatus]=useState('Loading local projects...');
+  useEffect(()=>{void speechRecognitionService.connectBackend();void speechService.connectBackend();},[]);
   useEffect(()=>{let alive=true;loadLocal<{active:string;projects:ProjectState[]}>('library').then(saved=>{
     if(!alive)return;if(saved?.projects?.length){const clean=saved.projects.map(item=>({...item,isProcessing:false,isRecording:false,isPlayingAnimatic:false}));setSessionProjects(clean);setProjectState(clean.find(item=>item.projectId===saved.active)||clean[0]);}setStorageReady(true);setStorageStatus('Saved locally');
   }).catch(()=>{if(alive)setStorageStatus('Local storage could not be opened. Reload to retry; existing data has not been overwritten.');});return()=>{alive=false};},[]);
@@ -159,11 +161,21 @@ export default function App() {
           'Running muse-spark-1.3 shot planner and muse-image-1.0 storyboard synthesis...',
       }));
 
-      const { rules, shots } = await metaModelClient.generateStoryboardFromTranscript(
-        targetTranscript,
-        undefined,
-        injectDiscrepancy
-      );
+      let rules: ContinuityRule[];
+      let shots: StoryboardShot[];
+      try {
+        ({ rules, shots } = await metaModelClient.generateStoryboardFromTranscript(
+          targetTranscript,
+          undefined,
+          injectDiscrepancy
+        ));
+      } catch (error) {
+        const message = `Storyboard generation failed: ${(error as Error).message}`;
+        speechService.playEarcon('mismatch');
+        setProjectState((prev) => ({ ...prev, isProcessing: false, statusAnnouncement: message }));
+        speechService.speak(message, true);
+        return;
+      }
 
       const mismatchShot = shots.find((s) => s.status === 'mismatch');
       speechService.playEarcon(mismatchShot ? 'mismatch' : 'consistent');
@@ -207,8 +219,8 @@ export default function App() {
     async (shotId: string, customColor?: string) => {
       const targetShot = projectState.shots.find((s) => s.id === shotId);
       if (!targetShot) return;
-      if (isLocalImage(targetShot.currentImageUrl)) {
-        announceStatus('Local AI image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.', true);
+      if (isGeneratedImage(targetShot.currentImageUrl)) {
+        announceStatus('Generated image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.', true);
         return;
       }
 
@@ -278,8 +290,8 @@ export default function App() {
     async (shotId: string, targetObject: string) => {
       const targetShot = projectState.shots.find((s) => s.id === shotId);
       if (!targetShot) return;
-      if (isLocalImage(targetShot.currentImageUrl)) {
-        announceStatus('Local AI image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.', true);
+      if (isGeneratedImage(targetShot.currentImageUrl)) {
+        announceStatus('Generated image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.', true);
         return;
       }
 
@@ -341,7 +353,7 @@ export default function App() {
             ? {
                 ...s,
                 currentImageUrl: rev.imageUrl,
-                status: isLocalImage(rev.imageUrl) ? 'uncertain' : isInitialMismatch ? 'mismatch' : 'consistent',
+                status: isGeneratedImage(rev.imageUrl) ? 'uncertain' : isInitialMismatch ? 'mismatch' : 'consistent',
                 proposedFix: undefined,
                 pixelVerification: rev.pixelVerification,
                 discrepancyMessage: isInitialMismatch
@@ -361,10 +373,10 @@ export default function App() {
     (shotId: string, newPrompt: string, newDuration: number) => {
       const targetShot = projectState.shots.find((s) => s.id === shotId);
       if (!targetShot) return;
-      if (isLocalImage(targetShot.currentImageUrl)) {
+      if (isGeneratedImage(targetShot.currentImageUrl)) {
         setProjectState(prev => ({...prev, shots: prev.shots.map(shot => shot.id === shotId ? {
           ...shot, promptDescription: newPrompt, durationSeconds: newDuration,
-          spokenDescription: `Shot ${shot.shotNumber}. ${newPrompt}. Local AI image, continuity unreviewed.`,
+          spokenDescription: `Shot ${shot.shotNumber}. ${newPrompt}. Generated image, continuity unreviewed.`,
         } : shot)}));
         return;
       }
@@ -460,7 +472,7 @@ export default function App() {
       // Re-audit all shots against the new expected color
       const updatedShots: StoryboardShot[] = [];
       for (const shot of projectState.shots) {
-        if (isLocalImage(shot.currentImageUrl)) { updatedShots.push({...shot, status: 'uncertain', proposedFix: undefined}); continue; }
+        if (isGeneratedImage(shot.currentImageUrl)) { updatedShots.push({...shot, status: 'uncertain', proposedFix: undefined}); continue; }
         const mask =
           shot.proposedFix?.mask ||
           (await metaModelClient.segmentObjectWithSam3(shot.shotNumber, targetObject));
@@ -814,11 +826,12 @@ export default function App() {
     announceStatus('Exported Anchorshot storyboard and continuity report JSON.', true);
   }, [projectState, announceStatus, transitionsEnabled, reducedMotion]);
 
-  // Export Animatic Video (.webm)
+  // Export Animatic Video: narrated MP4 from the server, silent browser WebM as fallback
   const handleExportAnimaticVideo = useCallback(async () => {
     setIsExportingVideo(true);
-    announceStatus('Rendering 4-shot Anchorshot animatic video...', false);
-    const blob = await exportStoryboardAnimaticVideo(projectState.shots, projectState.title);
+    announceStatus('Rendering narrated MP4 animatic...', false);
+    const mp4 = await exportAnimaticMp4(projectState.shots);
+    const blob = mp4?.video ?? (await exportStoryboardAnimaticVideo(projectState.shots, projectState.title));
     setIsExportingVideo(false);
     if (!blob) {
       announceStatus('Video export requires a browser supporting HTML5 Canvas MediaRecorder.', true);
@@ -827,10 +840,15 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${projectState.projectId}-animatic.webm`;
+    a.download = `${projectState.projectId}-animatic.${mp4 ? 'mp4' : 'webm'}`;
     a.click();
     URL.revokeObjectURL(url);
-    announceStatus('Exported Anchorshot 4-shot animatic video.', true);
+    announceStatus(
+      mp4
+        ? `Exported MP4 animatic with narration on ${mp4.narratedShots} of ${projectState.shots.length} shots.`
+        : 'MP4 export unavailable. Exported a silent WebM animatic instead.',
+      true
+    );
   }, [projectState.shots, projectState.title, projectState.projectId, announceStatus]);
 
   const handleToggleBeforeComparison = useCallback(() => {

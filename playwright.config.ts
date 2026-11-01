@@ -7,7 +7,7 @@ export default defineConfig({
   workers: 1,
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:4317',
+    baseURL: 'http://127.0.0.1:4327',
     channel: process.env.PLAYWRIGHT_CHANNEL || 'msedge',
     headless: true,
     viewport: { width: 1440, height: 1080 },
@@ -16,10 +16,20 @@ export default defineConfig({
       args: ['--disable-gpu', '--no-sandbox'],
     },
   },
+  // Tests get their own offline server: a separate port so a live `npm run dev` is never
+  // reused, and empty model settings so keys in .env.local are never called.
   webServer: {
-    command: 'npm run dev',
-    url: 'http://127.0.0.1:4317/api/health',
-    reuseExistingServer: true,
+    command: 'npx vite --port=4327 --host=127.0.0.1 --strictPort',
+    url: 'http://127.0.0.1:4327/api/health',
+    reuseExistingServer: false,
     timeout: 60_000,
+    env: {
+      META_API_KEY: '',
+      PLANNER_PROVIDER: '',
+      IMAGE_PROVIDER: '',
+      TRANSCRIBE_PROVIDER: '',
+      NARRATION_PROVIDER: '',
+      AGENT_PROVIDER: '',
+    },
   },
 });

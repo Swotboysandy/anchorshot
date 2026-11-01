@@ -34,5 +34,17 @@
     "source": "https://ui.shadcn.com/r/styles/new-york/tooltip.json",
     "sourceSha256": "ce6afa34fb9dae51053a863b4c3f7c6e55f3da23b00149f31a8e4402bc963be0",
     "adaptation": "Import paths only; component markup and classes unchanged."
+  },
+  {
+    "file": "src\\components\\ui\\conversation.tsx",
+    "source": "https://github.com/elevenlabs/ui/blob/3a28ebab197f8cfa599934f52db12ad1396e54f4/apps/www/registry/elevenlabs-ui/ui/conversation.tsx",
+    "sourceSha256": "34009c4515b2b3c0cc8454c75c993e40509bf06f9ba5afd11eb1d15005b3d54d",
+    "adaptation": "Import paths only; component markup and classes unchanged."
+  },
+  {
+    "file": "src\\components\\ui\\message.tsx",
+    "source": "https://github.com/elevenlabs/ui/blob/3a28ebab197f8cfa599934f52db12ad1396e54f4/apps/www/registry/elevenlabs-ui/ui/message.tsx",
+    "sourceSha256": "bf8a16fb7b9a1a8046caa062f591a41a5d9921622e24575c8a4281d19731fdaf",
+    "adaptation": "Import paths only; MessageAvatar omitted because it needs the upstream Avatar primitive. Message and MessageContent unchanged."
   }
 ]

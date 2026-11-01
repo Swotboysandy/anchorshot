@@ -1,76 +1,81 @@
 # Anchorshot — Accessible Voice-Directed Storyboard Studio
 
-**Anchorshot** is a WCAG 2.2 AAA accessible, voice-directed storyboard and continuity studio designed for blind, low-vision, and multimodal filmmakers for the Meta Global AI Developer Hackathon.
+**Anchorshot** lets a blind or low-vision director build a film storyboard entirely by voice and keep it visually consistent without having to see it. Built for the Meta Global AI Developer Hackathon (Indie Developer track).
 
-It combines natural voice direction, real-time spoken screen narration (`window.speechSynthesis`), spatial Web Audio API earcons, and an HTML5 Canvas + SAM 3.1 segmentation engine to detect and fix visual continuity discrepancies across storyboard sequences without requiring visual reliance.
-
----
-
-## 1. Architecture & Meta AI Model Stack
-
-Anchorshot orchestrates four Meta AI model capabilities alongside browser speech and canvas engines:
-
-| Model Identifier | Environment Variable | Role in Anchorshot Pipeline |
-| :--- | :--- | :--- |
-| **`muse-voice-transcribe-1.0`** | `VITE_MUSE_VOICE_MODEL` | Converts live microphone audio streams (`MediaRecorder`) and voice commands into structured scene transcripts. |
-| **`muse-spark-1.3`** | `VITE_MUSE_SPARK_MODEL` | Extracts structured `ContinuityRule` JSON objects, plans shot lists from transcripts, and runs multimodal visual continuity audits. |
-| **`muse-image-1.0`** | `VITE_MUSE_IMAGE_MODEL` | Synthesizes storyboard frames across camera angles (`wide`, `medium`, `closeup`, `over_shoulder`) with deterministic reference seeds. |
-| **`sam-3.1`** | `VITE_SAM3_MODEL` | Generates object segmentation masks (`SamMask` with bounding box, confidence score, and alpha mask) to isolate target props and perform client-side pixel recoloring. |
-| **Web Speech & Audio API** | Browser Native | Provides interruptible spoken descriptions (`window.speechSynthesis`), `aria-live="polite"` telemetry, and distinct tonal earcons for focus, continuity verification, and discrepancy alerts. |
+**The moat:** other tools generate frames; Anchorshot proves continuity. Every prop that must stay the same ("the cup is blue in every shot") becomes a rule. SAM masks locate the prop, a mismatch is spoken aloud, the fix recolours only the masked pixels, and an evidence trail records the source hash, mask provenance and how many pixels changed inside and outside the mask. Accessibility is the core of the product, not an add-on: voice in, spoken narration and on-screen captions out, full keyboard control.
 
 ---
 
-## 2. Environment Variables Setup
+## 1. What runs on which model
 
-Copy `.env.example` to `.env` in the project root and configure your Meta AI API credentials:
+Each AI role sits behind a small provider adapter on the local server. Prompts and output schemas live in the app, every model's reply is validated against the same schema, and swapping a model is a `.env.local` change. With nothing configured, every role falls back to an offline fixture so the whole app runs without keys.
 
-```bash
-cp .env.example .env
-```
+| Role | Server endpoint | Live provider used in this build | Offline fallback |
+| :--- | :--- | :--- | :--- |
+| Shot planning and continuity rules | `POST /api/muse/spark` | **Meta `muse-spark-open-1026`** via the Baseten x Meta hackathon endpoint (any OpenAI-compatible chat model works) | Keyword planner |
+| Object segmentation | `POST /api/segment`, `/api/segment/check` | Meta `sam-3.1` gateway when `META_API_KEY` is set (not yet verified live) | Fixture masks, clearly labelled "offline fixture" |
+| Storyboard frames | `POST /api/muse/image` | Any OpenAI-compatible `/images/generations` endpoint; frames are checked as SAM input and marked unreviewed | Canvas-drawn sample frames |
+| Voice to script | `POST /api/muse/transcribe` | ElevenLabs Scribe v2 (or any Whisper-compatible endpoint) | Browser speech recognition |
+| Spoken narration | `POST /api/muse/speak` | ElevenLabs premade voice, Flash model; each sentence cached so it is paid for once, per-session character budget | Browser `speechSynthesis` |
+| Voice co-director | `POST /api/agent/session` | ElevenLabs Agent on the orb, server-signed link, studio actions as client tools, live captions | Orb meters the microphone locally |
+| Film export | `POST /api/export/animatic` | Local ffmpeg: narrated 1280x720 H.264/AAC MP4, each shot held until its narration ends | Silent browser WebM |
 
-### `.env` Configuration Reference
+Only the planner currently runs on a Meta model in a verified live call. The image, voice and SAM roles are ready for Meta endpoints but need keys this build does not have.
+
+---
+
+## 2. Configuration (`.env.local`)
+
+Copy `.env.example` to `.env.local` (git-ignored) and fill only the roles you want live. API keys stay on the local server and are never sent to the browser.
 
 ```dotenv
-# Meta AI Model API Credentials
-VITE_META_AI_API_KEY="your_meta_ai_api_key_here"
-VITE_META_API_BASE_URL="https://api.meta.ai/v1"
+# Meta muse-spark through the Baseten x Meta hackathon endpoint
+PLANNER_PROVIDER="openai-compatible"
+PLANNER_BASE_URL="https://inference.baseten.co/v1"
+PLANNER_API_KEY="<your hackathon key>"
+PLANNER_MODEL="meta-models/muse-spark-open-1026"
 
-# Meta AI Model Identifiers
-VITE_MUSE_VOICE_MODEL="muse-voice-transcribe-1.0"
-VITE_MUSE_SPARK_MODEL="muse-spark-1.3"
-VITE_MUSE_IMAGE_MODEL="muse-image-1.0"
-VITE_SAM3_MODEL="sam-3.1"
+# Meta SAM 3.1 gateway
+META_API_KEY=""
+
+# ElevenLabs: dictation, narration and the voice agent
+ELEVENLABS_API_KEY=""
+TRANSCRIBE_PROVIDER="elevenlabs"
+NARRATION_PROVIDER="elevenlabs"
+AGENT_PROVIDER="elevenlabs"
+ELEVENLABS_AGENT_ID=""
+
+# Optional image model (OpenAI-compatible)
+IMAGE_PROVIDER=""
+IMAGE_BASE_URL=""
+IMAGE_API_KEY=""
+IMAGE_MODEL=""
 ```
 
-> **Offline / Zero-Key Evaluation Mode:** If `VITE_META_AI_API_KEY` is left unset or set to `"mock"`, Anchorshot automatically runs using its built-in deterministic HTML5 Canvas generator, SAM 3.1 mask synthesizer, and client-side pixel manipulation engine so all workflows can be tested live out-of-the-box.
+`.env.example` documents the remaining settings, including `NARRATION_VOICE_ID`, `NARRATION_MODEL` and `IMAGE_SIZE`. Paid calls share a per-session request limit (`SAM_MAX_REQUESTS`, default 25 under `npm run dev`), and narration has its own character budget.
 
 ---
 
-## 3. Installation & Running Locally
+## 3. Running locally
 
-### Prerequisites
-- **Node.js** v18+ and **npm**
+**Prerequisites:** Node.js 22.12 or newer and npm. MP4 export needs `ffmpeg` and `ffprobe` on `PATH`; without them the app exports a silent WebM.
 
-### Step-by-Step Instructions
+```bash
+npm install
+npm run dev
+```
 
-1. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+Open http://127.0.0.1:4317. `npm run dev` and `npm run dev:server` both load the providers from `.env.local`.
 
-2. **Configure environment variables:**
-   Create a `.env` file (or configure secrets in the AI Studio Secrets panel) using the keys listed in `.env.example`.
+**Checks:**
 
-3. **Start the development server (runs locally on port 4317):**
-   ```bash
-   npm run dev
-   ```
+```bash
+npm run typecheck
+npm test
+npm run test:e2e
+```
 
-4. **Type-check and build for production:**
-   ```bash
-   npm run lint
-   npm run build
-   ```
+Browser tests start their own server on port 4327 with every model provider switched off, so they never call a paid service.
 
 ---
 

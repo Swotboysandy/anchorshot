@@ -14,6 +14,29 @@ import {
   renderMuseStoryboardFrame,
   SceneRenderSpec,
 } from './canvasEngine';
+import { buildShotPrompt, normalizeShot, type ShotSize, type ShotSpec } from '../lib/shotLanguage';
+
+export type PlannedShot = ShotSpec & { seconds: number };
+
+/** The canvas sample renderer only knows four framings; map planned sizes onto them. */
+function canvasFraming(size: ShotSize): SceneRenderSpec['cameraAngle'] {
+  if (size === 'Over-shoulder') return 'over_shoulder';
+  if (size === 'Close' || size === 'Extreme close' || size === 'Insert') return 'closeup';
+  if (size === 'Medium' || size === 'Two-shot') return 'medium';
+  return 'wide';
+}
+
+const SEQUENCE_SIZES: Record<SceneRenderSpec['cameraAngle'], ShotSize> = {
+  wide: 'Wide',
+  medium: 'Medium',
+  closeup: 'Close',
+  over_shoulder: 'Over-shoulder',
+};
+
+/** Spoken framing, e.g. "close shot, low angle on 85mm, push in, golden hour light". */
+function describeFraming(shot: ShotSpec): string {
+  return `${shot.size.toLowerCase()} shot, ${shot.angle.toLowerCase()} angle on ${shot.lens}, ${shot.movement === 'Locked' ? 'locked camera' : shot.movement.toLowerCase()}, ${shot.light.toLowerCase()} light`;
+}
 
 export const DIRECTOR_PRESETS: DirectorPresetScenario[] = [
   {
@@ -162,6 +185,8 @@ export class MetaModelClient {
    * 2A. `muse-spark-1.3` — Continuity Rule Extraction (Structured JSON Output)
    */
   public async extractContinuityRules(transcript: string): Promise<ContinuityRule[]> {
+    const live = await this.planWithServer(transcript);
+    if (live) return live.rules;
     await new Promise((r) => setTimeout(r, 240));
     const lower = transcript.toLowerCase();
 
@@ -221,6 +246,52 @@ export class MetaModelClient {
   }
 
   /**
+   * Uses the server's connected planner (for example Meta muse-spark through Baseten).
+   * Returns null when only the offline fixture is available or the call fails, so the
+   * local keyword planner still answers.
+   */
+  private async planWithServer(transcript: string): Promise<{ rules: ContinuityRule[]; shots?: PlannedShot[] } | null> {
+    if (typeof fetch !== 'function') return null;
+    try {
+      const health = await (await fetch('/api/health')).json();
+      if (health?.plannerLive !== true) return null;
+      const res = await fetch('/api/muse/spark', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Anchorshot-Session': String(health.sessionToken ?? '') },
+        body: JSON.stringify({ transcript, previousRevision: 0 }),
+      });
+      const plan = await res.json();
+      if (!res.ok || !Array.isArray(plan.rules) || !plan.rules.length) return null;
+      const rules: ContinuityRule[] = plan.rules;
+      const anchor = rules[0].targetObject;
+      this.recordCall(
+        'muse-spark-1.3',
+        'extractContinuityRules',
+        `${plan.model} extracted ${rules.map((r) => `${r.targetObject}.color = "${r.expectedValue}"`).join(', ')}`
+      );
+      const shots: PlannedShot[] | undefined = Array.isArray(plan.shots) && plan.shots.length
+        ? plan.shots.map((shot: Record<string, unknown>) => ({ ...normalizeShot(shot), seconds: Number(shot.seconds) || 4 }))
+        : undefined;
+      return {
+        rules: [
+          ...rules,
+          {
+            id: `rule-${anchor}-presence`,
+            scope: 'all_shots',
+            targetObject: anchor,
+            property: 'spatial_anchor',
+            expectedValue: 'foreground_counter',
+            revision: plan.ruleRevision,
+          },
+        ],
+        shots,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * 2B & 3 & 4. `muse-spark-1.3` + `muse-image-1.0` + `sam-3.1`
    * Generates structured shot list from director transcript, synthesizes frames with `muse-image-1.0`,
    * and runs initial multimodal audit + `sam-3.1` segmentation on any continuity discrepancy.
@@ -230,9 +301,14 @@ export class MetaModelClient {
     existingRules?: ContinuityRule[],
     injectIntentionalDiscrepancy: boolean = true
   ): Promise<{ rules: ContinuityRule[]; shots: StoryboardShot[] }> {
+    // The planner model, when connected, also chooses the shot list; otherwise the
+    // classic four-angle sequence is used.
+    const plan = existingRules && existingRules.length > 0 ? null : await this.planWithServer(transcript);
     const rules = existingRules && existingRules.length > 0
       ? existingRules
-      : await this.extractContinuityRules(transcript);
+      : plan?.rules ?? (await this.extractContinuityRules(transcript));
+    const plannedShots = plan?.shots;
+    const shotCount = plannedShots?.length ?? 4;
 
     const primaryRule = rules[0] || {
       id: 'rule-cup-color',
@@ -272,12 +348,23 @@ export class MetaModelClient {
       }
     }
 
+    const health = await this.getSamBackendHealth();
+    if (health?.imageModel) {
+      return {
+        rules,
+        shots: await this.generateModelFrames(health.imageModel, rules, cameraSequence, parsedDescriptions, plannedShots),
+      };
+    }
+
     const mismatchShotNumber = targetObject === 'umbrella' ? 3 : 2;
     const shots: StoryboardShot[] = [];
 
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < shotCount; i++) {
       const shotNumber = i + 1;
-      const cameraAngle = cameraSequence[i % cameraSequence.length];
+      const planned = plannedShots?.[i];
+      const cameraAngle = planned ? canvasFraming(planned.size) : cameraSequence[i % cameraSequence.length];
+      const framing = planned ? describeFraming(planned) : `${cameraAngle.replace('_', ' ')} framing`;
+      const durationSeconds = planned?.seconds ?? (shotNumber === 1 ? 4.0 : 3.5);
       const hasDiscrepancy = injectIntentionalDiscrepancy && shotNumber === mismatchShotNumber;
       const isUncertainOcclusion =
         injectIntentionalDiscrepancy && targetObject === 'jacket' && shotNumber === 4;
@@ -285,6 +372,7 @@ export class MetaModelClient {
 
       const basePrompt =
         parsedDescriptions[shotNumber] ||
+        planned?.subject ||
         `${cameraAngle.replace('_', ' ')} shot featuring the detective and the ${actualRenderedColor} ${targetObject} on the counter`;
 
       const { imageUrl, box } = renderMuseStoryboardFrame({
@@ -322,15 +410,15 @@ export class MetaModelClient {
         : 'consistent';
 
       const spokenDescription = hasDiscrepancy
-        ? `Shot ${shotNumber}, ${cameraAngle.replace('_', ' ')} framing, duration 3.5 seconds. ${basePrompt}. Continuity Alert: ${targetObject} rendered in ${actualRenderedColor} instead of expected ${expectedColor}. Press Y to apply SAM 3.1 mask recolor to ${expectedColor}.`
+        ? `Shot ${shotNumber}, ${framing}, duration ${durationSeconds} seconds. ${basePrompt}. Continuity Alert: ${targetObject} rendered in ${actualRenderedColor} instead of expected ${expectedColor}. Press Y to apply SAM 3.1 mask recolor to ${expectedColor}.`
         : isUncertainOcclusion
-        ? `Shot ${shotNumber}, ${cameraAngle.replace('_', ' ')} framing, duration 3.5 seconds. ${basePrompt}. Continuity Uncertain: partial foreground occlusion on ${targetObject} (72.4% confidence). Press Y to confirm SAM 3.1 mask and lock ${expectedColor}.`
-        : `Shot ${shotNumber}, ${cameraAngle.replace('_', ' ')} framing, duration 3.5 seconds. ${basePrompt}. Continuity verified: ${targetObject} color is ${expectedColor}.`;
+        ? `Shot ${shotNumber}, ${framing}, duration ${durationSeconds} seconds. ${basePrompt}. Continuity Uncertain: partial foreground occlusion on ${targetObject} (72.4% confidence). Press Y to confirm SAM 3.1 mask and lock ${expectedColor}.`
+        : `Shot ${shotNumber}, ${framing}, duration ${durationSeconds} seconds. ${basePrompt}. Continuity verified: ${targetObject} color is ${expectedColor}.`;
 
       shots.push({
         id: `shot-${shotNumber}`,
         shotNumber,
-        durationSeconds: shotNumber === 1 ? 4.0 : 3.5,
+        durationSeconds,
         promptDescription: basePrompt,
         spokenDescription,
         currentImageUrl: imageUrl,
@@ -368,7 +456,7 @@ export class MetaModelClient {
         revisions: [
           {
             revisionId: `rev-${shotNumber}-initial`,
-            timestamp: Date.now() - (4 - i) * 15000,
+            timestamp: Date.now() - (shotCount - i) * 15000,
             imageUrl,
             actionApplied: `Initial generation via muse-image-1.0 (${actualRenderedColor} ${targetObject})`,
             ruleRevision: primaryRule.revision,
@@ -385,6 +473,72 @@ export class MetaModelClient {
     );
 
     return { rules, shots };
+  }
+
+  /**
+   * Draws each shot with the image model connected on the server. Nothing is
+   * injected or assumed: frames stay `uncertain` until continuity is reviewed.
+   */
+  private async generateModelFrames(
+    model: string,
+    rules: ContinuityRule[],
+    cameraSequence: Array<SceneRenderSpec['cameraAngle']>,
+    descriptions: Record<number, string>,
+    plannedShots?: PlannedShot[]
+  ): Promise<StoryboardShot[]> {
+    const colourRules = rules.filter((r) => r.property === 'color');
+    const anchor = colourRules[0] ?? rules[0];
+    const shots: StoryboardShot[] = [];
+    const shotCount = plannedShots?.length ?? 4;
+    for (let i = 0; i < shotCount; i++) {
+      const shotNumber = i + 1;
+      const planned = plannedShots?.[i];
+      const fallbackAngle = cameraSequence[i % cameraSequence.length];
+      const subject =
+        descriptions[shotNumber] ||
+        planned?.subject ||
+        `${fallbackAngle.replace('_', ' ')} shot featuring the detective and the ${anchor.expectedValue} ${anchor.targetObject} on the counter`;
+      const shot = planned ? { ...planned, subject } : normalizeShot({ size: SEQUENCE_SIZES[fallbackAngle], subject });
+      const durationSeconds = planned?.seconds ?? (shotNumber === 1 ? 4.0 : 3.5);
+      const seed = shotNumber * 17;
+      const res = await fetch('/api/muse/image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Framelock-Session': this.sessionToken ?? '' },
+        body: JSON.stringify({
+          prompt: buildShotPrompt({ shot, continuity: colourRules }),
+          targetObject: anchor.targetObject,
+          seed,
+        }),
+      });
+      const frame = await res.json().catch(() => ({}));
+      if (!res.ok || typeof frame.url !== 'string')
+        throw new Error(frame.error || `Shot ${shotNumber} could not be generated.`);
+      this.recordCall(
+        'muse-image-1.0',
+        `generateFrame(Shot ${shotNumber})`,
+        `${model} drew ${frame.width}x${frame.height} frame [seed:${seed}, sha256:${String(frame.sourceHash).slice(0, 12)}]`
+      );
+      shots.push({
+        id: `shot-${shotNumber}`,
+        shotNumber,
+        durationSeconds,
+        promptDescription: subject,
+        spokenDescription: `Shot ${shotNumber}, ${describeFraming(shot)}, duration ${durationSeconds} seconds. ${subject}. Generated image; continuity unreviewed.`,
+        currentImageUrl: frame.url,
+        originalImageUrl: frame.url,
+        status: 'uncertain',
+        revisions: [
+          {
+            revisionId: `rev-${shotNumber}-initial`,
+            timestamp: Date.now(),
+            imageUrl: frame.url,
+            actionApplied: `Generated by ${model}; unreviewed`,
+            ruleRevision: anchor.revision,
+          },
+        ],
+      });
+    }
+    return shots;
   }
 
   /**
@@ -588,6 +742,7 @@ export class MetaModelClient {
     requestsUsed: number;
     requestLimit: number;
     tracksStored?: number;
+    imageModel?: string | null;
   } | null> {
     if (typeof fetch !== 'function') return null;
     try {
