@@ -2,7 +2,7 @@
 
 Before writing or changing nontrivial code, search this project and the closest indexed upstream reference with XERJ.
 
-1. Start if needed: `pwsh -File scripts/reference-coding.ps1 start`.
+1. Start if needed: `pwsh -File scripts/reference-coding.ps1 start`. Without PowerShell 7, use `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...`; add `-Endpoint http://127.0.0.1:9200` to use an already-running node.
 2. Refresh current code: `pwsh -File scripts/reference-coding.ps1 index -Corpus anchorshot`.
 3. Search local behavior: `pwsh -File scripts/reference-coding.ps1 search -Corpus anchorshot -Query "applyDreamSelections"`.
 4. Search a relevant peer: `pwsh -File scripts/reference-coding.ps1 search -Corpus ref-prompt-kit -Query "PromptInputTextarea"`.

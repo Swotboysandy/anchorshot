@@ -1,10 +1,10 @@
 /**
  * Turns a spoken or typed director command into a typed intent.
  *
- * Ported from BZcreativ's feat/claude-sam-meta (src/services/voiceCommandParser.ts).
- * Adapted to this app: only intents the studio can act on (no video modification,
- * generative edit or SAM segment commands yet), colours limited to the continuity
- * palette with cyan kept distinct, and shot numbers up to the planner's 8 shots.
+ * From BZcreativ's feat/claude-sam-meta (parse-then-switch voice router), merged
+ * with main's fixes: colours limited to the continuity palette with cyan kept
+ * distinct, shot numbers 1-8 including ordinals, narration only when the command
+ * itself asks for it, and a bare colour updating the current rule's object.
  */
 
 export type VoiceIntent =
@@ -12,9 +12,12 @@ export type VoiceIntent =
   | { kind: 'help' }
   | { kind: 'audit' }
   | { kind: 'narrate' }
-  | { kind: 'fix'; shotNumber?: number; color?: string }
+  | { kind: 'fix'; shotNumber?: number; color?: string; object?: string }
+  | { kind: 'segment'; object: string; shotNumber?: number }
   | { kind: 'recolor'; object?: string; color: string; shotNumber?: number }
-  | { kind: 'rule_update'; color: string }
+  | { kind: 'modify_video'; object: string; color: string }
+  | { kind: 'generative_edit'; prompt: string; object?: string }
+  | { kind: 'rule_update'; object?: string; color: string }
   | { kind: 'rebuild'; transcript: string };
 
 const COLOR_MAP: Record<string, string> = {
@@ -66,6 +69,14 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
   )
     return { kind: 'narrate' };
 
+  // "modify video cup to blue", "recolor video umbrella to amber", "track video car"
+  const video = lower.match(new RegExp(`\\b(?:modify|recolou?r|track)\\s+video\\s+(?:the\\s+)?([a-z0-9_-]+)(?:\\s+(?:to|into)\\s+(${COLORS}))?`));
+  if (video) return { kind: 'modify_video', object: cleanObject(video[1]), color: video[2] ? COLOR_MAP[video[2]] : 'emerald' };
+
+  // "generative edit: add steam to the cup", "inpaint: yellow flowers"
+  const edit = cleaned.match(/\b(?:generative\s+edit|inpaint|edit\s+frame|add\s+to\s+frame)\s*[:,-]?\s*(.+)/i);
+  if (edit) return { kind: 'generative_edit', prompt: edit[1].trim() };
+
   if (/^(?:fix|repair)\b/.test(lower)) {
     const color = lower.match(new RegExp(`\\b(?:to|into)\\s+(${COLORS})\\b`))?.[1];
     return { kind: 'fix', shotNumber: shotNumberIn(lower), color: color ? COLOR_MAP[color] : undefined };
@@ -84,6 +95,11 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
       color: COLOR_MAP[toColour[3]],
       shotNumber: toShot(toColour[2]) ?? shotNumberIn(lower),
     };
+
+  // "segment the cup", "detect the car in scene 2", "select umbrella in shot 1"
+  const segment = lower.match(new RegExp(`^(?:segment|detect|select|find|track)\\s+(?:the\\s+)?([a-z0-9_-]+)${shotClause}`));
+  if (segment && !/\b(?:to|into)\b/.test(lower))
+    return { kind: 'segment', object: cleanObject(segment[1]), shotNumber: toShot(segment[2]) ?? shotNumberIn(lower) };
 
   // A bare colour ("emerald", "set it to amber") updates the main rule; longer text is direction.
   if (cleaned.split(' ').length <= 4) {

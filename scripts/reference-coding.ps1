@@ -2,13 +2,14 @@
 param(
  [Parameter(Position=0)][ValidateSet('start','status','index','search')][string]$Action='status',
  [ValidateSet('anchorshot','ref-prompt-kit','ref-shadcn-ui','ref-opencut','ref-sam2','ref-motion','ref-beui','all')][string]$Corpus='anchorshot',
- [string]$Query,[switch]$DryRun
+ [string]$Query,[switch]$DryRun,
+ [string]$Endpoint='http://127.0.0.1:9237'
 )
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path $PSScriptRoot -Parent
 $cacheRoot=Join-Path (Split-Path $projectRoot -Parent) 'AnchorShot-reference-coding'
 $xerj=Join-Path $env:LOCALAPPDATA 'Programs/xerj/xerj.exe'
-$endpoint='http://127.0.0.1:9237'
+$endpoint=$Endpoint
 $env:XERJ_DISABLE_FEEDBACK='true'
 if (!(Test-Path -LiteralPath $xerj)) { throw 'Install XERJ first; see docs/REFERENCE_CODING.md' }
 if ($Action -eq 'start') {
@@ -32,7 +33,7 @@ if ($Action -eq 'start') {
 if ($Action -eq 'status') { $indexStatus=Invoke-RestMethod "$endpoint/_cat/indices?format=json"; $indexStatus | Select-Object index,'docs.count','store.size';return }
 if ($Action -eq 'search') {
  if (!$Query -or $Corpus -eq 'all') { throw 'Supply a query and one corpus.' }
- & $xerj search --url $endpoint --prefix $Corpus -k 5 --full 1200 --disable-feedback $Query
+ & $xerj search --url $endpoint --prefix $Corpus -k 5 --full 1200 $Query
  if ($LASTEXITCODE -ne 0) { throw "Search failed (exit $LASTEXITCODE)" };return
 }
 $refs=Get-Content (Join-Path $projectRoot 'docs/reference-repositories.json') -Raw | ConvertFrom-Json
@@ -41,7 +42,7 @@ foreach($reference in $refs){$items+=@{prefix=('ref-'+$reference.name);path=(Joi
 foreach($item in $items){
  if($Corpus -ne 'all' -and $Corpus -ne $item.prefix){continue}
  if(!(Test-Path -LiteralPath $item.path)){throw "Missing checkout $($item.path); see docs/REFERENCE_CODING.md"}
- $indexArgs=@('autoindex',$item.path,'--prefix',$item.prefix,'--url',$endpoint,'--state-dir',(Join-Path $cacheRoot ('state/'+$item.prefix)),'--workers','2','--no-semantic','--no-graph','--code-analyzer','code','--max-index-size','256MB','--disable-feedback')
+ $indexArgs=@('autoindex',$item.path,'--prefix',$item.prefix,'--url',$endpoint,'--state-dir',(Join-Path $cacheRoot ('state/'+$item.prefix)),'--workers','2','--no-semantic','--no-graph','--code-analyzer','code','--disable-feedback')
  if($DryRun){$indexArgs+='--dry-run'}
  $logPath=Join-Path $cacheRoot ('logs/'+$item.prefix+'-latest.log')
  & $xerj @indexArgs 2>&1 | Tee-Object -FilePath $logPath | ForEach-Object {if("$_" -match 'xerj-bar|xerj-done|error:|estimated index|^ok:'){Write-Output $_}}

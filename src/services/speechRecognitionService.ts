@@ -84,6 +84,7 @@ export interface TranscribeResponse {
 }
 
 class SpeechRecognitionService {
+  private static cloudVoiceUnavailable = false;
   private recognition: SpeechRecognitionInstance | null = null;
   private isListeningState: boolean = false;
   private currentOptions: SpeechRecognitionOptions | null = null;
@@ -156,6 +157,14 @@ class SpeechRecognitionService {
       options.onStateChange?.(false);
     });
     return true;
+  }
+
+  public static isCloudVoiceUnavailable(): boolean {
+    return SpeechRecognitionService.cloudVoiceUnavailable;
+  }
+
+  public static markCloudVoiceUnavailable(): void {
+    SpeechRecognitionService.cloudVoiceUnavailable = true;
   }
 
   /**
@@ -243,6 +252,7 @@ class SpeechRecognitionService {
         } else if (event.error === 'no-speech') {
           userMessage = 'No speech detected. Please speak closer to your microphone.';
         } else if (event.error === 'network') {
+          SpeechRecognitionService.cloudVoiceUnavailable = true;
           userMessage = 'Browser cloud voice recognition unreachable (network).';
         }
         if (event.error !== 'no-speech') {
@@ -393,3 +403,4 @@ class SpeechRecognitionService {
 }
 
 export const speechRecognitionService = new SpeechRecognitionService();
+export { SpeechRecognitionService };

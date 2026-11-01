@@ -7,7 +7,7 @@ import request from 'supertest';
 import sharp from 'sharp';
 import { createApp } from '../server/app';
 import { cachedNarrator } from '../server/narrator';
-import { ffmpegAvailable, renderAnimatic } from '../server/animatic';
+import { ffmpegAvailable, formatSmpteTimecode, renderAnimatic } from '../server/animatic';
 
 const frame = (background: string) =>
   sharp({ create: { width: 800, height: 450, channels: 3, background } }).png().toBuffer();
@@ -90,5 +90,32 @@ describe('/api/export/animatic', () => {
       [2, true],
       [3, false],
     ]);
+  });
+
+  it('formats SMPTE timecode at 30 fps correctly', () => {
+    expect(formatSmpteTimecode(0)).toBe('00:00:00:00');
+    expect(formatSmpteTimecode(1)).toBe('00:00:01:00');
+    expect(formatSmpteTimecode(1.5)).toBe('00:00:01:15');
+    expect(formatSmpteTimecode(65.1)).toBe('00:01:05:03');
+  });
+
+  it('passes burnInTimecode flag from request body to renderAnimatic', async () => {
+    const render = vi.fn().mockResolvedValue(Buffer.from('mp4'));
+    const app = createApp({
+      settings: () => ({ key: '', requestLimit: 10 }),
+      renderAnimatic: render,
+      ffmpegAvailable: async () => true,
+    });
+    const res = await post(app, {
+      burnInTimecode: true,
+      shots: [{ image: await dataUrl('#333'), seconds: 2 }],
+    });
+    expect(res.status).toBe(200);
+    expect(render).toHaveBeenCalledWith(
+      expect.any(Array),
+      undefined,
+      undefined,
+      { burnInTimecode: true }
+    );
   });
 });

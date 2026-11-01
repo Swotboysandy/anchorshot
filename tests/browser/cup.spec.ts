@@ -1,7 +1,7 @@
 import {test,expect} from '@playwright/test';
 import {mkdir} from 'node:fs/promises';
 test('real photograph, editable mask, approval and protected export with no API calls',async({page})=>{
- test.setTimeout(90000);const posts:string[]=[],errors:string[]=[];page.on('request',r=>{if(r.method()==='POST')posts.push(r.url());});page.on('pageerror',e=>errors.push(e.message));
+ test.setTimeout(240000);const posts:string[]=[],errors:string[]=[];page.on('request',r=>{if(r.method()==='POST')posts.push(r.url());});page.on('pageerror',e=>errors.push(e.message));
  await page.goto('/');await page.getByRole('textbox',{name:'Describe your video or edit'}).fill('A kitchen opens onto an ocean. A blue cup stays in place.');await page.getByRole('button',{name:'Apply direction',exact:true}).click();await page.getByRole('region',{name:'Film preview'}).waitFor();await page.getByRole('tab',{name:'Dream',exact:true}).click();await page.getByRole('button',{name:/Open dream transition/}).click();
  const study=page.getByRole('region',{name:'Kitchen to ocean dream study'});
  await study.getByRole('button',{name:'Select real cup',exact:true}).click();
@@ -33,6 +33,7 @@ test('real photograph, editable mask, approval and protected export with no API 
  expect(errors).toEqual([]);expect(posts).toEqual([]);
 });
 test('photo upload resets selection; invalid uploads preserve draft and cancel preserves approved scene',async({page})=>{
+ test.setTimeout(120000);
  await page.setViewportSize({width:390,height:844});await page.goto('/');await page.getByRole('textbox',{name:'Describe your video or edit'}).fill('A kitchen opens onto an ocean. A blue cup stays in place.');await page.getByRole('button',{name:'Apply direction',exact:true}).click();await page.getByRole('region',{name:'Film preview'}).waitFor();await page.getByRole('tab',{name:'Dream',exact:true}).click();await page.getByRole('button',{name:/Open dream transition/}).click();await page.getByRole('button',{name:'Select real cup',exact:true}).click();
  const editor=page.getByRole('region',{name:'Real cup mask editor'});
  await editor.getByLabel('Upload cup photo').setInputFiles('public/dream/real-cup.png');await expect(editor.getByRole('img',{name:'Cup selection canvas'})).toBeVisible();

@@ -1,0 +1,20 @@
+[Preamble: Fleet Orchestrator Task for Claude]
+Query Caura MCP and XERJ on http://localhost:9200 before raw grepping.
+Context:
+Repository: E:\Hackathon\meta\MetaHT (Anchorshot / Framelock - Meta Hackathon).
+Active branch: feat/claude-sam-meta.
+Live Meta API Key configured in .env.local (META_API_KEY) pointing to https://api.meta.ai/v1.
+Available Meta Models verified: muse-spark-1.3, muse-image-1.0, muse-wonder-1.0, sam-3.1, muse-voice-transcribe-1.0.
+
+User Requirement:
+"I want to render the video/image using meta api and Pipeline Phase , then tell us what is not in the code because in the canvas this video should be generated after the voice prompt and ready to preview, use claude opus 5 to run this review"
+
+Review Focus:
+1. Inspect the main Storyboard Canvas in src/components/CleanStudio.tsx, src/components/SceneTransition.tsx, and src/App.tsx.
+2. Why is the canvas currently rendering only a still image (HTML5 Canvas 2D frame or SceneTransition still image) instead of playing/previewing the generated video after a voice/text direction is submitted?
+3. What is NOT in the code right now across all pipeline phases to achieve:
+   - Voice direction entered -> Meta Muse Spark 1.3 extracts shots & rules
+   - Real Meta AI image generation (muse-image-1.0) & video generation (muse-wonder-1.0 motion / local GPU video pipeline)
+   - Automatically mounting the generated video into the Active Storyboard Canvas (.preview-frame) ready for playback and preview, instead of forcing the user to find it in the sidebar inspector dropdown!
+4. What exact architectural changes, component modifications, and data flow connections are missing in the code?
+Provide a comprehensive, highly specific code review and implementation plan.

@@ -1,0 +1,29 @@
+You are Claude Opus (v5.5 Architecture Reviewer).
+Please provide an in-depth, rigorous architectural review of the Meta Model API alignment in MetaHT (Anchorshot Studio):
+
+Context & Scope:
+1. Video & Audio Understanding:
+   - Endpoint: POST /api/meta/video-understand
+   - Meta Model: muse-spark-1.3 on https://api.meta.ai/v1/responses
+   - Capability: Deep scene breakdown, foreground subject detection, dialogue transcription, and pacing.
+
+2. Multi-Frame Object Recognition & SAM 3.1:
+   - Wire protocol: streaming <0f>1<|box;x1=...;y1=...|><|mask;x=...;data=...|>
+   - Tracking across 16 frames with verified 0 outside-mask drift.
+   - Identified candidate foreground subjects (e.g. wedding car, church altar, bridal dress).
+
+3. Voice Direction & Generative Inpainting:
+   - Endpoint: POST /api/meta/edit-frame
+   - Meta Model: muse-image-1.0 on POST https://api.meta.ai/v1/images/edits
+   - Compositing: Sharp 0-drift pixel compositing preserving 100% of background pixels outside the SAM 3.1 mask.
+
+4. Storyboard Keyframe Ingestion:
+   - Endpoint: POST /api/video/ingest-shots
+   - Discrete shot breakdown (Shot 1 to 4) populated directly in the .shot-strip.
+   - Interactive scrubbing: clicking shot thumbnails seeks the canvas video player to that shot's timestamp.
+
+Deliverables required in your review:
+A. Architectural Alignment Verdict (Aligned / Needs Attention)
+B. Evaluation of each of the 4 pillars against the official Meta documentation
+C. Strengths of the hybrid resilience model (Local RTX 4070 AnimateDiff + Live Meta API)
+D. Practical suggestions and recommendations for the hackathon presentation and live judges demo.

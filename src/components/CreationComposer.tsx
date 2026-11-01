@@ -66,8 +66,8 @@ function CreationComposer({prompt,isLoading,setPrompt,onSubmit,onScript,onReview
                 </Button>
               </PromptInputAction>
 
-              <PromptInputAction tooltip="Open shot tools">
-                <Button disabled={!hasStory} onClick={onTools} aria-label="Open shot tools"
+              <PromptInputAction tooltip="Open scene review tools">
+                <Button disabled={!hasStory} onClick={onTools} aria-label="Open scene review tools"
                   variant="outline"
                   size="icon"
                   className="size-9 rounded-full"

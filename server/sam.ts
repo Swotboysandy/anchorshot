@@ -50,9 +50,9 @@ export async function checkInput(body: unknown): Promise<CheckedInput> {
   if (
     typeof image !== 'string' ||
     image.length > 11_200_000 ||
-    !/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(image)
+    !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(image)
   ) {
-    throw new UserError('Upload a PNG or JPEG image up to 8 MB.');
+    throw new UserError('Upload a PNG, JPEG, or WebP image up to 8 MB.');
   }
   const bytes = Buffer.from(image.slice(image.indexOf(',') + 1), 'base64');
   if (bytes.length > 8 * 1024 * 1024)
@@ -69,7 +69,7 @@ export async function checkInput(body: unknown): Promise<CheckedInput> {
       width > MAX_EDGE ||
       height > MAX_EDGE ||
       width * height > MAX_PIXELS ||
-      !['png', 'jpeg'].includes(format ?? '') ||
+      !['png', 'jpeg', 'webp'].includes(format ?? '') ||
       (pages ?? 1) > 1 ||
       (orientation ?? 1) !== 1
     ) {

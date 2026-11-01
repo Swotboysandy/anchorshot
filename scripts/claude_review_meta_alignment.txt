@@ -1,0 +1,17 @@
+You are Claude Opus acting as the Lead AI Video Systems Architect.
+Review the Anchorshot codebase (Meta Hackathon) and align our end-to-end storyboard & video editing pipeline with Meta's official Model API documentation:
+https://dev.meta.ai/docs/overview?team_id=28802630929372428&project_id=2962006444143464
+
+Key API Capabilities documented in Meta Model API:
+1. Video & Audio Understanding (`muse-spark-1.3` on `/v1/responses` with `input_video` or `input_file`): Reads visual sequence and embedded audio together, extracts structured details, recognizes objects and scene events.
+2. Media Segmentation (`sam-3.1` on `/v1/responses` with streaming box/point/concept prompts `<0f>1<|box;x1=...;y1=...|>`): Returns precise bounding boxes and run-length masks for any recognized object.
+3. Image Generation & Inpainting / Editing (`muse-image-1.0` on `/v1/images/generations` and `POST /v1/images/edits`): Modifies objects or adds elements based on text instructions while preserving background.
+4. Voice Transcription (`muse-voice-transcribe-1.0` and WebSocket `wss://api.meta.ai/v1/asr/realtime`): Real-time streaming transcription with speaker labels and turn boundaries.
+5. Long-Horizon Director Agent (`muse-wonder-1.0` on `/v1/responses`): 1M context, parallel tool calls, reasoning tokens for multi-shot continuity planning.
+
+Task:
+Conduct an end-to-end architectural review of what needs to be updated across Anchorshot:
+1. Storyboard Shot Ingestion from Video: How to extract keyframes from the generated video so each shot in the storyboard strip (`src/components/CleanStudio.tsx`) displays the keyframe thumbnail and exact timestamp.
+2. Object Recognition & Analysis: How to integrate Meta's Video Understanding (`muse-spark-1.3`) and SAM 3.1 Media Segmentation so objects (e.g., car, bride, cup, dress) in each video shot are automatically detected, bounded, and made clickable for inspection.
+3. Voice-Directed Editing Suggestions: How voice commands (e.g. "Change the car to a vintage white convertible") are transcribed via `muse-voice-transcribe-1.0` and translated into editing changes via `POST /v1/images/edits` and SAM 3.1 0-drift pixel repair.
+4. Detailed Implementation Blueprint: Document the exact endpoints to add to `server/app.ts`, updates to `src/services/metaModels.ts`, and UI enhancements in `CleanStudio.tsx` and `ShotInspectorPanel.tsx`.

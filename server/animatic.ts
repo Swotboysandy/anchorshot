@@ -16,11 +16,50 @@ export interface AnimaticShot {
   narration?: Buffer;
 }
 
+export interface RenderAnimaticOptions {
+  burnInTimecode?: boolean;
+}
+
 export class AnimaticError extends Error {}
 
 const WIDTH = 1280;
 const HEIGHT = 720;
 const NARRATION_TAIL = 0.4;
+
+export function formatSmpteTimecode(seconds: number, fps = 30): string {
+  const totalFrames = Math.max(0, Math.round(seconds * fps));
+  const frames = totalFrames % fps;
+  const totalSec = Math.floor(totalFrames / fps);
+  const s = totalSec % 60;
+  const m = Math.floor(totalSec / 60) % 60;
+  const h = Math.floor(totalSec / 3600);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(frames).padStart(2, '0')}`;
+}
+
+export function createTimecodeOverlaySvg(
+  shotIndex: number,
+  totalShots: number,
+  startTimeSec: number,
+  shotDurationSec: number,
+): Buffer {
+  const tcStr = formatSmpteTimecode(startTimeSec);
+  const shotLabel = `SHOT ${String(shotIndex + 1).padStart(2, '0')}/${String(totalShots).padStart(2, '0')}`;
+  const durLabel = `${shotDurationSec.toFixed(1)}s`;
+  return Buffer.from(`
+    <svg width="${WIDTH}" height="${HEIGHT}" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <filter id="bgShadow" x="-10%" y="-10%" width="120%" height="120%">
+          <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.8"/>
+        </filter>
+      </defs>
+      <g filter="url(#bgShadow)">
+        <rect x="28" y="${HEIGHT - 72}" width="400" height="48" rx="6" fill="#0A0D12" fill-opacity="0.88" stroke="#323A46" stroke-width="1.5"/>
+        <text x="44" y="${HEIGHT - 44}" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="16" font-weight="700" fill="#38BDF8" letter-spacing="1.5">TC ${tcStr}</text>
+        <text x="44" y="${HEIGHT - 30}" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" fill="#94A3B8" letter-spacing="0.5">${shotLabel} &bull; ${durLabel} &bull; 30 FPS</text>
+      </g>
+    </svg>
+  `);
+}
 
 function run(command: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -55,16 +94,30 @@ export async function ffmpegAvailable(ffmpeg = 'ffmpeg'): Promise<boolean> {
   }
 }
 
-export async function renderAnimatic(shots: AnimaticShot[], ffmpeg = 'ffmpeg', ffprobe = 'ffprobe'): Promise<Buffer> {
+export async function renderAnimatic(
+  shots: AnimaticShot[],
+  ffmpeg = 'ffmpeg',
+  ffprobe = 'ffprobe',
+  options?: RenderAnimaticOptions,
+): Promise<Buffer> {
   if (!shots.length) throw new AnimaticError('There are no shots to export.');
   const folder = mkdtempSync(path.join(tmpdir(), 'anchorshot-animatic-'));
   try {
     const args = ['-hide_banner', '-v', 'error', '-y'];
     const filters: string[] = [];
+    let cumulativeSeconds = 0;
     for (const [i, shot] of shots.entries()) {
       const frame = path.join(folder, `shot-${i}.png`);
+      let pipeline = sharp(shot.image).resize(WIDTH, HEIGHT, {
+        fit: 'contain',
+        background: '#000000',
+      });
+      if (options?.burnInTimecode) {
+        const overlaySvg = createTimecodeOverlaySvg(i, shots.length, cumulativeSeconds, shot.seconds);
+        pipeline = pipeline.composite([{ input: overlaySvg }]);
+      }
       // Normalise every source (PNG, JPEG, WebP) before ffmpeg sees it.
-      await sharp(shot.image).png().toFile(frame);
+      await pipeline.png().toFile(frame);
       let seconds = shot.seconds;
       let audio = '';
       if (shot.narration) {
@@ -73,6 +126,7 @@ export async function renderAnimatic(shots: AnimaticShot[], ffmpeg = 'ffmpeg', f
         // Hold the frame until its narration finishes, plus a short breath.
         seconds = Math.max(seconds, (await mediaSeconds(audio, ffprobe)) + NARRATION_TAIL);
       }
+      cumulativeSeconds += seconds;
       args.push('-loop', '1', '-t', String(seconds), '-i', frame);
       if (audio) args.push('-i', audio);
       else args.push('-f', 'lavfi', '-t', String(seconds), '-i', 'anullsrc=r=44100:cl=stereo');

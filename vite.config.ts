@@ -21,6 +21,9 @@ function anchorShotSamApiPlugin(): Plugin {
       if (server.config.server.middlewareMode) return;
       const { createApp } = await import('./server/app');
       const localEnv = readLocalEnv();
+      if (localEnv.MODAL_VIDEO_ENDPOINT && !process.env.MODAL_VIDEO_ENDPOINT) {
+        process.env.MODAL_VIDEO_ENDPOINT = localEnv.MODAL_VIDEO_ENDPOINT;
+      }
       const rawBaseUrl = localEnv.META_API_BASE_URL ?? localEnv.VITE_META_API_BASE_URL;
       if (rawBaseUrl && !process.env.META_API_BASE_URL) {
         process.env.META_API_BASE_URL = rawBaseUrl;

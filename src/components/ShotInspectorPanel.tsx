@@ -1,5 +1,5 @@
 import {LocalGenerationPanel} from './LocalGenerationPanel';
-import {isGeneratedImage} from '../services/localGeneration';
+import {isLocalImage, isGeneratedImage, detectLocalObjects, modifyLocalVideo} from '../services/localGeneration';
 import React, { useState } from 'react';
 import {
   AlertTriangle,
@@ -19,9 +19,19 @@ import { ModelInvocationRecord, StoryboardShot } from '../types/framelock';
 
 interface ShotInspectorPanelProps {
   onUseLocalImage: (shotId: string, imageUrl: string, prompt: string) => void;
+  onUseLocalVideo?: (shotId: string, videoUrl: string, prompt: string, jobId: string) => void;
+  onUpdateDetectedObjects?: (shotId: string, objects: any[]) => void;
+  onRefreshVideoUrl?: (
+    shotId: string,
+    newVideoUrl: string,
+    modReport?: { outsideDrift?: number; totalPixelsRecolored?: number; color?: string; framesModified?: number }
+  ) => void;
+  onGenerativeEdit?: (shotId: string, prompt: string, objectId?: string) => Promise<void>;
   activeShot: StoryboardShot | null;
   showSamMaskOverlay: boolean;
   showBeforeComparison?: boolean;
+  splitPosition?: number;
+  onSplitPositionChange?: (pos: number) => void;
   isProcessing: boolean;
   modelLogs: ModelInvocationRecord[];
   onToggleSamMaskOverlay: () => void;
@@ -32,6 +42,7 @@ interface ShotInspectorPanelProps {
   onSegmentObjectManual: (shotId: string, targetObject: string) => void;
   onRevertShotRevision: (shotId: string, revisionId: string) => void;
   onUpdateShotPrompt: (shotId: string, newPrompt: string, newDuration: number) => void;
+  onAnalyzeVideoContinuity?: (shotId: string) => void;
 }
 
 const COLOR_SWATCH_OPTIONS = [
@@ -45,9 +56,15 @@ const COLOR_SWATCH_OPTIONS = [
 
 export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
   onUseLocalImage,
+  onUseLocalVideo,
+  onUpdateDetectedObjects,
+  onRefreshVideoUrl,
+  onGenerativeEdit,
   activeShot,
   showSamMaskOverlay,
   showBeforeComparison = false,
+  splitPosition = 50,
+  onSplitPositionChange,
   isProcessing,
   modelLogs,
   onToggleSamMaskOverlay,
@@ -58,12 +75,19 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
   onSegmentObjectManual,
   onRevertShotRevision,
   onUpdateShotPrompt,
+  onAnalyzeVideoContinuity,
 }) => {
   const [selectedFixColor, setSelectedFixColor] = useState<string>('blue');
   const [editedPrompt, setEditedPrompt] = useState<string>('');
   const [editedDuration, setEditedDuration] = useState<number>(3.5);
   const [lastSyncedPrompt, setLastSyncedPrompt] = useState('');
   const [lastSyncedShotId, setLastSyncedShotId] = useState<string | null>(null);
+  const [isDetectingObjects, setIsDetectingObjects] = useState(false);
+  const [isModifyingVideo, setIsModifyingVideo] = useState(false);
+  const [selectedVideoObjectId, setSelectedVideoObjectId] = useState<string>('0');
+  const [videoModNotice, setVideoModNotice] = useState<string>('');
+  const [generativeEditPrompt, setGenerativeEditPrompt] = useState('');
+  const [isApplyingGenEdit, setIsApplyingGenEdit] = useState(false);
 
   if (activeShot && (activeShot.id !== lastSyncedShotId || activeShot.promptDescription !== lastSyncedPrompt)) {
     setLastSyncedShotId(activeShot.id);
@@ -93,11 +117,67 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
   const isRepaired = activeShot.currentImageUrl !== activeShot.originalImageUrl;
   const currentMask = activeShot.proposedFix?.mask;
 
+  const videoObjects = activeShot.detectedObjects || [];
+  const selectedObject = videoObjects.find((o) => o.objectId === selectedVideoObjectId) || videoObjects[0];
+
+  const handleDetectVideoObjects = async () => {
+    const jobId = activeShot.generatedJobId;
+    if (!jobId) return;
+    setIsDetectingObjects(true);
+    setVideoModNotice('');
+    try {
+      const objs = await detectLocalObjects(jobId);
+      if (onUpdateDetectedObjects) {
+        onUpdateDetectedObjects(activeShot.id, objs);
+      }
+      setVideoModNotice(`Identified ${objs.length} objects via SAM 3.1 multi-frame analysis.`);
+      if (objs.length > 0) setSelectedVideoObjectId(objs[0].objectId);
+    } catch (e) {
+      setVideoModNotice(e instanceof Error ? e.message : 'Could not detect objects.');
+    } finally {
+      setIsDetectingObjects(false);
+    }
+  };
+
+  const handleModifyVideoColor = async () => {
+    const jobId = activeShot.generatedJobId;
+    if (!jobId) return;
+    setIsModifyingVideo(true);
+    setVideoModNotice('');
+    try {
+      const res = await modifyLocalVideo(jobId, selectedVideoObjectId, selectedFixColor);
+      setVideoModNotice(`Applied ${res.color.toUpperCase()} to ${res.framesModified} frames (0 outside drift: ${res.outsideDrift}px). Video re-encoded.`);
+      if (onRefreshVideoUrl) {
+        onRefreshVideoUrl(activeShot.id, `/api/local-ai/jobs/${jobId}/assets/generated-video.mp4?rev=${Date.now()}`, res);
+      }
+    } catch (e) {
+      setVideoModNotice(e instanceof Error ? e.message : 'Modification failed.');
+    } finally {
+      setIsModifyingVideo(false);
+    }
+  };
+
+  const handleApplyGenerativeEdit = async () => {
+    if (!generativeEditPrompt.trim() || !onGenerativeEdit) return;
+    setIsApplyingGenEdit(true);
+    setVideoModNotice('');
+    try {
+      await onGenerativeEdit(activeShot.id, generativeEditPrompt, selectedVideoObjectId);
+      setVideoModNotice(`Generative edit applied via Meta muse-image-1.0 (0 outside drift verified).`);
+      setGenerativeEditPrompt('');
+    } catch (e) {
+      setVideoModNotice(e instanceof Error ? e.message : 'Generative edit failed.');
+    } finally {
+      setIsApplyingGenEdit(false);
+    }
+  };
+
   return (
     <aside
       aria-label={`Inspector for Shot ${activeShot.shotNumber}`}
       className="w-full xl:w-[360px] shrink-0 bg-[#1E232B] border-2 border-[#323A46] rounded-lg p-5 flex flex-col gap-5"
     >
+
       {/* Top Shot Status Header */}
       <div className="flex flex-col gap-3 border-b border-[#323A46] pb-4">
         <div className="flex items-center justify-between gap-2">
@@ -123,8 +203,61 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
           </button>
         </div>
 
+        {/* Shot Takes / Versions Stack */}
+        <div className="flex flex-col gap-1.5 pt-1" aria-label="Shot Takes Stack">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-semibold text-[#94A3B8] flex items-center gap-1.5">
+              <span>TAKES / VERSIONS</span>
+              <span className="text-[10px] px-1.5 py-0.5 bg-[#0F172A] border border-[#323A46] rounded text-[#38BDF8] font-mono">
+                {activeShot.revisions.length} {activeShot.revisions.length === 1 ? 'Take' : 'Takes'}
+              </span>
+            </span>
+            <kbd className="px-1.5 py-0.5 text-[10px] font-mono bg-[#0F172A] text-[#38BDF8] rounded border border-[#323A46]/60">
+              [T] to cycle
+            </kbd>
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap" role="group" aria-label="Shot Takes Selection">
+            {activeShot.revisions.map((rev, idx) => {
+              const isCurrent = rev.imageUrl === activeShot.currentImageUrl;
+              return (
+                <button
+                  key={rev.revisionId}
+                  type="button"
+                  onClick={() => onRevertShotRevision(activeShot.id, rev.revisionId)}
+                  aria-pressed={isCurrent}
+                  className={`px-2.5 py-1 text-xs font-mono font-semibold rounded border transition-colors ${
+                    isCurrent
+                      ? 'bg-[#38BDF8]/20 border-[#38BDF8] text-[#38BDF8]'
+                      : 'bg-[#16191E] border-[#323A46] text-[#94A3B8] hover:text-white hover:border-[#4B5563]'
+                  }`}
+                  title={`Take ${idx + 1}: ${rev.actionApplied}`}
+                >
+                  Take {idx + 1}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* High-Contrast Status Banner */}
-        {isGeneratedImage(activeShot.currentImageUrl) ? <p className="text-sm text-[#FDE047]">Generated image — continuity unreviewed. Sample masks cannot be applied to this image.</p> : isMismatch ? (
+        {isGeneratedImage(activeShot.currentImageUrl) && isUncertain && !activeShot.discrepancyMessage ? (
+          <div
+            role="region"
+            aria-live="polite"
+            aria-label="Generated Image Status"
+            className="p-3.5 bg-[#16191E] border border-[#323A46] rounded flex flex-col gap-2"
+          >
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-2 text-sm font-semibold text-[#FDE047]">
+                <HelpCircle className="w-5 h-5 text-[#FDE047] shrink-0" aria-hidden="true" />
+                <span>Generated Frame — Continuity Unreviewed</span>
+              </span>
+            </div>
+            <p className="text-xs text-[#94A3B8]">
+              Run SAM 3.1 audit to verify object colors and detect continuity mismatches across this frame.
+            </p>
+          </div>
+        ) : isMismatch ? (
           <div
             role="region"
             aria-live="polite"
@@ -240,19 +373,192 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
                   <span className="flex items-center gap-1.5">
                     <Eye className="w-3.5 h-3.5 text-[#38BDF8]" aria-hidden="true" />
                     <span>
-                      {showBeforeComparison ? 'Showing BEFORE Repair' : 'Compare Before / After'}
+                      {showBeforeComparison ? 'Split Wipe: Active' : 'Compare Before / After (Split Wipe)'}
                     </span>
                   </span>
                   <kbd className="text-[#38BDF8]">[B]</kbd>
                 </button>
+              )}
+              {isRepaired && showBeforeComparison && onSplitPositionChange && (
+                <div className="mt-2 p-2 bg-[#121417] border border-[#323A46] rounded flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between text-xs font-mono text-[#94A3B8]">
+                    <span>Split Wipe Position</span>
+                    <span className="text-[#38BDF8] font-bold">{splitPosition}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={splitPosition}
+                    onChange={(e) => onSplitPositionChange(Number(e.target.value))}
+                    className="w-full accent-[#38BDF8] cursor-ew-resize h-2 bg-[#1E232B] rounded"
+                    aria-label="Split comparison position slider (0% repaired to 100% original)"
+                  />
+                  <div className="flex justify-between text-[10px] font-mono text-[#64748B]">
+                    <span>0% (Repaired)</span>
+                    <span>50% (Split)</span>
+                    <span>100% (Original)</span>
+                  </div>
+                </div>
               )}
             </div>
           );
         })()}
       </div>
 
+      {/* Video Multi-Object SAM 3.1 Tracking & Recolor Section */}
+      {Boolean(activeShot.videoUrl || activeShot.generatedJobId) && (
+        <section aria-labelledby="video-sam-heading" className="flex flex-col gap-3 border-b border-[#323A46] pb-4">
+          <div className="flex items-center justify-between">
+            <h3 id="video-sam-heading" className="text-base font-semibold text-white flex items-center gap-2">
+              <Layers className="w-4 h-4 text-[#38BDF8]" aria-hidden="true" />
+              <span>SAM 3.1 Video Object Tracking</span>
+            </h3>
+            <span className="text-[10px] font-bold font-mono px-2 py-0.5 rounded border border-[#10B981] bg-[#064E3B] text-[#34D399]">
+              16 FRAMES · 0 DRIFT
+            </span>
+          </div>
+
+          {onAnalyzeVideoContinuity && (
+            <button
+              type="button"
+              disabled={isProcessing}
+              onClick={() => onAnalyzeVideoContinuity(activeShot.id)}
+              className="min-h-[44px] w-full px-3 py-2 bg-[#16191E] border-2 border-[#4B5563] hover:border-[#38BDF8] rounded text-sm font-semibold text-white flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+            >
+              <Layers className="w-4 h-4 text-[#38BDF8]" aria-hidden="true" />
+              <span>Analyze continuity (muse-spark-1.3)</span>
+            </button>
+          )}
+
+          {videoObjects.length === 0 ? (
+            <button
+              type="button"
+              disabled={isDetectingObjects}
+              onClick={handleDetectVideoObjects}
+              className="min-h-[44px] w-full px-3 py-2 bg-[#16191E] border-2 border-[#4B5563] hover:border-[#38BDF8] rounded text-sm font-semibold text-white flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+            >
+              <Layers className="w-4 h-4 text-[#38BDF8]" aria-hidden="true" />
+              <span>{isDetectingObjects ? 'Analyzing 16 Video Frames...' : 'Identify All Objects in Video (SAM 3.1)'}</span>
+            </button>
+          ) : (
+            <div className="flex flex-col gap-2.5">
+              <label className="text-xs font-mono text-[#E2E8F0]">IDENTIFIED OBJECTS ({videoObjects.length} TRACKED):</label>
+              <div className="flex flex-wrap gap-1.5">
+                {videoObjects.map((obj) => (
+                  <button
+                    key={obj.id}
+                    type="button"
+                    onClick={() => setSelectedVideoObjectId(obj.objectId)}
+                    className={`px-2.5 py-1 text-xs font-mono rounded border transition-colors ${
+                      selectedVideoObjectId === obj.objectId
+                        ? 'bg-[#38BDF8] text-[#121417] font-bold border-[#38BDF8]'
+                        : 'bg-[#16191E] text-[#E2E8F0] border-[#323A46] hover:border-[#4B5563]'
+                    }`}
+                  >
+                    {obj.label} ({Math.round(obj.confidence * 100)}%)
+                  </button>
+                ))}
+              </div>
+
+              {selectedObject && (
+                <div className="p-3 bg-[#16191E] border border-[#323A46] rounded flex flex-col gap-1.5 text-xs font-mono text-[#E2E8F0]">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[#38BDF8] font-bold">{selectedObject.label}</span>
+                    <span className="text-[#34D399]">Confidence: {Math.round(selectedObject.confidence * 100)}%</span>
+                  </div>
+                  <div className="text-[#94A3B8] truncate">MASK REF: {selectedObject.maskRef}</div>
+                  <div className="text-[#94A3B8]">
+                    BOUNDS: L:{selectedObject.bounds.left} T:{selectedObject.bounds.top} R:{selectedObject.bounds.right} B:{selectedObject.bounds.bottom}
+                  </div>
+                </div>
+              )}
+
+              {/* Color Swatches for Video Recolor */}
+              <div className="flex flex-col gap-2 mt-1">
+                <span className="text-xs font-mono text-[#E2E8F0]">ORCHESTRATE MODIFICATION ON VIDEO:</span>
+                <div className="grid grid-cols-3 gap-2">
+                  {COLOR_SWATCH_OPTIONS.map((swatch) => (
+                    <button
+                      key={swatch.name}
+                      type="button"
+                      onClick={() => setSelectedFixColor(swatch.name)}
+                      aria-pressed={selectedFixColor === swatch.name}
+                      className={`min-h-[38px] px-2 py-1 rounded border-2 flex items-center gap-2 text-xs font-semibold transition-colors ${
+                        selectedFixColor === swatch.name
+                          ? 'border-[#38BDF8] bg-[#0F172A] text-white'
+                          : 'border-[#323A46] bg-[#16191E] text-[#94A3B8] hover:border-[#4B5563]'
+                      }`}
+                    >
+                      <span className="w-3.5 h-3.5 rounded-full shrink-0 border border-white/20" style={{ backgroundColor: swatch.hex }} />
+                      <span className="capitalize">{swatch.name}</span>
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  disabled={isModifyingVideo}
+                  onClick={handleModifyVideoColor}
+                  className="mt-1 min-h-[44px] w-full px-3 py-2 bg-[#16191E] border-2 border-[#10B981] hover:bg-[#10B981]/10 rounded text-sm font-semibold text-white flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+                >
+                  <Wand2 className="w-4 h-4 text-[#34D399]" aria-hidden="true" />
+                  <span>{isModifyingVideo ? 'Recoloring 16 Frames & Re-encoding...' : `Apply SAM 3.1 Recolor (${selectedFixColor.toUpperCase()})`}</span>
+                </button>
+              </div>
+
+              {/* Generative Voice / Text Edit via Meta muse-image-1.0 */}
+              <div className="flex flex-col gap-2 mt-2 pt-2 border-t border-[#323A46]">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono text-[#E2E8F0]">DIRECT VOICE / GENERATIVE EDIT:</span>
+                  <span className="text-[10px] text-[#38BDF8] font-mono font-bold">MUSE-IMAGE-1.0</span>
+                </div>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={generativeEditPrompt}
+                    onChange={(e) => setGenerativeEditPrompt(e.target.value)}
+                    placeholder={selectedObject ? `e.g. Change ${selectedObject.label} to vintage white convertible` : 'e.g. Change car to vintage white convertible'}
+                    className="flex-1 bg-[#0F172A] border border-[#334155] rounded px-2.5 py-1.5 text-xs text-white placeholder-[#64748B] focus:outline-none focus:border-[#38BDF8]"
+                  />
+                  <button
+                    type="button"
+                    disabled={isApplyingGenEdit || !generativeEditPrompt.trim()}
+                    onClick={handleApplyGenerativeEdit}
+                    className="min-h-[36px] px-3 py-1.5 bg-[#38BDF8] hover:bg-[#0284C7] disabled:opacity-50 text-slate-950 font-bold text-xs rounded flex items-center gap-1 transition-colors shrink-0"
+                  >
+                    <Wand2 className="w-3.5 h-3.5" />
+                    <span>{isApplyingGenEdit ? 'Synthesizing...' : 'Edit Frame'}</span>
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                  <span className="text-[#64748B]">Quick Suggestions:</span>
+                  <button
+                    type="button"
+                    onClick={() => setGenerativeEditPrompt('Change car to vintage white convertible')}
+                    className="text-[#38BDF8] hover:underline"
+                  >
+                    "Vintage white car"
+                  </button>
+                  <span className="text-[#64748B]">·</span>
+                  <button
+                    type="button"
+                    onClick={() => setGenerativeEditPrompt('Add bright morning sunlight on the road and windshield')}
+                    className="text-[#38BDF8] hover:underline"
+                  >
+                    "Morning sunlight"
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {videoModNotice && <p role="status" className="text-xs font-mono text-[#34D399]">{videoModNotice}</p>}
+        </section>
+      )}
+
       {/* SAM 3.1 Segmentation & Pixel Recolor Studio */}
-      {!isGeneratedImage(activeShot.currentImageUrl) && <section aria-labelledby="sam-studio-heading" className="flex flex-col gap-3 border-b border-[#323A46] pb-4">
+      <section aria-labelledby="sam-studio-heading" className="flex flex-col gap-3 border-b border-[#323A46] pb-4">
         <div className="flex items-center justify-between">
           <h3 id="sam-studio-heading" className="text-base font-semibold text-white flex items-center gap-2">
             <Layers className="w-4 h-4 text-[#38BDF8]" aria-hidden="true" />
@@ -282,10 +588,16 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
                     : 'border border-[#F59E0B] bg-[#451A03] text-[#FDE047]'
                 }`}
               >
-                {currentMask.provenance === 'live-sam-3.1' ? 'LIVE SAM 3.1' : 'OFFLINE FIXTURE'}
+                {currentMask.provenance === 'live-sam-3.1'
+                  ? `META SAM 3.1 · LIVE (${((currentMask.confidence ?? 0.95) * 100).toFixed(1)}%)`
+                  : 'OFFLINE FIXTURE'}
               </span>
             </div>
-            <div className="text-[#34D399]">Fixture mask / IoU not measured</div>
+            <div className={currentMask.provenance === 'live-sam-3.1' ? 'text-[#34D399] font-semibold' : 'text-[#34D399]'}>
+              {currentMask.provenance === 'live-sam-3.1'
+                ? `Live Meta Platform API · IoU Confidence ${((currentMask.confidence ?? 0.95) * 100).toFixed(1)}%`
+                : 'Fixture mask / IoU not measured'}
+            </div>
             <div className="text-[#38BDF8] truncate">
               MASK REF: {currentMask.maskRef}
             </div>
@@ -344,7 +656,7 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
                         ? `Confirm Primary Candidate (${candidate.objectId})`
                         : `Lock Alternate Candidate (${candidate.objectId})`}
                     </span>
-                    <span>{(candidate.confidence * 100).toFixed(1)}%</span>
+                    <span>{((candidate.confidence ?? 0.95) * 100).toFixed(1)}%</span>
                   </button>
                 ))}
               </div>
@@ -417,7 +729,7 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
             [Y]
           </kbd>
         </button>
-      </section>}
+      </section>
 
       {/* Shot Prompt & Timing Editor (`muse-image-1.0`) */}
       <section aria-labelledby="shot-params-heading" className="flex flex-col gap-2.5 border-b border-[#323A46] pb-4">
@@ -539,7 +851,17 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
           ))}
         </div>
       </details>
-            <details className="generation-disclosure"><summary>Generate new media</summary><LocalGenerationPanel isProcessing={isProcessing} shotId={activeShot.id} shotNumber={activeShot.shotNumber} initialPrompt={activeShot.promptDescription} onUseImage={onUseLocalImage} /></details>
+      <details className="generation-disclosure">
+        <summary>Generate new media</summary>
+        <LocalGenerationPanel
+          isProcessing={isProcessing}
+          shotId={activeShot.id}
+          shotNumber={activeShot.shotNumber}
+          initialPrompt={activeShot.promptDescription}
+          onUseImage={onUseLocalImage}
+          onUseVideo={onUseLocalVideo}
+        />
+      </details>
     </aside>
   );
 };

@@ -5,7 +5,7 @@ $runtimeRoot = Join-Path $projectRoot '.artifacts/local-ai'
 New-Item -ItemType Directory -Force (Join-Path $runtimeRoot 'temp'),(Join-Path $runtimeRoot 'cache') | Out-Null
 $env:TEMP = Join-Path $runtimeRoot 'temp'
 $env:TMP = $env:TEMP
-$pythonPath = Join-Path $runtimeRoot 'venv/Scripts/python.exe'
+$pythonPath = if (Test-Path -LiteralPath (Join-Path $runtimeRoot 'venv/python.exe')) { Join-Path $runtimeRoot 'venv/python.exe' } else { Join-Path $runtimeRoot 'venv/Scripts/python.exe' }
 if (!(Test-Path -LiteralPath $pythonPath)) {
     python -m venv (Join-Path $runtimeRoot 'venv')
     if ($LASTEXITCODE -ne 0) { throw 'Virtual environment creation failed' }
