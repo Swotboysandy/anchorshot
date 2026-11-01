@@ -103,6 +103,8 @@ test.describe('Edge Cases & Scenario B Verification', () => {
     await page.getByRole('tab', { name: 'Review', exact: true }).click();
     await page.waitForTimeout(500);
 
+    // The command panel now lives inside the Review tab's collapsed Project controls.
+    await page.getByText('Project controls', { exact: true }).click();
     const commandInput = page.locator('#director-command-input');
     await commandInput.fill('Change continuity rule: cup color must be emerald');
     await page.getByRole('button', { name: 'Run', exact: true }).click();
