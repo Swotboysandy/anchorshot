@@ -12,6 +12,7 @@ import {
 import { ImagerOutputError, type Imager } from './imager';
 import { readAudioDataUrl, TranscriberOutputError, type Transcriber } from './transcriber';
 import type { VoiceAgent } from './agent';
+import { AnimaticError, ffmpegAvailable, renderAnimatic, type AnimaticShot } from './animatic';
 import { MAX_NARRATION_TEXT, NarratorOutputError, type CachedNarrator } from './narrator';
 import { fixturePlanner, PlannerOutputError, type Planner } from './planner';
 import type { ContinuityEvidenceStatus, SegmentationResult } from '../src/types';
@@ -34,6 +35,8 @@ interface Options {
   narrator?: Pick<CachedNarrator, 'model' | 'voice' | 'cached' | 'speak'>;
   narrationCharLimit?: number;
   agent?: VoiceAgent;
+  renderAnimatic?: (shots: AnimaticShot[]) => Promise<Buffer>;
+  ffmpegAvailable?: () => Promise<boolean>;
 }
 
 const MAX_FRAMES = 48;
@@ -48,6 +51,7 @@ export function createApp(options: Options) {
   let imageActive = false;
   let transcribeActive = false;
   let narrationCharsUsed = 0;
+  let exportActive = false;
   const frames = new Map<string, Buffer>();
 
   app.disable('x-powered-by');
@@ -478,6 +482,15 @@ export function createApp(options: Options) {
    * Narration endpoint: `POST /api/muse/speak` returns MP3 for the given text.
    * Cached clips are free; new text counts against a per-session character budget.
    */
+  const withinNarrationBudget = (text: string) =>
+    !!options.narrator &&
+    (options.narrator.cached(text) ||
+      narrationCharsUsed + text.length <= (options.narrationCharLimit ?? 20_000));
+  const narrate = (text: string, signal?: AbortSignal) => {
+    if (!options.narrator!.cached(text)) narrationCharsUsed += text.length;
+    return options.narrator!.speak(text, signal);
+  };
+
   app.post('/api/muse/speak', async (req, res, next) => {
     if (!hasValidSession(req))
       return res.status(403).json({ error: 'Refresh the page before narration.' });
@@ -486,8 +499,7 @@ export function createApp(options: Options) {
     const text = typeof req.body?.text === 'string' ? req.body.text.replace(/\s+/g, ' ').trim() : '';
     if (!text || text.length > MAX_NARRATION_TEXT)
       return res.status(400).json({ error: `Narrate between 1 and ${MAX_NARRATION_TEXT} characters.` });
-    const fresh = !options.narrator.cached(text);
-    if (fresh && narrationCharsUsed + text.length > (options.narrationCharLimit ?? 20_000))
+    if (!withinNarrationBudget(text))
       return res
         .status(429)
         .json({ error: 'The session narration budget has been reached. The browser voice is used.' });
@@ -496,8 +508,7 @@ export function createApp(options: Options) {
       if (!res.writableEnded) controller.abort();
     });
     try {
-      if (fresh) narrationCharsUsed += text.length;
-      const audio = await options.narrator.speak(text, controller.signal);
+      const audio = await narrate(text, controller.signal);
       if (!controller.signal.aborted) res.type('audio/mpeg').send(audio);
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -524,6 +535,55 @@ export function createApp(options: Options) {
       res.json({ signedUrl: await options.agent.signedUrl() });
     } catch (error) {
       next(error);
+    }
+  });
+
+  /**
+   * Animatic export: `POST /api/export/animatic` with shots of
+   * `{image: data URL, seconds, narration?}` returns an H.264/AAC MP4. Narration uses
+   * the connected voice within its budget; shots without it stay silent.
+   */
+  app.post('/api/export/animatic', async (req, res, next) => {
+    if (!hasValidSession(req))
+      return res.status(403).json({ error: 'Refresh the page before exporting.' });
+    const shots = Array.isArray(req.body?.shots) ? req.body.shots : [];
+    if (!shots.length || shots.length > 12)
+      return res.status(400).json({ error: 'Export between 1 and 12 shots.' });
+    const parsed: AnimaticShot[] = [];
+    for (const shot of shots) {
+      const image =
+        typeof shot?.image === 'string'
+          ? /^data:image\/(?:png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(shot.image)?.[1]
+          : undefined;
+      const seconds = Number(shot?.seconds);
+      if (!image || !(seconds >= 0.5 && seconds <= 15))
+        return res.status(400).json({ error: 'Each shot needs a PNG, JPEG or WebP frame and 0.5 to 15 seconds.' });
+      parsed.push({ image: Buffer.from(image, 'base64'), seconds });
+    }
+    if (!(await (options.ffmpegAvailable ?? ffmpegAvailable)()))
+      return res.status(501).json({ error: 'MP4 export needs ffmpeg on this computer.' });
+    if (exportActive) return res.status(409).json({ error: 'An export is already running.' });
+    exportActive = true;
+    try {
+      let narrated = 0;
+      for (const [i, shot] of shots.entries()) {
+        const text = typeof shot.narration === 'string' ? shot.narration.replace(/\s+/g, ' ').trim() : '';
+        if (!text || text.length > MAX_NARRATION_TEXT || !withinNarrationBudget(text)) continue;
+        try {
+          parsed[i].narration = await narrate(text);
+          narrated++;
+        } catch {
+          /* A shot whose narration fails is exported silent rather than failing the film. */
+        }
+      }
+      const video = await (options.renderAnimatic ?? renderAnimatic)(parsed);
+      res.setHeader('X-Anchorshot-Narrated-Shots', String(narrated));
+      res.type('video/mp4').send(video);
+    } catch (error) {
+      if (error instanceof AnimaticError) return res.status(500).json({ error: 'The MP4 could not be encoded.' });
+      next(error);
+    } finally {
+      exportActive = false;
     }
   });
 

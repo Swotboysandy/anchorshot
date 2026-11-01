@@ -12,6 +12,7 @@ import {
 } from './types/framelock';
 import { DIRECTOR_PRESETS, metaModelClient } from './services/metaModels';
 import { speechService } from './services/speechService';
+import { exportAnimaticMp4 } from './services/animaticExport';
 import { speechRecognitionService } from './services/speechRecognitionService';
 import {
   exportStoryboardAnimaticVideo,
@@ -825,11 +826,12 @@ export default function App() {
     announceStatus('Exported Anchorshot storyboard and continuity report JSON.', true);
   }, [projectState, announceStatus, transitionsEnabled, reducedMotion]);
 
-  // Export Animatic Video (.webm)
+  // Export Animatic Video: narrated MP4 from the server, silent browser WebM as fallback
   const handleExportAnimaticVideo = useCallback(async () => {
     setIsExportingVideo(true);
-    announceStatus('Rendering 4-shot Anchorshot animatic video...', false);
-    const blob = await exportStoryboardAnimaticVideo(projectState.shots, projectState.title);
+    announceStatus('Rendering narrated MP4 animatic...', false);
+    const mp4 = await exportAnimaticMp4(projectState.shots);
+    const blob = mp4?.video ?? (await exportStoryboardAnimaticVideo(projectState.shots, projectState.title));
     setIsExportingVideo(false);
     if (!blob) {
       announceStatus('Video export requires a browser supporting HTML5 Canvas MediaRecorder.', true);
@@ -838,10 +840,15 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${projectState.projectId}-animatic.webm`;
+    a.download = `${projectState.projectId}-animatic.${mp4 ? 'mp4' : 'webm'}`;
     a.click();
     URL.revokeObjectURL(url);
-    announceStatus('Exported Anchorshot 4-shot animatic video.', true);
+    announceStatus(
+      mp4
+        ? `Exported MP4 animatic with narration on ${mp4.narratedShots} of ${projectState.shots.length} shots.`
+        : 'MP4 export unavailable. Exported a silent WebM animatic instead.',
+      true
+    );
   }, [projectState.shots, projectState.title, projectState.projectId, announceStatus]);
 
   const handleToggleBeforeComparison = useCallback(() => {
