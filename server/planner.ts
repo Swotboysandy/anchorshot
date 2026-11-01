@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { ANGLES, COLOR_TEMPS, LENSES, LIGHTS, MOVEMENTS, normalizeShot, SHOT_SIZES, type ShotSpec } from '../src/lib/shotLanguage';
 
 /**
  * Shot-planning role behind `/api/muse/spark`. Prompts and the rule schema live
@@ -14,11 +15,16 @@ export interface ContinuityRule {
   expectedValue: string;
   revision: number;
 }
+export interface PlannedShot extends ShotSpec {
+  seconds: number;
+}
 export interface PlanResult {
   model: string;
   provenance: 'offline-fixture' | 'live-model';
   ruleRevision: number;
   rules: ContinuityRule[];
+  /** Shot list chosen by the model; absent from the offline fixture. */
+  shots?: PlannedShot[];
 }
 export interface Planner {
   plan(transcript: string, revision: number, signal?: AbortSignal): Promise<PlanResult>;
@@ -57,14 +63,24 @@ export const fixturePlanner: Planner = {
   },
 };
 
-export const PLANNER_PROMPT = `You extract visual continuity rules from a film director's spoken notes.
-Reply with JSON only, no prose: {"rules":[{"targetObject":string,"expectedValue":string}]}.
-targetObject is one of: ${[...new Set(Object.values(OBJECTS))].join(', ')}.
-expectedValue is the object's colour, one of: ${[...new Set(Object.values(COLORS))].join(', ')}.
-Only include rules the director actually stated. Use an empty list if there are none.`;
+export const MIN_SHOTS = 3;
+export const MAX_SHOTS = 8;
 
-/** Turns raw model text into rules, or explains exactly what was wrong. */
-export function parsePlannerReply(text: string, revision: number): ContinuityRule[] {
+export const PLANNER_PROMPT = `You are a film director's first assistant. From the director's spoken notes, extract the visual continuity rules and plan the storyboard shot list.
+Reply with JSON only, no prose:
+{"rules":[{"targetObject":string,"expectedValue":string}],
+ "shots":[{"subject":string,"intent":string,"size":string,"angle":string,"lens":string,"movement":string,"light":string,"temp":string,"seconds":number}]}
+
+Rules: targetObject is one of: ${[...new Set(Object.values(OBJECTS))].join(', ')}. expectedValue is that object's colour, one of: ${[...new Set(Object.values(COLORS))].join(', ')}. Only include rules the director actually stated; use an empty list if there are none.
+
+Shots: plan ${MIN_SHOTS} to ${MAX_SHOTS} shots in story order. If the director numbers shots ("Shot 2: ..."), keep exactly those shots and that order. Otherwise start a new shot whenever the framing, who is on screen, the location or time of day, the dramatic turn or a significant action changes. Usually open wide to establish place, move closer as tension builds, and avoid the same size three times in a row.
+- subject: what the frame shows, concrete and visible (people, action, setting, props with their continuity colour). No mood words without a visible cause, no on-screen text.
+- intent: one short phrase on why this shot exists, e.g. "establish the diner".
+- size: one of ${SHOT_SIZES.join(', ')}. angle: one of ${ANGLES.join(', ')}. lens: one of ${LENSES.join(', ')}. movement: one of ${MOVEMENTS.join(', ')}. light: one of ${LIGHTS.join(', ')}. temp: one of ${COLOR_TEMPS.join(', ')}.
+- seconds: 2 to 8; quicker for action, longer for quiet or emotional moments.`;
+
+/** Turns raw model text into rules and shots, or explains exactly what was wrong. */
+export function parsePlan(text: string, revision: number): { rules: ContinuityRule[]; shots?: PlannedShot[] } {
   const json = text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
   let data: unknown;
   try {
@@ -72,6 +88,29 @@ export function parsePlannerReply(text: string, revision: number): ContinuityRul
   } catch {
     throw new PlannerOutputError('Reply was not valid JSON.');
   }
+  return { rules: parseRules(data, revision), shots: parseShots(data) };
+}
+
+/** Rules only, for callers that do not plan shots. */
+export function parsePlannerReply(text: string, revision: number): ContinuityRule[] {
+  return parsePlan(text, revision).rules;
+}
+
+function parseShots(data: unknown): PlannedShot[] | undefined {
+  const shots = (data as { shots?: unknown })?.shots;
+  if (shots === undefined) return undefined;
+  if (!Array.isArray(shots) || shots.length < MIN_SHOTS || shots.length > MAX_SHOTS)
+    throw new PlannerOutputError(`"shots" must list ${MIN_SHOTS} to ${MAX_SHOTS} shots.`);
+  return shots.map((item, index) => {
+    const raw = (item ?? {}) as Record<string, unknown>;
+    const shot = normalizeShot(raw);
+    if (!shot.subject) throw new PlannerOutputError(`shots[${index}].subject must describe what the frame shows.`);
+    const seconds = Number(raw.seconds);
+    return { ...shot, seconds: Number.isFinite(seconds) ? Math.min(8, Math.max(2, Math.round(seconds * 2) / 2)) : 4 };
+  });
+}
+
+function parseRules(data: unknown, revision: number): ContinuityRule[] {
   const rules = (data as { rules?: unknown })?.rules;
   if (!Array.isArray(rules)) throw new PlannerOutputError('Reply needs a "rules" array.');
   const objects = new Set(Object.values(OBJECTS));
@@ -112,8 +151,8 @@ export function chatPlanner(options: { model: string; chat: Chat; attempts?: num
         );
         const text = reply.choices[0]?.message?.content ?? '';
         try {
-          const rules = parsePlannerReply(text, revision);
-          return { model: options.model, provenance: 'live-model', ruleRevision: revision, rules };
+          const { rules, shots } = parsePlan(text, revision);
+          return { model: options.model, provenance: 'live-model', ruleRevision: revision, rules, ...(shots && { shots }) };
         } catch (error) {
           if (!(error instanceof PlannerOutputError)) throw error;
           problem = error.message;

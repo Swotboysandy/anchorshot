@@ -56,3 +56,30 @@ describe('planner providers', () => {
     expect(res.body.error).toMatch(/invalid plan/);
   });
 });
+
+describe('planned shot lists', () => {
+  const shot = (subject: string, extra: object = {}) => ({ subject, size: 'wide', angle: 'eye level', lens: '24mm', movement: 'locked', light: 'night', temp: 'cool', seconds: 4, ...extra });
+
+  it('normalises each planned shot and clamps its length', async () => {
+    const reply = JSON.stringify({
+      rules: [{ targetObject: 'cup', expectedValue: 'blue' }],
+      shots: [shot('Diner exterior in rain'), shot('Miller at the counter', { size: 'close', lens: '18mm', seconds: 30 }), shot('Hand reaches for the blue cup', { seconds: 0.2 })],
+    });
+    const result = await chatPlanner({ model: 'm', chat: { create: vi.fn().mockResolvedValue(reply_(reply)) } as never }).plan('x', 1);
+    expect(result.shots?.map((s) => [s.size, s.lens, s.seconds])).toEqual([
+      ['Wide', '24mm', 4],
+      ['Close', '35mm', 8],
+      ['Wide', '24mm', 2],
+    ]);
+  });
+
+  it('keeps rules-only replies valid and rejects unusable shot lists', () => {
+    expect(parsePlannerReply('{"rules":[]}', 1)).toEqual([]);
+    expect(() => parsePlannerReply(JSON.stringify({ rules: [], shots: [shot('a')] }), 1)).toThrow(/3 to 8 shots/);
+    expect(() => parsePlannerReply(JSON.stringify({ rules: [], shots: [shot('a'), shot(''), shot('c')] }), 1)).toThrow(/shots\[1\]\.subject/);
+  });
+});
+
+function reply_(content: string) {
+  return { choices: [{ message: { content } }] };
+}
