@@ -21,7 +21,7 @@ export function DreamTransitionPanel({projectId='legacy'}:{projectId?:string}) {
   const [selection,setSelection]=useState<CupSelection|null>(null);
   const [restored,setRestored]=useState(false);
   const [saveStatus,setSaveStatus]=useState('Loading saved masks...');
-  useEffect(()=>{let alive=true;loadLocal<{selection:CupSelection|null;umbrella:CupSelection|null}>(`dream:${projectId}`).then(saved=>{if(alive){setSelection(saved?.selection??null);setUmbrella(saved?.umbrella??null);setRestored(true);setSaveStatus('Masks saved locally');}}).catch(()=>{if(alive)setError('Saved masks could not be loaded. Reload to retry.');});return()=>{alive=false};},[projectId]);
+  useEffect(()=>{let alive=true;loadLocal<{selection:CupSelection|null;umbrella:CupSelection|null}>(`dream:${projectId}`).then(saved=>{if(alive){setSelection(prev => prev ?? saved?.selection ?? null);setUmbrella(prev => prev ?? saved?.umbrella ?? null);setRestored(true);setSaveStatus('Masks saved locally');}}).catch(()=>{if(alive)setError('Saved masks could not be loaded. Reload to retry.');});return()=>{alive=false};},[projectId]);
   useEffect(()=>{if(!restored)return;let alive=true;setSaveStatus('Saving masks...');saveLocal(`dream:${projectId}`,{selection,umbrella}).then(()=>{if(alive)setSaveStatus('Masks saved locally');}).catch(()=>{if(alive)setError('Mask save failed. Keep this page open and free browser storage.');});return()=>{alive=false};},[selection,umbrella,restored,projectId]);
   const original=useRef<DreamAssets|null>(null);
   const [time,setTime]=useState(0);

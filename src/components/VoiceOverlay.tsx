@@ -7,6 +7,9 @@ import { SPRING_PRESS } from '../lib/ease';
 import { Conversation, ConversationContent } from './ui/conversation';
 import { Message, MessageContent } from './ui/message';
 import { agentAvailable, startAgentConversation, type AgentTools } from '../services/voiceAgent';
+import { speechRecognitionService } from '../services/speechRecognitionService';
+import { speechService } from '../services/speechService';
+import { parseVoiceCommand } from '../services/voiceCommandParser';
 
 const COLORS = ['#b7b7b7', '#ffffff', '#252525'] as const;
 type Props = {
@@ -38,6 +41,9 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
     conversation.current = null;
     agentActivity.set(0);
     setAgentStatus('');
+    if (speechRecognitionService.isListening()) {
+      speechRecognitionService.stopListening();
+    }
     resources.current?.stream.getTracks().forEach((track) => track.stop());
     void resources.current?.context.close().catch(() => {});
     resources.current = null;
@@ -121,6 +127,49 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
       // Deliberately not connected to speakers and never recorded or uploaded.
       resources.current = { stream, context };
       setAnalyser(meter);
+
+      if (speechRecognitionService.isSupported()) {
+        speechRecognitionService.startListening({
+          continuous: true,
+          interimResults: false,
+          onResult: async (text, isFinal) => {
+            if (request !== generation.current || !isFinal) return;
+            const userText = text.trim();
+            if (!userText) return;
+            setCaptions((list) =>
+              [...list, { id: ++captionId.current, from: 'user' as const, text: userText }].slice(-30)
+            );
+            const intent = parseVoiceCommand(userText);
+            if (intent.kind === 'narrate' && agentTools?.describe_storyboard) {
+              const reply = await Promise.resolve(agentTools.describe_storyboard({}));
+              if (request === generation.current && reply) {
+                setCaptions((list) =>
+                  [...list, { id: ++captionId.current, from: 'assistant' as const, text: reply }].slice(-30)
+                );
+                speechService.speak(reply, true);
+              }
+            } else if (intent.kind === 'playback' && agentTools?.run_command) {
+              const reply = await Promise.resolve(agentTools.run_command({ command: intent.action }));
+              if (request === generation.current && reply) {
+                setCaptions((list) =>
+                  [...list, { id: ++captionId.current, from: 'assistant' as const, text: reply }].slice(-30)
+                );
+                speechService.speak(reply, true);
+              }
+            } else if (agentTools?.set_direction) {
+              const reply = await Promise.resolve(agentTools.set_direction({ text: userText }));
+              if (request === generation.current && reply) {
+                setCaptions((list) =>
+                  [...list, { id: ++captionId.current, from: 'assistant' as const, text: reply }].slice(-30)
+                );
+                speechService.speak(reply, true);
+              }
+            }
+          },
+          onError: () => {},
+          onStateChange: () => {},
+        });
+      }
     } catch (reason) {
       stream?.getTracks().forEach((track) => track.stop());
       void context?.close().catch(() => {});

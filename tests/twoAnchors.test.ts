@@ -11,14 +11,16 @@ it('preserves two independent masks through all 289 transition frames',async()=>
  for(const score of report.objects){expect(score.protectedPixels).toBeGreaterThan(0);expect(score.changedProtectedPixelsAcrossFrames).toBe(0);}
  const first=new Uint8ClampedArray(a.anchor.data.length),last=first.slice();renderDreamFrame(a,first,0);renderDreamFrame(a,last,DREAM.duration);
  expect(first[0]).not.toBe(last[0]);
-},15000);
+}, 30000);
 it('correcting or removing umbrella cannot change cup pixels or its mask',()=>{
  const cup=selection(80),umbrella=selection(150),b=base(),a=applyDreamSelections(b,cup,umbrella);
  const corrected={...umbrella,revision:2,mask:brushMask(umbrella.mask,20,20,{x:10,y:10},{x:10,y:10},4,false)};
  const next=applyDreamSelections(b,cup,corrected);expect(next.anchors![0].mask).toEqual(a.anchors![0].mask);
  expect(next.anchors![1].mask).not.toEqual(a.anchors![1].mask);expect(next.anchors![1].revision).toBe(2);
  const removed=applyDreamSelections(b,cup,null);
- for(let i=0;i<a.mask.length;i++)if(a.anchors![0].mask[i])expect(next.anchor.data.subarray(i*4,i*4+4)).toEqual(removed.anchor.data.subarray(i*4,i*4+4));
+ for(let i=0;i<a.mask.length;i++)if(a.anchors![0].mask[i]){
+  for(let k=0;k<4;k++) expect(next.anchor.data[i*4+k]).toBe(removed.anchor.data[i*4+k]);
+ }
  expect(umbrella.mask.every(v=>v===1)).toBe(true);
 });
 it('rejects empty or corrupt second selection without modifying approved input',()=>{

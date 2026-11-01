@@ -43,11 +43,28 @@ export interface StoryboardShot {
   id: string;
   shotNumber: number;
   durationSeconds: number;
+  timestamp?: number;
   promptDescription: string;
   spokenDescription: string;
   currentImageUrl: string;
   originalImageUrl: string;
   status: RuleStatus;
+  videoUrl?: string;
+  generatedJobId?: string;
+  detectedObjects?: Array<{
+    id: string;
+    maskRef: string;
+    objectId: string;
+    label: string;
+    concept: string;
+    confidence: number;
+    width?: number;
+    height?: number;
+    bounds: { left: number; top: number; right: number; bottom: number };
+    rasterWidth: number;
+    rasterHeight: number;
+    rasterBase64: string;
+  }>;
   discrepancyMessage?: string;
   pixelVerification?: PixelVerificationReport;
   proposedFix?: {
@@ -66,6 +83,20 @@ export interface StoryboardShot {
     maskRef?: string;
     pixelVerification?: PixelVerificationReport;
   }>;
+}
+
+export interface ContinuityFinding {
+  shotIndex: number;
+  status: RuleStatus;
+  ruleId: string;
+  targetObject: string;
+  expectedValue: string;
+  observedValue?: string;
+  maskRef?: string;
+  objectId?: string;
+  confidence: number;
+  explanation: string;
+  proposedAction: 'recolor';
 }
 
 export interface ProjectState {

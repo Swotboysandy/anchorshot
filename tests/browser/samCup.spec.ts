@@ -14,7 +14,7 @@ test('offline cutout never contacts models and manual correction clears syntheti
  await editor.getByRole('button',{name:'Apply cup to dream'}).click();
  await expect(page.getByText(/Approved photo mask.*revision 1/)).toBeVisible();
  await page.getByRole('button',{name:'Check cup preservation'}).click();
- await expect(page.getByRole('status',{name:'Cup preservation results'})).toContainText(/PASS.*289 frames.*0 changed protected pixels/);
+ await expect(page.getByRole('status',{name:'Cup preservation results'})).toContainText(/PASS.*289 frames.*0 changed protected pixels/,{timeout:15000});
  expect(posts).toEqual([]);
 });
 

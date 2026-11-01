@@ -1,4 +1,4 @@
-import { recolorMaskedPixels, type MaskVerificationReport } from './maskIntegrity';
+import { recolorMaskedPixels, detectMaskedColor, type MaskVerificationReport, type DetectedMaskColor } from './maskIntegrity';
 import { BoundingBox, PixelVerificationReport, SamMask, StoryboardShot } from '../types/framelock';
 
 export interface SceneRenderSpec {
@@ -41,7 +41,17 @@ export function resolveColorPalette(colorName: string) {
  */
 export function getTargetObjectBox(cameraAngle: SceneRenderSpec['cameraAngle'], targetObject: string): BoundingBox {
   const obj = targetObject.toLowerCase();
-  if (obj.includes('umbrella') || obj.includes('coat') || obj.includes('jacket')) {
+  if (obj.includes('car') || obj.includes('vehicle') || obj.includes('automobile')) {
+    if (cameraAngle === 'closeup') return { x: 18, y: 38, width: 64, height: 44 };
+    if (cameraAngle === 'medium') return { x: 25, y: 45, width: 50, height: 38 };
+    return { x: 30, y: 52, width: 40, height: 32 };
+  }
+  if (obj.includes('altar') || obj.includes('church')) {
+    if (cameraAngle === 'closeup') return { x: 25, y: 22, width: 50, height: 68 };
+    if (cameraAngle === 'medium') return { x: 30, y: 28, width: 40, height: 58 };
+    return { x: 35, y: 34, width: 30, height: 48 };
+  }
+  if (obj.includes('umbrella') || obj.includes('coat') || obj.includes('jacket') || obj.includes('dress') || obj.includes('gown')) {
     if (cameraAngle === 'closeup') return { x: 28, y: 42, width: 44, height: 48 };
     if (cameraAngle === 'medium') return { x: 32, y: 36, width: 34, height: 50 };
     return { x: 42, y: 38, width: 22, height: 44 };
@@ -314,6 +324,115 @@ function drawTargetObjectInBox(
     ctx.roundRect(pxBox.x + pxBox.w * 0.12, pxBox.y + pxBox.h * 0.08, pxBox.w * 0.76, pxBox.h * 0.84, 12);
     ctx.fill();
     ctx.stroke();
+  } else if (obj.includes('car') || obj.includes('vehicle') || obj.includes('automobile')) {
+    // Draw classic wedding car
+    const carX = pxBox.x + pxBox.w * 0.05;
+    const carY = pxBox.y + pxBox.h * 0.2;
+    const carW = pxBox.w * 0.9;
+    const carH = pxBox.h * 0.65;
+
+    // Car Wheels & Chrome Hubcaps
+    ctx.fillStyle = '#0F172A';
+    ctx.strokeStyle = '#94A3B8';
+    ctx.lineWidth = 2;
+    const wheelRadius = carH * 0.24;
+    // Left wheel
+    ctx.beginPath();
+    ctx.arc(carX + carW * 0.22, carY + carH * 0.82, wheelRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    // Right wheel
+    ctx.beginPath();
+    ctx.arc(carX + carW * 0.78, carY + carH * 0.82, wheelRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Wheel Hubs
+    ctx.fillStyle = '#E2E8F0';
+    ctx.beginPath();
+    ctx.arc(carX + carW * 0.22, carY + carH * 0.82, wheelRadius * 0.45, 0, Math.PI * 2);
+    ctx.arc(carX + carW * 0.78, carY + carH * 0.82, wheelRadius * 0.45, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Car Body with high-contrast gradient
+    const carGrad = ctx.createLinearGradient(carX, carY, carX, carY + carH);
+    carGrad.addColorStop(0, palette.highlight);
+    carGrad.addColorStop(0.4, palette.primary);
+    carGrad.addColorStop(1, palette.shadow);
+
+    ctx.fillStyle = carGrad;
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 2.5;
+
+    // Sleek vintage car silhouette (hood, cabin, trunk)
+    ctx.beginPath();
+    ctx.moveTo(carX, carY + carH * 0.65);
+    ctx.lineTo(carX + carW * 0.2, carY + carH * 0.65);
+    ctx.lineTo(carX + carW * 0.32, carY + carH * 0.22);
+    ctx.lineTo(carX + carW * 0.7, carY + carH * 0.22);
+    ctx.lineTo(carX + carW * 0.82, carY + carH * 0.65);
+    ctx.lineTo(carX + carW, carY + carH * 0.65);
+    ctx.lineTo(carX + carW, carY + carH * 0.82);
+    ctx.lineTo(carX, carY + carH * 0.82);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Windshield & Windows
+    ctx.fillStyle = 'rgba(186, 230, 253, 0.75)';
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(carX + carW * 0.35, carY + carH * 0.28);
+    ctx.lineTo(carX + carW * 0.48, carY + carH * 0.28);
+    ctx.lineTo(carX + carW * 0.48, carY + carH * 0.58);
+    ctx.lineTo(carX + carW * 0.26, carY + carH * 0.58);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(carX + carW * 0.52, carY + carH * 0.28);
+    ctx.lineTo(carX + carW * 0.66, carY + carH * 0.28);
+    ctx.lineTo(carX + carW * 0.75, carY + carH * 0.58);
+    ctx.lineTo(carX + carW * 0.52, carY + carH * 0.58);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Headlights (glow)
+    ctx.fillStyle = '#FEF08A';
+    ctx.beginPath();
+    ctx.arc(carX + carW * 0.98, carY + carH * 0.7, carH * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (obj.includes('altar') || obj.includes('church')) {
+    // Draw Wedding Altar Arch with Flowers & Fabric Drape
+    const cx = pxBox.x + pxBox.w * 0.5;
+    const topY = pxBox.y + pxBox.h * 0.08;
+    const botY = pxBox.y + pxBox.h * 0.92;
+
+    // Altar Arch Pillars
+    ctx.strokeStyle = palette.primary;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(pxBox.x + pxBox.w * 0.2, botY);
+    ctx.lineTo(pxBox.x + pxBox.w * 0.2, topY + pxBox.h * 0.3);
+    ctx.quadraticCurveTo(cx, topY, pxBox.x + pxBox.w * 0.8, topY + pxBox.h * 0.3);
+    ctx.lineTo(pxBox.x + pxBox.w * 0.8, botY);
+    ctx.stroke();
+
+    // Arch Floral Canopy
+    ctx.fillStyle = palette.highlight;
+    ctx.beginPath();
+    ctx.arc(cx, topY + 8, pxBox.w * 0.25, 0, Math.PI);
+    ctx.fill();
+
+    // Altar Pedestal
+    ctx.fillStyle = palette.shadow;
+    ctx.fillRect(cx - pxBox.w * 0.18, botY - pxBox.h * 0.35, pxBox.w * 0.36, pxBox.h * 0.35);
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(cx - pxBox.w * 0.18, botY - pxBox.h * 0.35, pxBox.w * 0.36, pxBox.h * 0.35);
   } else {
     // Default iconic prop: Heavy Ceramic Diner Coffee Cup + Saucer + Steam
     const cupX = pxBox.x + pxBox.w * 0.12;
@@ -412,32 +531,38 @@ export function generateSam3MaskData(
 ): SamMask {
   const width = 800;
   const height = 450;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d')!;
+  let maskBase64 = '';
 
-  const pxBox = {
-    x: (box.x / 100) * width,
-    y: (box.y / 100) * height,
-    w: (box.width / 100) * width,
-    h: (box.height / 100) * height,
-  };
+  if (typeof document !== 'undefined') {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d')!;
 
-  // Draw crisp high-contrast cyan/sky segmentation silhouette inside the bounding box
-  ctx.fillStyle = 'rgba(56, 189, 248, 0.42)';
-  ctx.strokeStyle = '#38BDF8';
-  ctx.lineWidth = 3;
+    const pxBox = {
+      x: (box.x / 100) * width,
+      y: (box.y / 100) * height,
+      w: (box.width / 100) * width,
+      h: (box.height / 100) * height,
+    };
 
-  const cupX = pxBox.x + pxBox.w * 0.08;
-  const cupY = pxBox.y + pxBox.h * 0.14;
-  const cupW = pxBox.w * 0.84;
-  const cupH = pxBox.h * 0.78;
+    // Draw crisp high-contrast cyan/sky segmentation silhouette inside the bounding box
+    ctx.fillStyle = 'rgba(56, 189, 248, 0.42)';
+    ctx.strokeStyle = '#38BDF8';
+    ctx.lineWidth = 3;
 
-  ctx.beginPath();
-  ctx.roundRect(cupX, cupY, cupW, cupH, 10);
-  ctx.fill();
-  ctx.stroke();
+    const cupX = pxBox.x + pxBox.w * 0.08;
+    const cupY = pxBox.y + pxBox.h * 0.14;
+    const cupW = pxBox.w * 0.84;
+    const cupH = pxBox.h * 0.78;
+
+    ctx.beginPath();
+    ctx.roundRect(cupX, cupY, cupW, cupH, 10);
+    ctx.fill();
+    ctx.stroke();
+
+    maskBase64 = canvas.toDataURL('image/png');
+  }
 
   const maskRef = `sam-3.1:${objectId}:v${revision}`;
 
@@ -445,7 +570,7 @@ export function generateSam3MaskData(
     id: `sam-mask-${objectId}-${Date.now()}`,
     maskRef,
     objectId,
-    maskBase64: canvas.toDataURL('image/png'),
+    maskBase64,
     box,
     confidence,
   };
@@ -613,6 +738,52 @@ export async function applySamPixelFixToImage(
 ): Promise<string> {
   const mask = generateSam3MaskData(targetObject, box);
   return (await applySamPixelFixWithVerification(sourceImageUrl, mask, targetColorName)).imageUrl;
+}
+
+/**
+ * Loads an image frame and evaluates the dominant pigment inside the provided SAM mask.
+ * Used for dynamic color continuity verification across model-generated frames.
+ */
+export async function sampleImageColorInMask(
+  imageUrl: string,
+  mask: SamMask
+): Promise<DetectedMaskColor> {
+  const image = await decodeFrame(imageUrl);
+  const width = image.naturalWidth || 800;
+  const height = image.naturalHeight || 450;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) throw new Error('Canvas pixel access is unavailable.');
+  context.drawImage(image, 0, 0, width, height);
+  const source = context.getImageData(0, 0, width, height);
+
+  let binaryMask: Uint8Array;
+  if (mask.maskBase64 && mask.maskBase64.startsWith('data:image')) {
+    const maskImage = await decodeFrame(mask.maskBase64);
+    context.clearRect(0, 0, width, height);
+    context.drawImage(maskImage, 0, 0, width, height);
+    const maskRgba = context.getImageData(0, 0, width, height).data;
+    binaryMask = new Uint8Array(width * height);
+    for (let pixel = 0; pixel < binaryMask.length; pixel++) {
+      binaryMask[pixel] = maskRgba[pixel * 4 + 3] > 0 ? 1 : 0;
+    }
+  } else {
+    binaryMask = new Uint8Array(width * height);
+    const box = mask.box;
+    const xStart = Math.max(0, Math.floor((box.x / 100) * width));
+    const yStart = Math.max(0, Math.floor((box.y / 100) * height));
+    const xEnd = Math.min(width, Math.ceil(((box.x + box.width) / 100) * width));
+    const yEnd = Math.min(height, Math.ceil(((box.y + box.height) / 100) * height));
+    for (let y = yStart; y < yEnd; y++) {
+      for (let x = xStart; x < xEnd; x++) {
+        binaryMask[y * width + x] = 1;
+      }
+    }
+  }
+
+  return detectMaskedColor(source.data, binaryMask);
 }
 
 export async function exportStoryboardAnimaticVideo(

@@ -99,15 +99,10 @@ test.describe('Edge Cases & Scenario B Verification', () => {
     // Verify shot 2 status changed to consistent / 0-drift verified
     await expect(page.locator('body')).toContainText(/0 outside-mask pixel drift/i);
 
-    // Test Voice Directive for color change via Review tab
-    await page.getByRole('tab', { name: 'Review', exact: true }).click();
-    await page.waitForTimeout(500);
-
-    // The command panel now lives inside the Review tab's collapsed Project controls.
-    await page.getByText('Project controls', { exact: true }).click();
-    const commandInput = page.locator('#director-command-input');
-    await commandInput.fill('Change continuity rule: cup color must be emerald');
-    await page.getByRole('button', { name: 'Run', exact: true }).click();
+    // Color rule through the composer
+    const composer = page.getByRole('textbox', { name: 'Describe your video or edit' });
+    await composer.fill('Change continuity rule: cup color must be emerald');
+    await page.getByRole('button', { name: 'Apply direction', exact: true }).click();
     await page.waitForTimeout(1000);
 
     // Verify emerald color rule is registered

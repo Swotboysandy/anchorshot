@@ -19,6 +19,7 @@ const toDataUrl = async (url: string): Promise<string> => {
  */
 export async function exportAnimaticMp4(
   shots: StoryboardShot[],
+  options?: { burnInTimecode?: boolean },
 ): Promise<{ video: Blob; narratedShots: number } | null> {
   try {
     const health = await (await fetch('/api/health')).json();
@@ -26,6 +27,7 @@ export async function exportAnimaticMp4(
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Anchorshot-Session': String(health?.sessionToken ?? '') },
       body: JSON.stringify({
+        burnInTimecode: Boolean(options?.burnInTimecode),
         shots: await Promise.all(
           shots.map(async (shot) => ({
             image: await toDataUrl(shot.currentImageUrl),

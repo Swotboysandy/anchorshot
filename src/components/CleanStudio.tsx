@@ -1,10 +1,9 @@
-import {SceneDetailsEditor} from './SceneDetailsEditor';
 import {DashboardLayout} from './DashboardLayout';
 import { Tabs as BeTabs, TabsList as BeTabsList, TabsTrigger as BeTabsTrigger, TabsContent as BeTabsContent } from './ui/beui-tabs';
 import { CreationComposer } from './CreationComposer';
 import { VoiceOverlay } from './VoiceOverlay';
 import type { AgentTools } from '../services/voiceAgent';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
 import { Button } from './ui/button';
 import { Slider } from './ui/slider';
@@ -31,11 +30,14 @@ import { StudioTour } from './StudioTour';
 import { DreamTransitionPanel } from './DreamTransitionPanel';
 import { SceneTransition } from './SceneTransition';
 import { transitionAt } from '../services/sceneTransitions';
-import { speechRecognitionService } from '../services/speechRecognitionService';
 import type { StoryboardShot } from '../types/framelock';
+import { isLocalImage } from '../services/localGeneration';
+
+const hasVerifiedRepair = (shot: StoryboardShot) =>
+  !isLocalImage(shot.currentImageUrl) && Boolean(shot.pixelVerification?.passed) &&
+  shot.currentImageUrl !== shot.originalImageUrl;
 import './cleanStudio.css';
 type Props = {
-  onSaveScene:(id:string,prompt:string,duration:number)=>void;
   storageStatus:string;
   projectId:string; projectTitle:string; projects:{id:string;title:string}[];
   onNewProject:()=>void; onOpenProject:(id:string)=>void; onRenameProject:(title:string)=>void;
@@ -64,91 +66,39 @@ type Props = {
   onShortcuts: () => void;
   shortcuts: ReactNode;
   onAudit: () => void;
+  showMask: boolean;
+  showBefore: boolean;
+  onExportJson: () => void;
+  onExportCsv?: () => void;
+  burnInTimecode?: boolean;
+  onToggleBurnInTimecode?: () => void;
+  splitPosition?: number;
+  onSplitPositionChange?: (pos: number) => void;
+  onCycleShotTake?: (shotId: string) => void;
+  onReorderShot?: (shotId: string, direction: 'left' | 'right') => void;
+  onNudgeDuration?: (shotId: string, delta: number) => void;
+  draft: string;
+  onDraft: (s: string) => void;
+  listening: boolean;
+  onToggleVoice: () => void;
+  voiceNotice: string | null;
 };
 export function CleanStudio(p: Props) {
   const [workspace, setWorkspace] = useState('create'),
     [inputMode, setInputMode] = useState('describe'),
-    [command, setCommand] = useState(''),
-    [voiceNoticeText, setVoiceNoticeText] = useState<string | null>(null),
-    [isDictating, setIsDictating] = useState(false),
-    [voiceOpen, setVoiceOpen] = useState(false),
     [focusDirection, setFocusDirection] = useState(false),
-    [inspect, setInspect] = useState(false);
-
-  const handleSimulateVoice = (sampleText: string) => {
-    setVoiceNoticeText('Simulating voice input stream...');
-    void speechRecognitionService.simulateLocalSpeech(sampleText, {
-      onResult: (text, isFinal) => {
-        setCommand(text);
-        if (isFinal) {
-          setVoiceNoticeText(`Simulated: "${text}"`);
-        }
-      },
-      onStateChange: (listening) => setIsDictating(listening),
-    });
-  };
-
-  const handleToggleVoiceDictation = () => {
-    if (isDictating || speechRecognitionService.isListening()) {
-      speechRecognitionService.stopListening();
-      setIsDictating(false);
-      setVoiceNoticeText('Voice dictation stopped.');
-      return;
-    }
-
-    setVoiceNoticeText(null);
-    if (!speechRecognitionService.isSupported()) {
-      setVoiceNoticeText('Web Speech API is unavailable in this browser. Try simulated voice test below.');
-      return;
-    }
-
-    const started = speechRecognitionService.startListening({
-      continuous: true,
-      interimResults: true,
-      onResult: (text, isFinal) => {
-        setCommand(text);
-        p.onTranscript(text);
-        if (isFinal) {
-          setVoiceNoticeText(`Heard: "${text}"`);
-        }
-      },
-      onError: (err) => {
-        setIsDictating(false);
-        setVoiceNoticeText(err + ' You can type your direction or explicitly try sample dictation.');
-      },
-      onStateChange: (listening) => {
-        setIsDictating(listening);
-        if (listening) {
-          setVoiceNoticeText('Listening live... speak your direction.');
-        }
-      },
-    });
-
-    if (!started) {
-      setVoiceNoticeText('Microphone access could not start. Try simulated voice test.');
-    }
-  };
-
-  useEffect(() => {
-    const syncListening = () => {
-      const active = speechRecognitionService.isListening();
-      setIsDictating((prev) => (prev !== active ? active : prev));
-    };
-    const timer = setInterval(syncListening, 250);
-    return () => clearInterval(timer);
-  }, []);
-
-  useEffect(()=>{setWorkspace('create');setCommand('');setVoiceOpen(false);setInspect(false);},[p.projectId]);
+    [voiceOpen, setVoiceOpen] = useState(false);
+  useEffect(()=>{setWorkspace('create');},[p.projectId]);
   const input = useRef<HTMLDivElement>(null),
     reduced = useReducedMotion();
   useEffect(() => {
-    if (!focusDirection || voiceOpen || workspace !== 'create' || inputMode !== 'describe') return;
+    if (!focusDirection || workspace !== 'create' || inputMode !== 'describe') return;
     const frame = requestAnimationFrame(() => {
       input.current?.querySelector('textarea')?.focus();
       setFocusDirection(false);
     });
     return () => cancelAnimationFrame(frame);
-  }, [focusDirection, voiceOpen, workspace, inputMode]);
+  }, [focusDirection, workspace, inputMode]);
   const transition = transitionAt(
     p.shots.map((s) => s.durationSeconds),
     p.time,
@@ -156,6 +106,75 @@ export function CleanStudio(p: Props) {
   );
   const hasStory = p.shots.length > 0;
   const shot = p.playing ? p.shots[transition.index] : p.activeShot;
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const previewFrameRef = useRef<HTMLDivElement>(null);
+  const [internalSplit, setInternalSplit] = useState(50);
+  const [isWipeDragging, setIsWipeDragging] = useState(false);
+  const currentSplit = p.splitPosition !== undefined ? p.splitPosition : internalSplit;
+
+  const setSplit = useCallback(
+    (pos: number) => {
+      setInternalSplit(pos);
+      p.onSplitPositionChange?.(pos);
+    },
+    [p.onSplitPositionChange]
+  );
+
+  const handleWipePointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      if (!isWipeDragging || !previewFrameRef.current) return;
+      const rect = previewFrameRef.current.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const pct = Math.max(0, Math.min(100, Math.round(((e.clientX - rect.left) / rect.width) * 100)));
+      setSplit(pct);
+    },
+    [isWipeDragging, setSplit]
+  );
+
+  const handleWipePointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      if (isWipeDragging) {
+        setIsWipeDragging(false);
+        try {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        } catch {}
+      }
+    },
+    [isWipeDragging]
+  );
+
+  // Synchronize master animatic playback state with HTML video element
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !shot?.videoUrl) return;
+
+    if (p.playing) {
+      video.play().catch(() => {});
+    } else {
+      video.pause();
+    }
+  }, [p.playing, shot?.videoUrl]);
+
+  // Synchronize master timeline seek position with video element
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !shot?.videoUrl || !p.shots.length) return;
+
+    // Calculate start offset of this shot within the total timeline
+    let shotStartSeconds = 0;
+    for (const s of p.shots) {
+      if (s.id === shot.id) break;
+      shotStartSeconds += s.durationSeconds;
+    }
+
+    const shotOffset = p.time - shotStartSeconds;
+    if (shotOffset >= 0 && video.duration && !isNaN(video.duration)) {
+      const targetTime = shotOffset % video.duration;
+      if (Math.abs(video.currentTime - targetTime) > 0.3) {
+        video.currentTime = targetTime;
+      }
+    }
+  }, [p.time, shot?.id, shot?.videoUrl, p.shots]);
   const selectWorkspace = (value: string) => {
     if (p.playing) p.onPlay();
     setWorkspace(value);
@@ -189,7 +208,6 @@ export function CleanStudio(p: Props) {
         ? p.shots.map((s) => `Shot ${s.shotNumber}, ${s.status}: ${s.promptDescription}`).join('\n')
         : 'The storyboard is empty.',
   };
-
   return (
     <div className={hasStory ? "clean-studio dark editor-shell" : "clean-studio dark"}>
       <a className="clean-skip" href="#clean-main">
@@ -227,7 +245,7 @@ export function CleanStudio(p: Props) {
         </div>
       </header>
       <Tabs value={workspace} onValueChange={selectWorkspace}>
-        <div className="workspace-nav" hidden={!hasStory}>
+        <div className="workspace-nav">
           <TabsList aria-label="Workspace">
             <TabsTrigger value="create">
               <Film size={18} aria-hidden="true"/> Create
@@ -235,7 +253,7 @@ export function CleanStudio(p: Props) {
             <TabsTrigger value="dream">
               <Layers size={18} aria-hidden="true"/> Dream
             </TabsTrigger>
-            <TabsTrigger value="review" disabled={!hasStory}>
+            <TabsTrigger value="review">
               <Check size={18} aria-hidden="true"/> Review
             </TabsTrigger>
           </TabsList>
@@ -243,7 +261,55 @@ export function CleanStudio(p: Props) {
             Keyboard shortcuts <span>?</span>
           </Button>
         </div>
-        {hasStory && <div className="editor-actionbar"><div><span className="editor-section-label">{workspace==='create'?'FILM EDITOR':workspace==='dream'?'TRANSITIONS':'CONTINUITY'}</span><h1>{workspace==='create'?'Storyboard':workspace==='dream'?'Dream studio':'Scene review'}</h1></div><div className="editor-context-actions"><span>{p.shots.length} scenes · {p.duration.toFixed(1)}s</span><Button variant="outline" size="sm" onClick={p.onAudit} disabled={p.processing}>Check continuity</Button><Button size="sm" onClick={p.onExport} disabled={p.exporting||p.processing}><Download size={15}/>{p.exporting?'Exporting...':'Export film'}</Button></div></div>}
+        {hasStory && (
+          <div className="editor-actionbar">
+            <div>
+              <span className="editor-section-label">
+                {workspace === 'create'
+                  ? 'FILM EDITOR · STORYBOARD'
+                  : workspace === 'dream'
+                  ? 'TRANSITIONS · COMPOSITING'
+                  : 'CONTINUITY · QC'}
+              </span>
+              <h1>
+                {workspace === 'create'
+                  ? 'Storyboard'
+                  : workspace === 'dream'
+                  ? 'Dream studio'
+                  : 'Scene review'}
+              </h1>
+            </div>
+            <div className="editor-context-actions">
+              <span>{p.shots.length} scenes · {(p.duration ?? 0).toFixed(1)}s</span>
+              <Button variant="outline" size="sm" onClick={p.onAudit} disabled={p.processing}>
+                Check continuity
+              </Button>
+              {p.onExportCsv && (
+                <Button variant="outline" size="sm" onClick={p.onExportCsv} disabled={p.processing}>
+                  Export CSV
+                </Button>
+              )}
+              <Button variant="outline" size="sm" onClick={p.onExportJson} disabled={p.processing}>
+                Export JSON
+              </Button>
+              {p.onToggleBurnInTimecode && (
+                <label className="flex items-center gap-1.5 text-xs font-mono text-[#94A3B8] cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={p.burnInTimecode ?? false}
+                    onChange={p.onToggleBurnInTimecode}
+                    className="accent-[#38BDF8] rounded"
+                  />
+                  <span>BITC</span>
+                </label>
+              )}
+              <Button size="sm" onClick={p.onExport} disabled={p.exporting || p.processing}>
+                <Download size={15} />
+                {p.exporting ? 'Exporting...' : p.burnInTimecode ? 'Export MP4 (BITC)' : 'Export film'}
+              </Button>
+            </div>
+          </div>
+        )}
         <main id="clean-main">
           <TabsContent value="create" forceMount hidden={workspace !== 'create'}>
             <DashboardLayout active={hasStory}>
@@ -263,31 +329,19 @@ export function CleanStudio(p: Props) {
                     <BeTabsTrigger value="script">Paste a script</BeTabsTrigger>
                   </BeTabsList>
                   <BeTabsContent value="describe">
-                    {voiceNoticeText && (
-                      <div className="inline-notice flex items-center justify-between gap-2" role="status">
-                        <span>{voiceNoticeText}</span>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 text-xs text-white hover:text-neutral-300 px-1.5 underline"
-                          onClick={() => handleSimulateVoice('I am holding a blue cup in my kitchen. The walls dissolve into an ocean, but the cup stays exactly the same.')}
-                        >
-                          Run Sample Dictation
-                        </Button>
-                      </div>
-                    )}
+                    {p.voiceNotice && <p className="input-note" role="status">{p.voiceNotice}</p>}
                     <div ref={input} className="creation-composer-slot">
                       <CreationComposer
-                        prompt={command}
-                        setPrompt={setCommand}
+                        prompt={p.draft}
+                        setPrompt={p.onDraft}
                         isLoading={p.processing}
                         onSubmit={p.onCommand}
                         onScript={() => setInputMode('script')}
                         hasStory={hasStory}
                         onReview={() => selectWorkspace('review')}
-                        onTools={() => setInspect((value) => !value)}
-                        onVoice={handleToggleVoiceDictation}
-                        isListening={isDictating}
+                        onTools={() => selectWorkspace('review')}
+                        onVoice={p.onToggleVoice}
+                        isListening={p.listening}
                       />
                     </div>
                     <p className="input-note">Type a direction, or open the voice preview. Storyboards use local sample scenes.</p>
@@ -298,22 +352,36 @@ export function CleanStudio(p: Props) {
                         ['Rainy city escape', 'I walk through a rainy city under an amber umbrella. The street transforms into a quiet forest; the umbrella stays with me.'],
                         ['Bring a memory to life', 'Turn a memory of a quiet morning with my family into a short film, keeping the familiar objects consistent.'],
                       ].map(([label, idea]) => <Button key={label} variant="outline" size="sm" className="rounded-full"
-                        onClick={() => { setCommand(idea); setFocusDirection(true); }}>
+                        onClick={() => { p.onDraft(idea); setFocusDirection(true); }}>
                         {label}<ArrowUpRight size={13} aria-hidden="true" />
                       </Button>)}
                     </div>}
-                    {hasStory && <div className="direction-suggestions">
-                      <Button variant="outline" size="sm" onClick={() => { setCommand(''); p.onCommand('Fix shot 2'); }}>
-                        Fix shot 2 <ArrowUpRight size={12} />
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => { setCommand(''); p.onCommand('Narrate the scene'); }}
-                      >
-                        Describe this scene <ArrowUpRight size={12} />
-                      </Button>
-                    </div>}
+                    {hasStory && (
+                      <div className="starter-suggestions direction-suggestions" aria-label="Direction suggestions">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="rounded-full"
+                          onClick={() => {
+                            p.onDraft('');
+                            p.onCommand('Fix shot 2');
+                          }}
+                        >
+                          Fix shot 2<ArrowUpRight size={13} aria-hidden="true" />
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="rounded-full"
+                          onClick={() => {
+                            p.onDraft('');
+                            p.onCommand('Narrate the scene');
+                          }}
+                        >
+                          Narrate the scene<ArrowUpRight size={13} aria-hidden="true" />
+                        </Button>
+                      </div>
+                    )}
                   </BeTabsContent>
                   <BeTabsContent value="script">
                     <label className="script-label" htmlFor="film-script">
@@ -350,16 +418,97 @@ export function CleanStudio(p: Props) {
                   <span className="sample-badge">Sample storyboard</span>
                 </div>
                 <div className="preview-frame">
-                  {shot ? (
-                    <SceneTransition
-                      source={shot.currentImageUrl}
-                      destination={
-                        p.playing ? p.shots[transition.index + 1]?.currentImageUrl : undefined
-                      }
-                      mask={shot.proposedFix?.mask?.maskBase64}
-                      progress={p.playing ? transition.progress : 0}
-                      description={`Preview of shot ${shot.shotNumber}`}
-                    />
+                  {shot?.videoUrl ? (
+                    <div className="relative w-full h-full flex items-center justify-center bg-black rounded overflow-hidden">
+                      <video
+                        ref={videoRef}
+                        key={shot.videoUrl}
+                        src={shot.videoUrl}
+                        muted
+                        playsInline
+                        className="w-full h-full object-contain cursor-pointer"
+                        onClick={p.onPlay}
+                        aria-label={`Video preview of shot ${shot.shotNumber}: ${shot.promptDescription}`}
+                      />
+                      <div className="absolute top-2 right-2 px-2 py-0.5 bg-[#10B981] text-black text-[10px] font-bold rounded flex items-center gap-1 shadow">
+                        <span>AI VIDEO PREVIEW</span>
+                      </div>
+                    </div>
+                  ) : shot ? (
+                    p.showBefore && hasVerifiedRepair(shot) ? (
+                      <div
+                        ref={previewFrameRef}
+                        className="relative w-full h-full overflow-hidden select-none cursor-ew-resize"
+                        onPointerDown={(e) => {
+                          setIsWipeDragging(true);
+                          e.currentTarget.setPointerCapture(e.pointerId);
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          if (rect.width > 0) {
+                            const pct = Math.max(0, Math.min(100, Math.round(((e.clientX - rect.left) / rect.width) * 100)));
+                            setSplit(pct);
+                          }
+                        }}
+                        onPointerMove={handleWipePointerMove}
+                        onPointerUp={handleWipePointerUp}
+                        onPointerCancel={handleWipePointerUp}
+                        role="region"
+                        aria-label={`Interactive Before and After split wipe for shot ${shot.shotNumber}. Split position ${currentSplit} percent.`}
+                      >
+                        {/* Repaired (After) Base Layer */}
+                        <img
+                          src={shot.currentImageUrl}
+                          alt={`Repaired shot ${shot.shotNumber}`}
+                          className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+                        />
+                        {/* Original (Before) Clipped Layer */}
+                        <div
+                          className="absolute inset-0 pointer-events-none"
+                          style={{
+                            clipPath: `polygon(0 0, ${currentSplit}% 0, ${currentSplit}% 100%, 0 100%)`,
+                          }}
+                        >
+                          <img
+                            src={shot.originalImageUrl}
+                            alt={`Original shot ${shot.shotNumber} before repair`}
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                        {/* Vertical Split Line & Handle */}
+                        <div
+                          className="absolute top-0 bottom-0 w-1 bg-[#38BDF8] shadow-[0_0_8px_rgba(56,189,248,0.8)] z-20 flex items-center justify-center -translate-x-1/2 pointer-events-none"
+                          style={{ left: `${currentSplit}%` }}
+                        >
+                          <div className="px-2 py-0.5 bg-[#0A0D12]/90 border border-[#38BDF8] text-[#38BDF8] text-[10px] font-mono font-bold rounded shadow-lg whitespace-nowrap">
+                            ◄ BEFORE | AFTER ►
+                          </div>
+                        </div>
+                        {/* Corner labels */}
+                        <div className="absolute top-2 left-2 px-2 py-0.5 bg-white text-black text-[10px] font-bold rounded shadow pointer-events-none">
+                          BEFORE FIX
+                        </div>
+                        <div className="absolute top-2 right-2 px-2 py-0.5 bg-[#10B981] text-black text-[10px] font-bold rounded shadow pointer-events-none">
+                          AFTER FIX
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                      <SceneTransition
+                        source={shot.currentImageUrl}
+                        destination={
+                          p.playing ? p.shots[transition.index + 1]?.currentImageUrl : undefined
+                        }
+                        mask={shot.proposedFix?.mask?.maskBase64}
+                        progress={p.playing ? transition.progress : 0}
+                        description={`Preview of shot ${shot.shotNumber}`}
+                      />
+                      {p.showMask && shot.proposedFix?.mask && (
+                        <>
+                          <img src={shot.proposedFix.mask.maskBase64} alt="" aria-hidden="true" className="absolute inset-0 w-full h-full object-cover pointer-events-none opacity-80" />
+                          <div aria-hidden="true" className="absolute pointer-events-none border-2 border-dashed border-white rounded" style={{left:`${shot.proposedFix.mask.box.x}%`,top:`${shot.proposedFix.mask.box.y}%`,width:`${shot.proposedFix.mask.box.width}%`,height:`${shot.proposedFix.mask.box.height}%`}} />
+                        </>
+                      )}
+                      </>
+                    )
                   ) : (
                     <div className="preview-empty">Preparing your storyboard...</div>
                   )}
@@ -369,7 +518,7 @@ export function CleanStudio(p: Props) {
                   </div>
                   <Button
                     size="icon"
-                    className="preview-play"
+                    className={`preview-play ${p.playing && shot?.videoUrl ? 'opacity-0 hover:opacity-100 transition-opacity' : ''}`}
                     onClick={p.onPlay}
                     disabled={!p.shots.length}
                     aria-label={p.playing ? 'Pause preview' : 'Play preview'}
@@ -387,7 +536,7 @@ export function CleanStudio(p: Props) {
                   >
                     {p.playing ? <Pause size={15} /> : <Play size={15} />}
                   </Button>
-                  <output>{p.time.toFixed(1)}s</output>
+                  <output>{(p.time ?? 0).toFixed(1)}s</output>
                   <Slider
                     onKeyDown={event => event.stopPropagation()}
                     ref={node => { node?.querySelector('[role="slider"]')?.setAttribute("aria-label", "Preview time"); }}
@@ -397,7 +546,7 @@ export function CleanStudio(p: Props) {
                     value={[p.time]}
                     onValueChange={([value]) => p.onSeek(value)}
                   />
-                  <span>{p.duration.toFixed(1)}s</span>
+                  <span>{(p.duration ?? 0).toFixed(1)}s</span>
                   <Button
                     variant="ghost"
                     size="icon"
@@ -412,14 +561,72 @@ export function CleanStudio(p: Props) {
                   <span>
                     Storyboard <span className="count-label">{p.shots.length} shots</span>
                   </span>
+                  {p.activeShot && (p.onReorderShot || p.onNudgeDuration) && (
+                    <div className="inline-flex items-center gap-1.5 text-xs">
+                      {p.onReorderShot && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            title="Move shot earlier in sequence (Alt+Left)"
+                            aria-label={`Move shot ${p.activeShot.shotNumber} earlier`}
+                            disabled={p.playing || p.shots.findIndex((s) => s.id === p.activeShot!.id) === 0}
+                            onClick={() => p.onReorderShot!(p.activeShot!.id, 'left')}
+                          >
+                            ◀ Move
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            title="Move shot later in sequence (Alt+Right)"
+                            aria-label={`Move shot ${p.activeShot.shotNumber} later`}
+                            disabled={p.playing || p.shots.findIndex((s) => s.id === p.activeShot!.id) === p.shots.length - 1}
+                            onClick={() => p.onReorderShot!(p.activeShot!.id, 'right')}
+                          >
+                            Move ▶
+                          </Button>
+                        </>
+                      )}
+                      {p.onNudgeDuration && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs font-mono"
+                            title="Trim duration by -0.5s ([)"
+                            aria-label={`Decrease duration of shot ${p.activeShot.shotNumber}`}
+                            disabled={p.playing || p.activeShot.durationSeconds <= 0.5}
+                            onClick={() => p.onNudgeDuration!(p.activeShot!.id, -0.5)}
+                          >
+                            -0.5s
+                          </Button>
+                          <span className="text-xs font-mono text-[#CBD5E1] tabular-nums px-0.5">
+                            {p.activeShot.durationSeconds.toFixed(1)}s
+                          </span>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs font-mono"
+                            title="Extend duration by +0.5s (])"
+                            aria-label={`Increase duration of shot ${p.activeShot.shotNumber}`}
+                            disabled={p.playing || p.activeShot.durationSeconds >= 15}
+                            onClick={() => p.onNudgeDuration!(p.activeShot!.id, 0.5)}
+                          >
+                            +0.5s
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  )}
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setInspect((v) => !v)}
-                    aria-expanded={inspect}
+                    onClick={() => selectWorkspace('review')}
                   >
                     <SlidersHorizontal size={14} />
-                    {inspect ? 'Close tools' : 'Shot tools'}
+                    Review shot
                   </Button>
                 </div>
                 <div className="shot-strip">
@@ -428,7 +635,19 @@ export function CleanStudio(p: Props) {
                       key={s.id}
                       variant="outline"
                       className={shot?.id === s.id ? 'shot-thumb selected' : 'shot-thumb'}
-                      onClick={() => p.onSelect(s.id)}
+                      onClick={() => {
+                        p.onSelect(s.id);
+                        if (typeof s.timestamp === 'number') {
+                          p.onSeek(s.timestamp);
+                        } else {
+                          let offset = 0;
+                          for (const prev of p.shots) {
+                            if (prev.id === s.id) break;
+                            offset += prev.durationSeconds;
+                          }
+                          p.onSeek(offset);
+                        }
+                      }}
                       aria-label={`Select shot ${s.shotNumber}`}
                       aria-pressed={shot?.id === s.id}
                     >
@@ -436,22 +655,16 @@ export function CleanStudio(p: Props) {
                       <span>
                         <b>{String(s.shotNumber).padStart(2, '0')}</b>
                         {s.durationSeconds}s
+                        {s.revisions?.length > 1 && (
+                          <span className="take-pill ml-1 px-1 py-0.5 bg-[#0F172A] border border-[#38BDF8]/60 text-[#38BDF8] text-[9px] font-mono rounded">
+                            T{s.revisions.findIndex((r) => r.imageUrl === s.currentImageUrl) + 1}
+                          </span>
+                        )}
                       </span>
                     </Button>
                   ))}
                 </div>
-                <div className="film-footer">
-                  <span>
-                    <i /> {p.processing ? 'Working locally...' : 'Ready for your next direction'}
-                  </span>
-                  <Button disabled={p.exporting || !p.shots.length} onClick={p.onExport}>
-                    <Download size={15} />
-                    {p.exporting ? 'Exporting...' : 'Export film'}
-                  </Button>
-                </div>
-                {inspect && <div className="tools-surface">{p.inspector}</div>}
               </section>}
-              {hasStory && shot && <SceneDetailsEditor key={shot.id} shot={shot} disabled={p.processing||p.playing} onSave={p.onSaveScene}/>}
 
             </DashboardLayout>
           </TabsContent>
@@ -464,15 +677,29 @@ export function CleanStudio(p: Props) {
           </TabsContent>
           <TabsContent value="review" forceMount hidden={workspace !== 'review'}>
             <DashboardLayout active>
-              <section className="workspace-guide"><p className="eyebrow">REVIEW</p><h1>Scenes</h1><p>Select a scene to inspect its anchors, corrections and revision history.</p><Button onClick={p.onAudit} disabled={p.processing}>Review sequence<Check size={15}/></Button>
-              <div className="review-scene-list">{p.shots.map(scene=><Button key={scene.id} variant="ghost" className="review-scene" aria-pressed={scene.id===shot?.id} onClick={()=>p.onSelect(scene.id)}><img src={scene.currentImageUrl} alt=""/><span>Scene {scene.shotNumber}<small>{scene.status} · {scene.durationSeconds}s</small></span></Button>)}</div></section>
-              <section className="tools-surface unified-tools" aria-label="Scene review tools">{workspace==='review' && p.inspector}</section>
+              <section className="workspace-guide"><p className="eyebrow">REVIEW</p><h1>Scenes</h1><p>Select a scene to inspect its anchors, corrections and revision history.</p><Button onClick={p.onAudit} disabled={p.processing}>Review sequence<Check size={15}/></Button>{!hasStory && <p>Create a storyboard first. Your shots will appear here for review.</p>}
+              <div className="review-scene-list">{p.shots.map(scene=>{
+                const activeTake = scene.revisions?.findIndex(r => r.imageUrl === scene.currentImageUrl) ?? -1;
+                return (
+                  <Button key={scene.id} variant="ghost" className="review-scene" aria-pressed={scene.id===shot?.id} onClick={()=>p.onSelect(scene.id)}>
+                    <img src={scene.currentImageUrl} alt=""/>
+                    <span>
+                      Scene {scene.shotNumber}
+                      <small>
+                        {scene.status} · {scene.durationSeconds}s
+                        {scene.revisions?.length > 1 && ` · Take ${activeTake >= 0 ? activeTake + 1 : scene.revisions.length}/${scene.revisions.length}`}
+                      </small>
+                    </span>
+                  </Button>
+                );
+              })}</div></section>
+              <section className="tools-surface unified-tools" aria-label="Scene review tools">{workspace==='review' && hasStory && p.inspector}</section>
               <aside className="workspace-guide"><p className="eyebrow">PROJECT</p><h2>Story &amp; rules</h2><p>Your script and continuity rules guide each scene. Open project controls to change the sequence or edit rules.</p><details className="project-controls"><summary>Project controls</summary><div className="tools-surface unified-tools">{workspace==='review' && p.controls}</div></details><Button variant="outline" onClick={()=>selectWorkspace('create')}>Back to film</Button></aside>
             </DashboardLayout>
           </TabsContent>
         </main>
       </Tabs>
-      <footer className="workspace-footer" hidden={!hasStory}>
+      <footer className="workspace-footer">
         <span>ANCHORSHOT / LOCAL STUDIO</span>
         <details>
           <summary>Activity</summary>
@@ -480,7 +707,6 @@ export function CleanStudio(p: Props) {
             {p.status}
           </p>
         </details>
-        <span>No cloud generation</span>
       </footer>
       <div className="sr-only" role="status" aria-live="polite">
         {p.status}

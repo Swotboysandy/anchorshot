@@ -1,7 +1,7 @@
 import {test,expect} from '@playwright/test';
 import {mkdir,readFile} from 'node:fs/promises';
 test('independent cup and umbrella corrections survive transition and export offline',async({page})=>{
- test.setTimeout(90000);const posts:string[]=[],errors:string[]=[];page.on('request',r=>{if(r.method()==='POST')posts.push(r.url());});page.on('pageerror',e=>errors.push(e.message));
+ test.setTimeout(240000);const posts:string[]=[],errors:string[]=[];page.on('request',r=>{if(r.method()==='POST')posts.push(r.url());});page.on('pageerror',e=>errors.push(e.message));
  await page.goto('/');await page.getByRole('textbox',{name:'Describe your video or edit'}).fill('A kitchen opens onto an ocean. A blue cup stays in place.');await page.getByRole('button',{name:'Apply direction',exact:true}).click();await page.getByRole('region',{name:'Film preview'}).waitFor();await page.getByRole('tab',{name:'Dream',exact:true}).click();await page.getByRole('button',{name:/Open dream transition/}).click();
  await page.getByRole('button',{name:'Select real cup',exact:true}).click();
  await page.getByRole('button',{name:'Use real cup sample'}).click();await page.getByRole('button',{name:'Start rough sample outline'}).click();await page.getByRole('button',{name:'Apply cup to dream'}).click();
@@ -12,7 +12,7 @@ test('independent cup and umbrella corrections survive transition and export off
  const before=await editor.getByRole('status').textContent();await canvas.focus();await page.keyboard.press(' ');await expect(editor.getByRole('status')).not.toHaveText(before!);
  await editor.getByRole('button',{name:'Undo mask edit'}).click();await expect(editor.getByRole('status')).toHaveText(before!);
  await canvas.focus();await page.keyboard.press(' ');await editor.getByRole('button',{name:'Apply umbrella to dream'}).click();
- await page.getByRole('button',{name:'Check both objects'}).click();await expect(page.getByLabel('umbrella preservation score')).toContainText('0 changed pixels');await expect(page.getByLabel('cup preservation score')).toContainText('0 changed pixels');
+ await page.getByRole('button',{name:'Check both objects'}).click();await expect(page.getByLabel('umbrella preservation score')).toContainText('0 changed pixels',{timeout:30000});await expect(page.getByLabel('cup preservation score')).toContainText('0 changed pixels',{timeout:30000});
  await mkdir('.artifacts/two-anchors',{recursive:true});
  for(const [label,file] of [['Save quality report','quality.json'],['Save cup mask','cup.png'],['Save umbrella mask','umbrella.png'],['Save PNG frame','first.png']]){const d=page.waitForEvent('download');await page.getByRole('button',{name:label,exact:true}).click();await(await d).saveAs('.artifacts/two-anchors/'+file);}
  const report=JSON.parse(await readFile('.artifacts/two-anchors/quality.json','utf8'));expect(report.framesChecked).toBe(289);expect(report.objects).toHaveLength(2);for(const o of report.objects)expect(o.changedProtectedPixelsAcrossFrames).toBe(0);

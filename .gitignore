@@ -7,3 +7,6 @@ test-results/
 playwright-report/
 *.log
 __pycache__/
+orca-*.png
+.mimosa/
+.xerj-data/

@@ -55,6 +55,7 @@ describe('planner providers', () => {
     expect(res.status).toBe(502);
     expect(res.body.error).toMatch(/invalid plan/);
   });
+
 });
 
 describe('planned shot lists', () => {
