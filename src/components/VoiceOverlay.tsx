@@ -4,6 +4,8 @@ import type { VoiceConversation } from '@elevenlabs/client';
 import { VoiceOrb } from './agents/voice-orb';
 import './voiceOverlay.css';
 import { SPRING_PRESS } from '../lib/ease';
+import { Conversation, ConversationContent } from './ui/conversation';
+import { Message, MessageContent } from './ui/message';
 import { agentAvailable, startAgentConversation, type AgentTools } from '../services/voiceAgent';
 
 const COLORS = ['#b7b7b7', '#ffffff', '#252525'] as const;
@@ -27,6 +29,8 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
   const frame = useRef(0);
   const agentActivity = useMotionValue(0);
   const [agentStatus, setAgentStatus] = useState('');
+  const [captions, setCaptions] = useState<Array<{ id: number; from: 'user' | 'assistant'; text: string }>>([]);
+  const captionId = useRef(0);
   const stop = useCallback(() => {
     generation.current++;
     cancelAnimationFrame(frame.current);
@@ -60,8 +64,11 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
   const startAgent = async (request: number, session: string) => {
     const active = await startAgentConversation(session, agentTools ?? {}, {
       onStatus: (status) => request === generation.current && setAgentStatus(status),
-      onMessage: (role, text) =>
-        request === generation.current && setAgentStatus(`${role === 'user' ? 'You' : 'Agent'}: ${text}`),
+      onMessage: (role, text) => {
+        if (request !== generation.current) return;
+        setAgentStatus(`${role === 'user' ? 'You' : 'Agent'}: ${text}`);
+        setCaptions((list) => [...list, { id: ++captionId.current, from: role === 'user' ? ('user' as const) : ('assistant' as const), text }].slice(-30));
+      },
       onError: (message) => request === generation.current && setError(message),
       onEnd: () => request === generation.current && onOpenChange(false),
     });
@@ -76,6 +83,7 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
   const start = async () => {
     if (pending || analyser || conversation.current) return;
     const request = ++generation.current;
+    setCaptions([]);
     setPending(true);
     setError('');
     const agent = agentTools ? await agentAvailable() : { ready: false, session: '' };
@@ -136,6 +144,20 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
   };
   return (
     <div className="voice-orb-only">
+      {captions.length > 0 && (
+        <Conversation className="voice-captions dark rounded-lg border border-border bg-background text-foreground" aria-label="Voice agent captions">
+          <ConversationContent>
+            {captions.map((caption) => (
+              <Message key={caption.id} from={caption.from}>
+                <MessageContent>
+                  <span className="sr-only">{caption.from === 'user' ? 'You said:' : 'Agent said:'}</span>
+                  {caption.text}
+                </MessageContent>
+              </Message>
+            ))}
+          </ConversationContent>
+        </Conversation>
+      )}
       <motion.button type="button" className="voice-orb-toggle"
         animate={{scale: reduced ? 1 : analyser ? 1.12 : 1}}
         whileHover={reduced ? undefined : {scale: analyser ? 1.16 : 1.04}}
