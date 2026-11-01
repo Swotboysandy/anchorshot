@@ -1,4 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+// Sample frames are drawn on a browser canvas; stand in for it under Node.
+vi.mock('../src/services/canvasEngine', async (original) => ({
+  ...(await original<typeof import('../src/services/canvasEngine')>()),
+  renderMuseStoryboardFrame: () => ({ imageUrl: 'data:image/png;base64,AA==', box: { x: 50, y: 50, width: 10, height: 10 } }),
+}));
 import { MetaModelClient } from '../src/services/metaModels';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -30,5 +35,38 @@ describe('continuity rules from the server planner', () => {
     expect((await new MetaModelClient().extractContinuityRules('The jacket must be amber.'))[0]).toMatchObject({ targetObject: 'jacket', expectedValue: 'amber' });
     stub({ plannerLive: true }, () => Response.json({ error: 'invalid plan' }, { status: 502 }));
     expect((await new MetaModelClient().extractContinuityRules('The jacket must be amber.'))[0]).toMatchObject({ targetObject: 'jacket' });
+  });
+});
+
+describe('storyboard from a planned shot list', () => {
+  const planned = [
+    { subject: 'Night market in rain, courier on a bicycle', size: 'Establishing', angle: 'High', lens: '24mm', movement: 'Pan', light: 'Night', temp: 'Cool', seconds: 6 },
+    { subject: 'Courier weaving past stalls', size: 'Medium', angle: 'Eye level', lens: '35mm', movement: 'Dolly', light: 'Night', temp: 'Cool', seconds: 5 },
+    { subject: 'Clockmaker opens the door', size: 'Medium', angle: 'Eye level', lens: '50mm', movement: 'Push in', light: 'Night', temp: 'Warm', seconds: 4 },
+    { subject: 'Clockmaker smiles at the courier', size: 'Close', angle: 'Low', lens: '85mm', movement: 'Locked', light: 'Night', temp: 'Warm', seconds: 5 },
+    { subject: 'Package changes hands', size: 'Insert', angle: 'High', lens: '85mm', movement: 'Locked', light: 'Night', temp: 'Warm', seconds: 3 },
+  ];
+  const plan = () =>
+    Response.json({ model: 'meta', ruleRevision: 1, rules: [{ id: 'rule-jacket-color', scope: 'all_shots', targetObject: 'jacket', property: 'color', expectedValue: 'emerald', revision: 1 }], shots: planned });
+
+  it('uses the planned count, framing, lengths and subjects for sample frames', async () => {
+    stub({ plannerLive: true, sessionToken: 't' }, plan);
+    const { shots } = await new MetaModelClient().generateStoryboardFromTranscript('A courier rides to the clockmaker.', undefined, false);
+    expect(shots.map((s) => [s.durationSeconds, s.promptDescription])).toEqual(planned.map((p) => [p.seconds, p.subject]));
+    expect(shots[3].spokenDescription).toMatch(/^Shot 4, close shot, low angle on 85mm, locked camera, night light, duration 5 seconds\./);
+  });
+
+  it('builds model-frame prompts from the plan with continuity first', async () => {
+    const prompts: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/health') return Response.json({ plannerLive: true, imageModel: 'img', sessionToken: 't' });
+      if (url === '/api/muse/spark') return plan();
+      prompts.push(JSON.parse(String(init?.body)).prompt);
+      return Response.json({ url: `/api/muse/frames/${'a'.repeat(64)}.png`, width: 1024, height: 576, sourceHash: 'a'.repeat(64) });
+    }));
+    const { shots } = await new MetaModelClient().generateStoryboardFromTranscript('A courier rides to the clockmaker.');
+    expect(shots).toHaveLength(5);
+    expect(prompts[0].startsWith('CONTINUITY\nThe jacket is emerald')).toBe(true);
+    expect(prompts[0]).toContain('Establishing shot, high angle, 24mm, pan camera. Night market in rain, courier on a bicycle.');
   });
 });
