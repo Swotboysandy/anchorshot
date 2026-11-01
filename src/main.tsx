@@ -6,6 +6,8 @@ import '@fontsource-variable/jetbrains-mono';
 import '@fontsource-variable/plus-jakarta-sans';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
+import DreamStudio from './dream/DreamStudio';
 import './index.css';
 
-createRoot(document.getElementById('root')!).render(<App />);
+// /dream opens the standalone dream journey workbench; everything else is the studio.
+createRoot(document.getElementById('root')!).render(window.location.pathname === '/dream' ? <DreamStudio /> : <App />);

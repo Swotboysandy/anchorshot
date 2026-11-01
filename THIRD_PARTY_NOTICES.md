@@ -11,3 +11,7 @@ Runtime dependencies remain under their respective licenses. In particular:
 - Sharp retains its Apache 2.0 license; native dependencies have their own accompanying notices.
 
 The parser conformance test uses a short documented wire example from Meta's [SAM output documentation](https://dev.meta.ai/docs/sam/reading-segmentation). It is a protocol fixture, not evidence of a live inference call.
+
+The dream experiment uses @fix-webm-duration/fix and its parser under the MIT license to add recording duration metadata. The upstream license is included in licenses/WEBM-DURATION-MIT.txt.
+
+Motion for React retains its MIT license, reproduced in licenses/MOTION-MIT.txt.
