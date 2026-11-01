@@ -75,6 +75,7 @@ export function createApp(options: Options) {
       requestsUsed,
       requestLimit: settings.requestLimit,
       tracksStored: trackStore.listTracks().length,
+      plannerLive: planner !== fixturePlanner,
       imageModel: options.imager?.model ?? null,
       transcribeModel: options.transcriber?.model ?? null,
       narrationModel: options.narrator?.model ?? null,

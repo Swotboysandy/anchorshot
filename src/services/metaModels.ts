@@ -162,6 +162,8 @@ export class MetaModelClient {
    * 2A. `muse-spark-1.3` — Continuity Rule Extraction (Structured JSON Output)
    */
   public async extractContinuityRules(transcript: string): Promise<ContinuityRule[]> {
+    const live = await this.extractRulesWithServerPlanner(transcript);
+    if (live) return live;
     await new Promise((r) => setTimeout(r, 240));
     const lower = transcript.toLowerCase();
 
@@ -218,6 +220,46 @@ export class MetaModelClient {
     );
 
     return rules;
+  }
+
+  /**
+   * Uses the server's connected planner (for example Meta muse-spark through Baseten).
+   * Returns null when only the offline fixture is available or the call fails, so the
+   * local keyword planner still answers.
+   */
+  private async extractRulesWithServerPlanner(transcript: string): Promise<ContinuityRule[] | null> {
+    if (typeof fetch !== 'function') return null;
+    try {
+      const health = await (await fetch('/api/health')).json();
+      if (health?.plannerLive !== true) return null;
+      const res = await fetch('/api/muse/spark', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Anchorshot-Session': String(health.sessionToken ?? '') },
+        body: JSON.stringify({ transcript, previousRevision: 0 }),
+      });
+      const plan = await res.json();
+      if (!res.ok || !Array.isArray(plan.rules) || !plan.rules.length) return null;
+      const rules: ContinuityRule[] = plan.rules;
+      const anchor = rules[0].targetObject;
+      this.recordCall(
+        'muse-spark-1.3',
+        'extractContinuityRules',
+        `${plan.model} extracted ${rules.map((r) => `${r.targetObject}.color = "${r.expectedValue}"`).join(', ')}`
+      );
+      return [
+        ...rules,
+        {
+          id: `rule-${anchor}-presence`,
+          scope: 'all_shots',
+          targetObject: anchor,
+          property: 'spatial_anchor',
+          expectedValue: 'foreground_counter',
+          revision: plan.ruleRevision,
+        },
+      ];
+    } catch {
+      return null;
+    }
   }
 
   /**
