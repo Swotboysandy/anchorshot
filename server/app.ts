@@ -1,5 +1,5 @@
 import { randomBytes, createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, join, isAbsolute } from 'node:path';
 import express, { type ErrorRequestHandler } from 'express';
 import sharp from 'sharp';
@@ -200,8 +200,6 @@ interface Options {
   ffmpegAvailable?: () => Promise<boolean>;
 }
 
-const MAX_FRAMES = 48;
-
 export function createApp(options: Options) {
   const app = express();
   const sessionToken = randomBytes(24).toString('hex');
@@ -213,7 +211,7 @@ export function createApp(options: Options) {
   let transcribeActive = false;
   let narrationCharsUsed = 0;
   let exportActive = false;
-  const frames = new Map<string, Buffer>();
+  const frameFolder = resolve('.artifacts/frames');
 
   app.disable('x-powered-by');
   app.use('/api', (req, res, next) => {
@@ -621,9 +619,9 @@ export function createApp(options: Options) {
       );
       if (controller.signal.aborted) return;
       const { image, ...details } = frame;
-      // Keep the latest frames by content hash; the browser loads them by URL.
-      frames.set(frame.sourceHash, Buffer.from(image.slice(image.indexOf(',') + 1), 'base64'));
-      if (frames.size > MAX_FRAMES) frames.delete(frames.keys().next().value!);
+      // Saved by content hash so projects keep their frames across server restarts.
+      mkdirSync(frameFolder, { recursive: true });
+      writeFileSync(join(frameFolder, `${frame.sourceHash}.png`), Buffer.from(image.slice(image.indexOf(',') + 1), 'base64'));
       res.json({ ...details, url: `/api/muse/frames/${frame.sourceHash}.png` });
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -635,9 +633,9 @@ export function createApp(options: Options) {
   });
 
   app.get('/api/muse/frames/:file', (req, res) => {
-    const frame = frames.get(/^([a-f0-9]{64})\.png$/.exec(req.params.file)?.[1] ?? '');
-    if (!frame) return res.status(404).json({ error: 'This generated frame is no longer available.' });
-    res.type('png').send(frame);
+    const file = /^[a-f0-9]{64}\.png$/.test(req.params.file) ? join(frameFolder, req.params.file) : '';
+    if (!file || !existsSync(file)) return res.status(404).json({ error: 'This generated frame is no longer available.' });
+    res.type('png').send(readFileSync(file));
   });
 
   /**

@@ -26,6 +26,11 @@ describe('colour inside a SAM mask', () => {
     expect(detectMaskedColor(frame([5, 150, 105]), mask).colorName).toBe('emerald');
   });
 
+  it('reads dark film-lit colours by hue', () => {
+    expect(detectMaskedColor(frame([22, 34, 70]), mask).colorName).toBe('blue');
+    expect(detectMaskedColor(frame([60, 18, 20]), mask).colorName).toBe('red');
+  });
+
   it('reports no colour when the mask only covers glare or shadow', () => {
     expect(detectMaskedColor(frame([255, 255, 255]), mask)).toEqual({ colorName: null, rgb: null, pixelCount: 0, confidence: 0 });
     expect(detectMaskedColor(frame([5, 5, 5]), mask).colorName).toBeNull();

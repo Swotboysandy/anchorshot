@@ -30,7 +30,8 @@ export class ImagerOutputError extends Error {}
 export async function acceptFrame(bytes: Buffer, targetObject: string): Promise<CheckedInput> {
   let png: Buffer;
   try {
-    png = await sharp(bytes, { limitInputPixels: 1600 * 1600 }).rotate().png().toBuffer();
+    // Models may return more than SAM accepts; scale down rather than reject the frame.
+    png = await sharp(bytes).rotate().resize(1600, 1600, { fit: 'inside', withoutEnlargement: true }).png().toBuffer();
   } catch {
     throw new ImagerOutputError('The model did not return a readable image.');
   }

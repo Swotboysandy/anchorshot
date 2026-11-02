@@ -1,13 +1,13 @@
 import type { StoryboardShot } from '../types/framelock';
 
-const toDataUrl = async (url: string): Promise<string> => {
+export const toDataUrl = async (url: string): Promise<string> => {
   // Canvas frames are already data URLs; the page CSP does not allow fetching data: URLs.
   if (url.startsWith('data:')) return url;
   const blob = await (await fetch(url)).blob();
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error('A frame could not be read for export.'));
+    reader.onerror = () => reject(new Error('A frame could not be read.'));
     reader.readAsDataURL(blob);
   });
 };

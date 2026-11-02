@@ -267,10 +267,12 @@ export default function App() {
         // Fallback cleanly without video
       }
 
-      speechService.playEarcon(mismatchShot ? 'mismatch' : 'consistent');
+      speechService.playEarcon(mismatchShot ? 'mismatch' : shots.some((s) => s.status === 'uncertain') ? 'focus' : 'consistent');
 
       const summaryMsg = mismatchShot
         ? `Generated ${shots.length} shots. Discrepancy flagged in Shot ${mismatchShot.shotNumber}: ${mismatchShot.discrepancyMessage}`
+        : shots.some((s) => s.status === 'uncertain')
+        ? `Generated ${shots.length} shots. Continuity is not checked yet; say check continuity to run it.`
         : `Generated ${shots.length} shots. All shots pass continuity verification.`;
 
       setProjectState((prev) => ({
