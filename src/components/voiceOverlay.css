@@ -2,6 +2,9 @@
 .voice-orb-only>*{pointer-events:auto}
 .voice-orb-toggle{display:block;padding:0;border:0;background:transparent;border-radius:50%;cursor:pointer;color:inherit}
 .voice-orb-toggle:focus-visible{outline:2px solid white;outline-offset:4px}
+.voice-orb-status{position:absolute;right:calc(100% + 12px);bottom:32px;width:max-content;max-width:min(20rem,calc(100vw - 160px));font-size:12px;line-height:1.4;color:#d4d4d4;text-align:right}
+.studio-notice{position:fixed;left:50%;bottom:16px;translate:-50% 0;z-index:35;width:max-content;max-width:min(32rem,calc(100vw - 32px));margin:0;padding:8px 12px;font-size:13px;line-height:1.4;color:#fff;background:#111;border:1px solid #333;border-radius:8px;pointer-events:none}
+@media(max-width:700px){.studio-notice{left:16px;translate:none;bottom:120px}}
 .clean-studio{padding-bottom:112px}
 .voice-captions{position:absolute;bottom:calc(100% + 12px);right:0;width:min(28rem,calc(100vw - 32px));max-height:min(40vh,320px)}
 @media(max-width:700px){

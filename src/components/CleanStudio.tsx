@@ -185,6 +185,20 @@ export function CleanStudio(p: Props) {
   const agentTools: AgentTools = {
     set_direction: ({ text }) => {
       if (typeof text !== 'string' || !text.trim()) return 'No direction was given.';
+  const spokenDirection = useRef('');
+  // Results are shown briefly as well as announced, so a finished action is visible.
+  const [notice, setNotice] = useState('');
+  const firstStatus = useRef(true);
+  useEffect(() => {
+    if (firstStatus.current) {
+      firstStatus.current = false;
+      return;
+    }
+    setNotice(p.status);
+    const timer = setTimeout(() => setNotice(''), 6000);
+    return () => clearTimeout(timer);
+  }, [p.status]);
+  const reviewTools = useRef<HTMLElement>(null);
       p.onTranscript(text.trim());
       return 'Direction saved to the script.';
     },
@@ -253,6 +267,13 @@ export function CleanStudio(p: Props) {
             </TabsTrigger>
             <TabsTrigger value="dream">
               <Layers size={18} aria-hidden="true"/> Dream
+      {(p.processing || p.exporting) && (
+        <div className="studio-activity">
+          <p>{p.exporting && !p.processing ? 'Exporting film...' : p.status}</p>
+          <Progress value={p.progressPercent} aria-label="Work in progress" />
+        </div>
+      )}
+      {notice && !p.processing && !p.exporting && <p className="studio-notice" aria-hidden="true">{notice}</p>}
             </TabsTrigger>
             <TabsTrigger value="review">
               <Check size={18} aria-hidden="true"/> Review
@@ -684,7 +705,7 @@ export function CleanStudio(p: Props) {
               <div className="review-scene-list">{p.shots.map(scene=>{
                 const activeTake = scene.revisions?.findIndex(r => r.imageUrl === scene.currentImageUrl) ?? -1;
                 return (
-                  <Button key={scene.id} variant="ghost" className="review-scene" aria-pressed={scene.id===shot?.id} onClick={()=>p.onSelect(scene.id)}>
+                  <Button key={scene.id} variant="ghost" className="review-scene" aria-pressed={scene.id===shot?.id} onClick={()=>{p.onSelect(scene.id);const tools=reviewTools.current;if(tools&&tools.getBoundingClientRect().top>window.innerHeight*0.6)tools.scrollIntoView({block:'start'});}}>
                     <img src={scene.currentImageUrl} alt=""/>
                     <span>
                       Scene {scene.shotNumber}
@@ -696,7 +717,7 @@ export function CleanStudio(p: Props) {
                   </Button>
                 );
               })}</div></section>
-              <section className="tools-surface unified-tools" aria-label="Scene review tools">{workspace==='review' && hasStory && p.inspector}</section>
+              <section ref={reviewTools} className="tools-surface unified-tools" aria-label="Scene review tools">{workspace==='review' && hasStory && p.inspector}</section>
               <aside className="workspace-guide"><p className="eyebrow">PROJECT</p><h2>Story &amp; rules</h2><p>Your script and continuity rules guide each scene. Open project controls to change the sequence or edit rules.</p><details className="project-controls"><summary>Project controls</summary><div className="tools-surface unified-tools">{workspace==='review' && p.controls}</div></details><Button variant="outline" onClick={()=>selectWorkspace('create')}>Back to film</Button></aside>
             </DashboardLayout>
           </TabsContent>

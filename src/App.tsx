@@ -390,6 +390,15 @@ export default function App() {
         revisionId.endsWith('-initial') &&
         rev.actionApplied.toLowerCase().includes('red');
 
+      // Re-selecting the current take must not discard the shot's verified status.
+      if (rev.imageUrl === targetShot.currentImageUrl) {
+        const takeNumber = targetShot.revisions.indexOf(rev) + 1;
+        setProjectState((prev) => ({
+          ...prev,
+          statusAnnouncement: `Take ${takeNumber} is already in use on Shot ${targetShot.shotNumber}.`,
+        }));
+        return;
+      }
       speechService.playEarcon('focus');
       setProjectState((prev) => ({
         ...prev,
@@ -809,6 +818,10 @@ export default function App() {
     const unreviewed = auditedShots.filter((s) => s.status === 'uncertain').length;
     if (unreviewed) {
       speechService.playEarcon('focus');
+    } catch (error) {
+      setProjectState((prev) => ({ ...prev, isProcessing: false }));
+      announceStatus(`The continuity check failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      return;
       setProjectState((prev) => ({ ...prev, isProcessing: false, shots: auditedShots }));
       announceStatus(
         `${unreviewed} shots require candidate selection. Their continuity has not been verified.`,
