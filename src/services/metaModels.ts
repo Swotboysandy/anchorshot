@@ -27,6 +27,9 @@ import {
   sampleImageColorInMask,
   SceneRenderSpec,
 } from './canvasEngine';
+import { toDataUrl } from './animaticExport';
+import { isGeneratedImage } from './localGeneration';
+import { expandMask } from '../lib/correction';
 import { buildShotPrompt, normalizeShot, type ShotSize, type ShotSpec } from '../lib/shotLanguage';
 
 export type PlannedShot = ShotSpec & { seconds: number };
@@ -669,7 +672,9 @@ export class MetaModelClient {
         if (healthRes.ok) {
           const health = await healthRes.json();
           if (health.configured && health.sessionToken) {
-            const base64Data = imageUrl.split(',')[1] || '';
+            // Generated frames are served by URL; SAM needs the bytes inline.
+            const frameData = await toDataUrl(imageUrl);
+            const base64Data = frameData.split(',')[1] || '';
             const raw = atob(base64Data);
             const rawBytes = new Uint8Array(raw.length);
             for (let i = 0; i < raw.length; i++) rawBytes[i] = raw.charCodeAt(i);
@@ -686,7 +691,7 @@ export class MetaModelClient {
                 'X-Anchorshot-Session': health.sessionToken,
               },
               body: JSON.stringify({
-                image: imageUrl,
+                image: frameData,
                 concept: targetObject,
                 sourceHash,
                 shotNumber,
@@ -697,19 +702,18 @@ export class MetaModelClient {
               const liveData = await liveRes.json();
               if (liveData && liveData.objects?.[0]) {
                 const liveObj = liveData.objects[0];
+                // Use SAM's real pixels, so colour checks do not average in the background.
                 const maskCanvas = document.createElement('canvas');
-                maskCanvas.width = 800;
-                maskCanvas.height = 450;
+                maskCanvas.width = liveObj.width;
+                maskCanvas.height = liveObj.height;
                 const mCtx = maskCanvas.getContext('2d');
                 if (mCtx) {
-                  const pxLeft = (liveObj.bounds.left / liveObj.width) * 800;
-                  const pxTop = (liveObj.bounds.top / liveObj.height) * 450;
-                  const pxW = Math.max(20, ((liveObj.bounds.right - liveObj.bounds.left) / liveObj.width) * 800);
-                  const pxH = Math.max(20, ((liveObj.bounds.bottom - liveObj.bounds.top) / liveObj.height) * 450);
-                  mCtx.fillStyle = '#38BDF8';
-                  mCtx.beginPath();
-                  mCtx.roundRect(pxLeft, pxTop, pxW, pxH, 10);
-                  mCtx.fill();
+                  const expanded = expandMask(liveObj);
+                  const overlay = mCtx.createImageData(liveObj.width, liveObj.height);
+                  expanded.forEach((on: number, pixel: number) => {
+                    if (on) overlay.data.set([56, 189, 248, 255], pixel * 4);
+                  });
+                  mCtx.putImageData(overlay, 0, 0);
                 }
                 const maskPngDataUrl = maskCanvas.toDataURL('image/png');
 
@@ -873,8 +877,11 @@ export class MetaModelClient {
     // Sample actual color inside the detected mask
     let detectedColor: string | null = null;
     try {
-      if (shot.currentImageUrl) {
-        detectedColor = (await sampleImageColorInMask(shot.currentImageUrl, mask)).colorName;
+      // A sample mask says nothing about where the object is in a model-drawn frame.
+      if (shot.currentImageUrl && (mask.provenance === 'live-sam-3.1' || !isGeneratedImage(shot.currentImageUrl))) {
+        const sample = await sampleImageColorInMask(shot.currentImageUrl, mask);
+        // No clear majority colour counts as not measured.
+        detectedColor = sample.confidence >= 0.5 ? sample.colorName : null;
       }
     } catch {
       // An unreadable frame stays unverified below.
