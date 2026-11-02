@@ -45,6 +45,8 @@ export interface StoryboardShot {
   durationSeconds: number;
   /** Planned camera move (see shotLanguage MOVEMENTS). */
   movement?: string;
+  /** Rule objects the plan leaves out of this shot, so their rules do not apply here. */
+  absentProps?: string[];
   timestamp?: number;
   promptDescription: string;
   spokenDescription: string;

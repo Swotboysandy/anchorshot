@@ -114,6 +114,13 @@ export interface ContinuityAnchor {
   expectedValue: string;
 }
 
+/** Whether the plan puts this prop in the shot. Without a known cast every shot counts. */
+export function propInShot(shot: ShotSpec, targetObject: string, cast?: CastMember[]): boolean {
+  if (!cast?.length) return true;
+  const text = [shot.subject, ...castInShot(shot, cast).map((c) => `${c.wardrobe} ${c.features}`)].join(' ').toLowerCase();
+  return text.includes(targetObject.toLowerCase());
+}
+
 /**
  * Builds a frame prompt. The identity lock leads, then fixed blocks (style, continuity, set), then the one
  * block that varies per shot, then the locks and house look. Continuity comes first
@@ -131,9 +138,8 @@ export function buildShotPrompt(options: {
   // With a known cast, a prop rule only applies where the prop is in the shot; otherwise
   // "the jacket is emerald" dresses whoever is on screen in that jacket.
   const inShot = castInShot(shot, options.cast ?? []);
-  const shotText = [shot.subject, ...inShot.map((c) => `${c.wardrobe} ${c.features}`)].join(' ').toLowerCase();
   const anchors = (options.continuity ?? [])
-    .filter((rule) => !options.cast?.length || shotText.includes(rule.targetObject.toLowerCase()))
+    .filter((rule) => propInShot(shot, rule.targetObject, options.cast))
     .map(
     (rule) => `The ${rule.targetObject} is ${rule.expectedValue}: the same ${rule.targetObject}, same colour, in every shot.`,
   );
