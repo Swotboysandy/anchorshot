@@ -62,7 +62,7 @@ const describeCast = (c: CastMember) =>
   `${c.name}: ${[c.age, c.build, c.features, c.wardrobe && `wearing ${c.wardrobe}`].filter(Boolean).join(', ')}`;
 
 /** Cast listed on the shot, or named in its subject when the model did not list them. */
-function castInShot(shot: ShotSpec, cast: CastMember[]): CastMember[] {
+export function castInShot(shot: ShotSpec, cast: CastMember[]): CastMember[] {
   const named = (shot.cast ?? []).map((n) => n.toLowerCase());
   const subject = shot.subject.toLowerCase();
   return cast.filter((c) => named.includes(c.name.toLowerCase()) || subject.includes(c.name.toLowerCase()));
@@ -131,6 +131,8 @@ export function buildShotPrompt(options: {
   continuity?: ContinuityAnchor[];
   cast?: CastMember[];
   setting?: string;
+  /** Reference images of these characters accompany the prompt. */
+  hasReferences?: boolean;
   style?: string;
   avoid?: string;
 }): string {
@@ -152,7 +154,7 @@ export function buildShotPrompt(options: {
     .join(' ');
   const onScreen = inShot;
   const identity = onScreen.length
-    ? `IDENTITY LOCK\n${onScreen.map(describeCast).join('\n')}\nThe same ${onScreen.length === 1 ? 'individual' : 'individuals'} in every shot: same face and facial structure, same skin tone, same hair, same wardrobe and headwear, not a look-alike or a different actor. Exactly ${onScreen.length} ${onScreen.length === 1 ? 'person' : 'distinct people'} from this list; never duplicate them.`
+    ? `IDENTITY LOCK\n${onScreen.map(describeCast).join('\n')}\nThe same ${onScreen.length === 1 ? 'individual' : 'individuals'} in every shot: same face and facial structure, same skin tone, same hair, same wardrobe and headwear, not a look-alike or a different actor. Exactly ${onScreen.length} ${onScreen.length === 1 ? 'person' : 'distinct people'} from this list; never duplicate them.${options.hasReferences ? ' The attached images show these characters: match the people exactly, but draw the new scene and framing described below.' : ''}`
     : '';
   return [
     identity,
