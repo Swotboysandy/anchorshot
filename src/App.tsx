@@ -790,6 +790,7 @@ export default function App() {
 
     setProjectState((prev) => ({
       ...prev,
+      return updatedShots;
       isProcessing: true,
       statusAnnouncement: 'Running SAM 3.1 continuity audit across sequence...',
     }));
@@ -966,7 +967,13 @@ export default function App() {
             return;
           }
 
-          if (isLocalImage(targetShot.currentImageUrl)) {
+          // A named shot changes alone; otherwise the colour applies to the whole film.
+          const candidates = intent.shotNumber
+            ? reaudited.filter((s) => s.id === targetShot.id)
+            : reaudited.filter((s) => s.status === 'mismatch');
+          const targets = candidates.filter((s) => s.proposedFix && !isLocalImage(s.currentImageUrl));
+          const unconfirmed = reaudited.filter((s) => s.status === 'uncertain').length;
+          if (!targets.length) {
             announceStatus(
               'Local AI image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.',
               true
