@@ -13,6 +13,8 @@ export interface FrameRequest {
   prompt: string;
   targetObject: string;
   seed: number;
+  /** Earlier frames (data URLs) showing the characters, for models that accept references. */
+  references?: string[];
 }
 export interface GeneratedFrame extends CheckedInput {
   model: string;
@@ -49,10 +51,23 @@ export async function acceptFrame(bytes: Buffer, targetObject: string): Promise<
 type Images = Pick<OpenAI['images'], 'generate'>;
 
 /** Any endpoint that serves OpenAI-style `/images/generations` with base64 output. */
-export function openAiImager(options: { model: string; images: Images; size?: string }): Imager {
+export function openAiImager(options: {
+  model: string;
+  images: Images;
+  size?: string;
+  /** Draws from reference images; failures fall back to plain generation. */
+  edit?: (prompt: string, references: string[], signal?: AbortSignal) => Promise<string | undefined>;
+}): Imager {
   return {
     model: options.model,
-    async generate({ prompt, targetObject, seed }, signal) {
+    async generate({ prompt, targetObject, seed, references }, signal) {
+      if (references?.length && options.edit) {
+        const edited = await options.edit(prompt, references, signal).catch(() => undefined);
+        if (edited) {
+          const frame = await acceptFrame(Buffer.from(edited, 'base64'), targetObject);
+          return { ...frame, model: options.model, provenance: 'live-model', seed };
+        }
+      }
       const response = await options.images.generate(
         {
           model: options.model,
@@ -82,5 +97,20 @@ export function imagerFromSettings(values: Record<string, string | undefined>): 
   const [baseURL, apiKey, model, size] = ['IMAGE_BASE_URL', 'IMAGE_API_KEY', 'IMAGE_MODEL', 'IMAGE_SIZE'].map(pick);
   if (!baseURL || !apiKey || !model) return undefined;
   const client = new OpenAI({ baseURL, apiKey, maxRetries: 0, timeout: 120_000 });
-  return openAiImager({ model, images: client.images, size: size || undefined });
+  return openAiImager({
+    model,
+    images: client.images,
+    size: size || undefined,
+    // Meta's edits route takes an images array; other providers fall back on its error.
+    edit: async (prompt, references, signal) => {
+      const res = await fetch(`${baseURL}/images/edits`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, prompt, n: 1, images: references.map((image_url) => ({ image_url })) }),
+        signal,
+      });
+      if (!res.ok) return undefined;
+      return ((await res.json()) as { data?: Array<{ b64_json?: string }> }).data?.[0]?.b64_json;
+    },
+  });
 }

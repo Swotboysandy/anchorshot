@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import sharp from 'sharp';
@@ -65,6 +68,7 @@ describe('/api/muse/image', () => {
   it('serves a checked frame and counts it against the session limit', async () => {
     const images = await imagesReturning(await solid('png'));
     const app = createApp({
+      frameFolder: mkdtempSync(path.join(tmpdir(), 'frames-')),
       settings: () => ({ key: '', requestLimit: 1 }),
       imager: openAiImager({ model: 'm', images: images as never }),
     });
@@ -85,11 +89,27 @@ describe('/api/muse/image', () => {
   it('rejects bad input before any call and maps bad output to 502', async () => {
     const images = await imagesReturning(Buffer.from('junk'));
     const app = createApp({
+      frameFolder: mkdtempSync(path.join(tmpdir(), 'frames-')),
       settings: () => ({ key: '', requestLimit: 10 }),
       imager: openAiImager({ model: 'm', images: images as never }),
     });
     expect((await post(app, { ...shot, prompt: '' })).status).toBe(400);
     expect(images.generate).not.toHaveBeenCalled();
     expect((await post(app, shot)).status).toBe(502);
+  });
+});
+
+describe('reference images', () => {
+  it('draws from references when given, and falls back to plain generation', async () => {
+    const png = await solid('png');
+    const images = await imagesReturning(png);
+    const edit = vi.fn().mockResolvedValue(png.toString('base64'));
+    const imager = openAiImager({ model: 'm', images: images as never, edit });
+    await imager.generate({ prompt: 'p', targetObject: 'cup', seed: 1, references: ['data:image/png;base64,AA=='] });
+    expect(edit).toHaveBeenCalledTimes(1);
+    expect(images.generate).not.toHaveBeenCalled();
+    edit.mockRejectedValueOnce(new Error('unsupported'));
+    await imager.generate({ prompt: 'p', targetObject: 'cup', seed: 1, references: ['data:image/png;base64,AA=='] });
+    expect(images.generate).toHaveBeenCalledTimes(1);
   });
 });

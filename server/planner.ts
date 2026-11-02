@@ -78,7 +78,7 @@ Rules: targetObject is one of: ${[...new Set(Object.values(OBJECTS))].join(', ')
 Cast: list everyone who appears. If the notes imply an unnamed person ("a courier"), invent a short working name like "THE COURIER". Fix one concrete look per person and keep it for the whole film: age like "30s", build, features (face, skin tone, hair), and wardrobe including headwear. Unless the director says a look changes, it never changes.
 
 Shots: plan ${MIN_SHOTS} to ${MAX_SHOTS} shots in story order. If the director numbers shots ("Shot 2: ..."), keep exactly those shots and that order. Otherwise start a new shot whenever the framing, who is on screen, the location or time of day, the dramatic turn or a significant action changes. Usually open wide to establish place, move closer as tension builds, and avoid the same size three times in a row.
-- cast: exact names from the cast list of who is on screen; empty if nobody is.
+- cast: exact names from the cast list of who is actually visible in this frame, not merely mentioned; empty if nobody is.
 - subject: what the frame shows, concrete and visible (people, action, setting, props with their continuity colour). No mood words without a visible cause, no on-screen text.
 - intent: one short phrase on why this shot exists, e.g. "establish the diner".
 - size: one of ${SHOT_SIZES.join(', ')}. angle: one of ${ANGLES.join(', ')}. lens: one of ${LENSES.join(', ')}. movement: one of ${MOVEMENTS.join(', ')}. light: one of ${LIGHTS.join(', ')}. temp: one of ${COLOR_TEMPS.join(', ')}.

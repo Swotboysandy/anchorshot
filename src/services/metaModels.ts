@@ -30,7 +30,7 @@ import {
 import { toDataUrl } from './animaticExport';
 import { isGeneratedImage } from './localGeneration';
 import { expandMask } from '../lib/correction';
-import { buildShotPrompt, normalizeCast, normalizeShot, propInShot, type CastMember, type ShotSize, type ShotSpec } from '../lib/shotLanguage';
+import { buildShotPrompt, castInShot, normalizeCast, normalizeShot, propInShot, type CastMember, type ShotSize, type ShotSpec } from '../lib/shotLanguage';
 
 export type PlannedShot = ShotSpec & { seconds: number };
 
@@ -596,6 +596,8 @@ export class MetaModelClient {
     const anchor = colourRules[0] ?? rules[0];
     const shots: StoryboardShot[] = [];
     const shotCount = plannedShots?.length ?? 4;
+    // First solo frame of each character, reused as the reference for their later shots.
+    const referenceFrames = new Map<string, string>();
     for (let i = 0; i < shotCount; i++) {
       const shotNumber = i + 1;
       const planned = plannedShots?.[i];
@@ -607,11 +609,14 @@ export class MetaModelClient {
       const shot = planned ? { ...planned, subject } : normalizeShot({ size: SEQUENCE_SIZES[fallbackAngle], subject });
       const durationSeconds = planned?.seconds ?? (shotNumber === 1 ? 4.0 : 3.5);
       const seed = shotNumber * 17;
+      const onScreen = castInShot(shot, cast ?? []);
+      const references = [...new Set(onScreen.map((c) => referenceFrames.get(c.name)).filter((url): url is string => Boolean(url)))];
       const res = await fetch('/api/muse/image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Framelock-Session': this.sessionToken ?? '' },
         body: JSON.stringify({
-          prompt: buildShotPrompt({ shot, continuity: colourRules, cast }),
+          prompt: buildShotPrompt({ shot, continuity: colourRules, cast, hasReferences: references.length > 0 }),
+          references,
           targetObject: anchor.targetObject,
           seed,
         }),
@@ -619,6 +624,7 @@ export class MetaModelClient {
       const frame = await res.json().catch(() => ({}));
       if (!res.ok || typeof frame.url !== 'string')
         throw new Error(frame.error || `Shot ${shotNumber} could not be generated.`);
+      if (onScreen.length === 1 && !referenceFrames.has(onScreen[0].name)) referenceFrames.set(onScreen[0].name, frame.url);
       this.recordCall(
         'muse-image-1.0',
         `generateFrame(Shot ${shotNumber})`,
@@ -736,6 +742,7 @@ export class MetaModelClient {
                     height: Math.round(((liveObj.bounds.bottom - liveObj.bounds.top) / liveObj.height) * 100),
                   },
                   confidence: liveObj.confidence || 0.95,
+                  candidateCount: liveData.objects.length,
                   maskBase64: maskPngDataUrl,
                   provenance: 'live-sam-3.1',
                 };
@@ -893,9 +900,9 @@ export class MetaModelClient {
       };
     }
 
-    // SAM often misses or doubts a bare noun ("jacket") but finds "green jacket". The colour only
+    // SAM often misses, doubts or finds a whole crowd for a bare noun ("jacket") but finds "green jacket". The colour only
     // helps locate the object; the verdict below still comes from the measured pixels.
-    if (isGeneratedImage(shot.currentImageUrl) && (mask.provenance !== 'live-sam-3.1' || mask.confidence < 0.8)) {
+    if (isGeneratedImage(shot.currentImageUrl) && (mask.provenance !== 'live-sam-3.1' || mask.confidence < 0.8 || (mask.candidateCount ?? 1) > 1)) {
       const colourWord = expectedColor === 'emerald' ? 'green' : expectedColor;
       const retry = await this.segmentObjectWithSam3(
         shot.shotNumber,
@@ -932,13 +939,15 @@ export class MetaModelClient {
     const spokenDescription = status === 'consistent'
       ? `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity verified: ${targetObject} color is ${expectedColor}.`
       : isAmbiguous
-      ? `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity uncertain: ${unmeasured ? 'the colour could not be measured' : `low SAM 3.1 confidence (${(mask.confidence * 100).toFixed(1)}%)`} on ${targetObject}.`
+      ? `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity uncertain: ${mask.provenance !== 'live-sam-3.1' ? `the ${targetObject} could not be found in this frame` : unmeasured ? 'the colour could not be measured' : `low SAM 3.1 confidence (${(mask.confidence * 100).toFixed(1)}%)`} on ${targetObject}.`
       : `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity Alert: ${targetObject} rendered in ${detectedColor} instead of expected ${expectedColor}. Press Y to apply SAM 3.1 mask recolor to ${expectedColor}.`;
 
     const discrepancyMessage = status === 'consistent'
       ? undefined
       : unmeasured
-      ? `The ${targetObject} colour in Shot ${shot.shotNumber} could not be measured, so continuity is unverified.`
+      ? mask.provenance !== 'live-sam-3.1'
+        ? `The ${targetObject} could not be found in Shot ${shot.shotNumber}, so continuity is unverified.`
+        : `The ${targetObject} colour in Shot ${shot.shotNumber} could not be measured, so continuity is unverified.`
       : isAmbiguous
       ? `SAM 3.1 flagged ambiguity (${(mask.confidence * 100).toFixed(1)}% IoU) on ${targetObject} in Shot ${shot.shotNumber}. Confirm mask selection (${mask.maskRef}) to verify continuity.`
       : `Visual audit detected a ${detectedColor} ${targetObject} in Shot ${shot.shotNumber}, violating rule "${targetObject}.color = ${expectedColor}" (rev ${rule.revision}).`;

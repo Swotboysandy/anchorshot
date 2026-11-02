@@ -187,6 +187,7 @@ interface Options {
   ) => Promise<SegmentationResult>;
   planner?: Planner;
   imager?: Imager;
+  frameFolder?: string;
   transcriber?: Transcriber;
   narrator?: Pick<CachedNarrator, 'model' | 'voice' | 'cached' | 'speak'>;
   narrationCharLimit?: number;
@@ -211,7 +212,7 @@ export function createApp(options: Options) {
   let transcribeActive = false;
   let narrationCharsUsed = 0;
   let exportActive = false;
-  const frameFolder = resolve('.artifacts/frames');
+  const frameFolder = options.frameFolder ?? resolve('.artifacts/frames');
 
   app.disable('x-powered-by');
   app.use('/api', (req, res, next) => {
@@ -593,7 +594,7 @@ export function createApp(options: Options) {
       return res.status(501).json({
         error: 'No image model is connected. Set IMAGE_PROVIDER in .env.local, or keep the offline frames.',
       });
-    const { prompt, targetObject, seed } = req.body ?? {};
+    const { prompt, targetObject, seed, references } = req.body ?? {};
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 2000)
       return res.status(400).json({ error: 'Describe the shot in up to 2000 characters.' });
     if (typeof targetObject !== 'string' || !targetObject.trim() || targetObject.length > 100)
@@ -616,6 +617,12 @@ export function createApp(options: Options) {
           prompt: prompt.trim(),
           targetObject: targetObject.trim(),
           seed: Number.isInteger(seed) ? seed : 0,
+          // Only frames this server saved can be references.
+          references: (Array.isArray(references) ? references : [])
+            .slice(0, 3)
+            .map((url) => /^\/api\/muse\/frames\/([a-f0-9]{64}\.png)$/.exec(String(url))?.[1])
+            .filter((file): file is string => Boolean(file) && existsSync(join(frameFolder, file!)))
+            .map((file) => `data:image/png;base64,${readFileSync(join(frameFolder, file)).toString('base64')}`),
         },
         controller.signal,
       );

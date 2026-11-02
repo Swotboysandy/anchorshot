@@ -3,6 +3,7 @@ import request from 'supertest';
 import { createApp } from '../server/app';
 import {
   elevenLabsTranscriber,
+  metaTranscriber,
   openAiTranscriber,
   readAudioDataUrl,
   transcriberFromSettings,
@@ -101,5 +102,18 @@ describe('/api/muse/transcribe with audio', () => {
     const res = await post(app, { audio: audioUrl });
     expect(res.status).toBe(502);
     expect(res.body.error).toMatch(/heard no speech/);
+  });
+});
+
+describe('Meta transcription', () => {
+  it('sends WAV and the documented request fields to /asr/transcribe', async () => {
+    const send = vi.fn().mockResolvedValue(Response.json({ transcript: 'Keep the cup blue.', turns: [] }));
+    const convert = vi.fn().mockResolvedValue(Buffer.from('wav'));
+    const result = await metaTranscriber({ apiKey: 'k', baseURL: 'https://api.meta.ai/v1', model: 'muse-voice-transcribe-1.0', fetch: send, convert }).transcribe(clip);
+    expect(result.transcript).toBe('Keep the cup blue.');
+    const [url, init] = send.mock.calls[0];
+    expect(url).toBe('https://api.meta.ai/v1/asr/transcribe');
+    expect(JSON.parse(await ((init.body as FormData).get('request') as Blob).text())).toEqual({ model: 'muse-voice-transcribe-1.0', audioEncoding: 'WAV', mode: 'PUSH_TO_TALK' });
+    expect(transcriberFromSettings({ TRANSCRIBE_PROVIDER: 'meta', META_API_KEY: 'k' })?.model).toBe('muse-voice-transcribe-1.0');
   });
 });
