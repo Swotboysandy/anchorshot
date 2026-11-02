@@ -18,9 +18,9 @@ describe('image providers', () => {
     expect(frame.sourceHash).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it('rejects unreadable or oversized output instead of passing it on', async () => {
+  it('rejects unreadable output and scales oversized frames to fit', async () => {
     await expect(acceptFrame(Buffer.from('not an image'), 'cup')).rejects.toThrow(ImagerOutputError);
-    await expect(acceptFrame(await solid('png', 1700, 100), 'cup')).rejects.toThrow(ImagerOutputError);
+    expect(await acceptFrame(await solid('png', 2048, 1152), 'cup')).toMatchObject({ width: 1600, height: 900 });
   });
 
   it('calls an OpenAI-compatible endpoint and tags the frame with model and seed', async () => {
