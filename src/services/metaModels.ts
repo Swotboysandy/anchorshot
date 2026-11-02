@@ -706,7 +706,10 @@ export class MetaModelClient {
             if (liveRes.ok) {
               const liveData = await liveRes.json();
               if (liveData && liveData.objects?.[0]) {
-                const liveObj = liveData.objects[0];
+                // SAM lists every match, bystanders included, in no useful order: take its most confident.
+                const liveObj = liveData.objects.reduce((best: any, o: any) =>
+                  (o.confidence ?? 0) > (best.confidence ?? 0) ? o : best
+                );
                 // Use SAM's real pixels, so colour checks do not average in the background.
                 const maskCanvas = document.createElement('canvas');
                 maskCanvas.width = liveObj.width;
