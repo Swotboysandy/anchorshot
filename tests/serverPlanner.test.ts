@@ -92,6 +92,10 @@ describe('storyboard from a planned shot list', () => {
     }));
     const { shots } = await new MetaModelClient().generateStoryboardFromTranscript('A courier rides to the clockmaker.');
     expect(shots).toHaveLength(5);
+    const steps: string[] = [];
+    await new MetaModelClient().generateStoryboardFromTranscript('A courier rides.', undefined, true, (message) => steps.push(message));
+    expect(steps[0]).toBe('Planning the shots...');
+    expect(steps.at(-1)).toBe('Drawing frame 5 of 5...');
     expect(prompts[0].startsWith('CONTINUITY\nThe jacket is emerald')).toBe(true);
     expect(prompts[0]).toContain('Establishing shot, high angle, 24mm, pan camera. Night market in rain, courier on a bicycle.');
   });

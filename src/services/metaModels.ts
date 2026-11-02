@@ -342,8 +342,10 @@ export class MetaModelClient {
   public async generateStoryboardFromTranscript(
     transcript: string,
     existingRules?: ContinuityRule[],
-    injectIntentionalDiscrepancy: boolean = true
+    injectIntentionalDiscrepancy: boolean = true,
+    onProgress?: (message: string, percent: number) => void
   ): Promise<{ rules: ContinuityRule[]; shots: StoryboardShot[] }> {
+    onProgress?.('Planning the shots...', 5);
     // The planner model, when connected, also chooses the shot list; otherwise the
     // classic four-angle sequence is used.
     const plan = existingRules && existingRules.length > 0 ? null : await this.planWithServer(transcript);
@@ -415,7 +417,7 @@ export class MetaModelClient {
     if (health?.imageModel) {
       return {
         rules,
-        shots: await this.generateModelFrames(health.imageModel, rules, cameraSequence, parsedDescriptions, plannedShots, plan?.cast),
+        shots: await this.generateModelFrames(health.imageModel, rules, cameraSequence, parsedDescriptions, plannedShots, plan?.cast, onProgress, transcript),
       };
     }
 
@@ -596,7 +598,9 @@ export class MetaModelClient {
     cameraSequence: Array<SceneRenderSpec['cameraAngle']>,
     descriptions: Record<number, string>,
     plannedShots?: PlannedShot[],
-    cast?: CastMember[]
+    cast?: CastMember[],
+    onProgress?: (message: string, percent: number) => void,
+    transcript: string = ''
   ): Promise<StoryboardShot[]> {
     const colourRules = rules.filter((r) => r.property === 'color');
     const anchor = colourRules[0] ?? rules[0];
@@ -606,6 +610,7 @@ export class MetaModelClient {
     const referenceFrames = new Map<string, string>();
     for (let i = 0; i < shotCount; i++) {
       const shotNumber = i + 1;
+      onProgress?.(`Drawing frame ${shotNumber} of ${shotCount}...`, 10 + Math.round((i / shotCount) * 90));
       const planned = plannedShots?.[i];
       const fallbackAngle = cameraSequence[i % cameraSequence.length];
       const subject =

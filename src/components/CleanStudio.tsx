@@ -3,6 +3,7 @@ import { Tabs as BeTabs, TabsList as BeTabsList, TabsTrigger as BeTabsTrigger, T
 import { CreationComposer } from './CreationComposer';
 import { VoiceOverlay } from './VoiceOverlay';
 import type { AgentTools } from '../services/voiceAgent';
+import { Progress } from './ui/progress';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
 import { Button } from './ui/button';
@@ -51,6 +52,7 @@ type Props = {
   duration: number;
   status: string;
   muted: boolean;
+  progressPercent?: number;
   onTranscript: (s: string) => void;
   onGenerate: () => void;
   onCommand: (s: string) => void;
@@ -265,8 +267,6 @@ export function CleanStudio(p: Props) {
             <TabsTrigger value="create">
               <Film size={18} aria-hidden="true"/> Create
             </TabsTrigger>
-            <TabsTrigger value="dream">
-              <Layers size={18} aria-hidden="true"/> Dream
       {(p.processing || p.exporting) && (
         <div className="studio-activity">
           <p>{p.exporting && !p.processing ? 'Exporting film...' : p.status}</p>
@@ -274,6 +274,8 @@ export function CleanStudio(p: Props) {
         </div>
       )}
       {notice && !p.processing && !p.exporting && <p className="studio-notice" aria-hidden="true">{notice}</p>}
+            <TabsTrigger value="dream">
+              <Layers size={18} aria-hidden="true"/> Dream
             </TabsTrigger>
             <TabsTrigger value="review">
               <Check size={18} aria-hidden="true"/> Review

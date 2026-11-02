@@ -74,6 +74,7 @@ export default function App() {
   const [splitPosition, setSplitPosition] = useState<number>(50);
   const [burnInTimecode, setBurnInTimecode] = useState<boolean>(false);
   const [isExportingVideo, setIsExportingVideo] = useState<boolean>(false);
+  const [generationPercent, setGenerationPercent] = useState<number | undefined>();
   const [currentTimeSeconds, setCurrentTimeSeconds] = useState<number>(0);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isShortcutsModalOpen, setIsShortcutsModalOpen] = useState<boolean>(false);
@@ -1627,6 +1628,7 @@ export default function App() {
         voiceNotice={voiceNotice}
         inspector={
           <ShotInspectorPanel
+        progressPercent={generationPercent}
             onUseLocalImage={handleUseLocalImage}
             onUseLocalVideo={handleUseLocalVideo}
             onUpdateDetectedObjects={handleUpdateDetectedObjects}
