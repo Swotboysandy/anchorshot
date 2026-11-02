@@ -186,6 +186,8 @@ export function CleanStudio(p: Props) {
 
   // Real studio actions the voice agent may call; each returns what happened so the agent can say it.
   const spokenDirection = useRef('');
+  const latestStatus = useRef(p.status);
+  latestStatus.current = p.status;
   // Results are shown briefly as well as announced, so a finished action is visible.
   const [notice, setNotice] = useState('');
   const firstStatus = useRef(true);
@@ -215,10 +217,12 @@ export function CleanStudio(p: Props) {
       p.onGenerateFrom(script);
       return 'Storyboard generation started. It can take a few minutes.';
     },
-    run_command: ({ command }) => {
+    run_command: async ({ command }) => {
       if (typeof command !== 'string' || !command.trim()) return 'No command was given.';
-      p.onCommand(command.trim());
-      return `Ran: ${command.trim()}`;
+      await p.onCommand(command.trim());
+      // Give the app a moment to publish the command's real result.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return latestStatus.current;
     },
     select_shot: ({ number }) => {
       const shot = p.shots.find((s) => s.shotNumber === Number(number));

@@ -23,6 +23,8 @@ const SILENCE_MS = 2000;
 const SPEECH_LEVEL = 0.04;
 /** Room noise is sampled this long, so a noisy room still counts as quiet. */
 const CALIBRATE_MS = 500;
+/** Consecutive 100 ms checks above the speech level before a turn begins. */
+const SPEECH_TICKS = 3;
 /** A turn ends here even if the room never goes quiet. */
 const MAX_TURN_MS = 30_000;
 const MAX_TOOL_ROUNDS = 5;
@@ -129,6 +131,8 @@ export async function startAgentConversation(
       handlers.onStatus('Agent listening.');
       const startedAt = Date.now();
       let noise = 0;
+      let loudTicks = 0;
+      let heardAt = 0;
       const watch = setInterval(() => {
         if (ended) {
           clearInterval(watch);
@@ -140,15 +144,21 @@ export async function startAgentConversation(
           noise = Math.max(noise, now);
           return;
         }
-        if (heard && Date.now() - startedAt > MAX_TURN_MS) {
+        if (heard && Date.now() - heardAt > MAX_TURN_MS) {
           clearInterval(watch);
           active.stop();
           return;
         }
         if (now > Math.max(SPEECH_LEVEL, noise * 2)) {
-          heard = true;
+          // A click or cough is too brief to count as the director speaking.
+          if (++loudTicks >= SPEECH_TICKS && !heard) {
+            heard = true;
+            heardAt = Date.now();
+          }
           quietSince = 0;
-        } else if (heard) {
+        } else if (!heard) {
+          loudTicks = 0;
+        } else {
           quietSince ||= Date.now();
           if (Date.now() - quietSince > SILENCE_MS) {
             clearInterval(watch);
@@ -170,14 +180,13 @@ export async function startAgentConversation(
         try {
           transcript = (await post('/api/muse/transcribe', session, { audio: await toDataUrl(clip) })).transcript;
         } catch (error) {
-          if (!ended) await say(`I could not transcribe that. ${error instanceof Error ? error.message : ''}`.trim());
+          const message = error instanceof Error ? error.message : '';
+          // Background noise stays quiet; a real failure is always spoken.
+          if (!ended && !/heard no speech/i.test(message)) await say(`I could not transcribe that. ${message}`.trim());
           continue;
         }
         if (ended) break;
-        if (!transcript) {
-          await say('I did not catch any words. Please say that again.');
-          continue;
-        }
+        if (!transcript) continue;
         handlers.onMessage('user', transcript);
         messages.push({ role: 'user', content: transcript });
         let reply: string;

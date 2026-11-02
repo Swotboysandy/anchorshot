@@ -191,6 +191,14 @@ describe('Voice Command Parser (Parse-Then-Switch)', () => {
   });
 });
 
+describe('spoken continuity rules', () => {
+  it('treats a stated rule as a rule and a script as story', () => {
+    expect(parseVoiceCommand('The jacket must be emerald.')).toEqual({ kind: 'rule_update', object: 'jacket', color: 'emerald' });
+    expect(parseVoiceCommand('the cup must stay blue in every shot')).toEqual({ kind: 'rule_update', object: 'cup', color: 'blue' });
+    expect(parseVoiceCommand('The jacket must be emerald. A courier rides home.').kind).toBe('rebuild');
+  });
+});
+
 // Main-only cases: palette, shots 1-8 and story text that mentions commands.
 describe('voice command parser on main', () => {
   it('parses playback, help, audit and narration commands', () => {

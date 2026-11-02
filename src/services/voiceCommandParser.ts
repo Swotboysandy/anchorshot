@@ -101,6 +101,10 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
   if (segment && !/\b(?:to|into)\b/.test(lower))
     return { kind: 'segment', object: cleanObject(segment[1]), shotNumber: toShot(segment[2]) ?? shotNumberIn(lower) };
 
+  // "the jacket must be emerald" is a rule, not new story; a longer script still rebuilds.
+  const stated = lower.match(new RegExp(`^(?:the\\s+|my\\s+)?([a-z-]+)\\s+(?:must|should)\\s+(?:be|stay|remain)\\s+(${COLORS})\\b[^.!?]*$`));
+  if (stated) return { kind: 'rule_update', object: stated[1], color: COLOR_MAP[stated[2]] };
+
   // A bare colour ("emerald", "set it to amber") updates the main rule; longer text is direction.
   if (cleaned.split(' ').length <= 4) {
     const colour = lower.match(new RegExp(`\\b(${COLORS})\\b`))?.[1];

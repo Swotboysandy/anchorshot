@@ -1638,7 +1638,7 @@ export default function App() {
         onTranscript={(text) => setProjectState((prev) => ({ ...prev, transcript: text }))}
         onGenerate={() => void handleRebuildFromTranscript(true)}
         onGenerateFrom={(script) => void handleRebuildFromTranscript(true, script)}
-        onCommand={(text) => void handleExecuteVoiceCommand(text)}
+        onCommand={(text) => handleExecuteVoiceCommand(text)}
         onSelect={(id) => handleSelectShot(id)}
         onPlay={handleTogglePlayAnimatic}
         onSeek={handleScrubTime}
