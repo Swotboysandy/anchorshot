@@ -12,15 +12,15 @@ Each AI role sits behind a small provider adapter on the local server. Prompts a
 
 | Role | Server endpoint | Live provider used in this build | Offline fallback |
 | :--- | :--- | :--- | :--- |
-| Shot planning and continuity rules | `POST /api/muse/spark` | **Meta `muse-spark-open-1026`** via the Baseten x Meta hackathon endpoint (any OpenAI-compatible chat model works) | Keyword planner |
-| Object segmentation | `POST /api/segment`, `/api/segment/check` | Meta `sam-3.1` gateway when `META_API_KEY` is set (not yet verified live) | Fixture masks, clearly labelled "offline fixture" |
-| Storyboard frames | `POST /api/muse/image` | Any OpenAI-compatible `/images/generations` endpoint; frames are checked as SAM input and marked unreviewed | Canvas-drawn sample frames |
+| Shot planning and continuity rules | `POST /api/muse/spark` | **Meta `muse-spark-1.3`** (also verified: `muse-spark-open-1026` through the Baseten x Meta endpoint; any OpenAI-compatible chat model works) | Keyword planner |
+| Object segmentation and colour check | `POST /api/segment`, `/api/segment/check` | **Meta `sam-3.1`**: real masks on generated frames; colour is measured from the masked pixels | Fixture masks, clearly labelled "offline fixture" |
+| Storyboard frames | `POST /api/muse/image` | **Meta `muse-image-1.0`** (any OpenAI-compatible `/images/generations` endpoint works); frames stay unreviewed until the continuity check runs | Canvas-drawn sample frames |
 | Voice to script | `POST /api/muse/transcribe` | ElevenLabs Scribe v2 (or any Whisper-compatible endpoint) | Browser speech recognition |
 | Spoken narration | `POST /api/muse/speak` | ElevenLabs premade voice, Flash model; each sentence cached so it is paid for once, per-session character budget | Browser `speechSynthesis` |
 | Voice co-director | `POST /api/agent/session` | ElevenLabs Agent on the orb, server-signed link, studio actions as client tools, live captions | Orb meters the microphone locally |
 | Film export | `POST /api/export/animatic` | Local ffmpeg: narrated 1280x720 H.264/AAC MP4, each shot held until its narration ends | Silent browser WebM |
 
-Only the planner currently runs on a Meta model in a verified live call. The image, voice and SAM roles are ready for Meta endpoints but need keys this build does not have.
+Planning, frames and segmentation are verified in a live run on Meta models, with one scene and one tracked prop so far. Dictation, narration and the voice agent run on ElevenLabs: `muse-voice-transcribe-1.0` did not accept the batch request styles tried, and the agent's default LLM is not Meta. Video generation is opt-in from Generate new media and never starts by itself.
 
 ---
 
@@ -29,14 +29,14 @@ Only the planner currently runs on a Meta model in a verified live call. The ima
 Copy `.env.example` to `.env.local` (git-ignored) and fill only the roles you want live. API keys stay on the local server and are never sent to the browser.
 
 ```dotenv
-# Meta muse-spark through the Baseten x Meta hackathon endpoint
+# Meta muse-spark for planning
 PLANNER_PROVIDER="openai-compatible"
-PLANNER_BASE_URL="https://inference.baseten.co/v1"
-PLANNER_API_KEY="<your hackathon key>"
-PLANNER_MODEL="meta-models/muse-spark-open-1026"
+PLANNER_BASE_URL="https://api.meta.ai/v1"
+PLANNER_API_KEY="<your Meta key>"
+PLANNER_MODEL="muse-spark-1.3"
 
 # Meta SAM 3.1 gateway
-META_API_KEY=""
+META_API_KEY="<your Meta key>"
 
 # ElevenLabs: dictation, narration and the voice agent
 ELEVENLABS_API_KEY=""
@@ -45,11 +45,11 @@ NARRATION_PROVIDER="elevenlabs"
 AGENT_PROVIDER="elevenlabs"
 ELEVENLABS_AGENT_ID=""
 
-# Optional image model (OpenAI-compatible)
-IMAGE_PROVIDER=""
-IMAGE_BASE_URL=""
-IMAGE_API_KEY=""
-IMAGE_MODEL=""
+# Meta muse-image for storyboard frames
+IMAGE_PROVIDER="openai-compatible"
+IMAGE_BASE_URL="https://api.meta.ai/v1"
+IMAGE_API_KEY="<your Meta key>"
+IMAGE_MODEL="muse-image-1.0"
 ```
 
 `.env.example` documents the remaining settings, including `NARRATION_VOICE_ID`, `NARRATION_MODEL` and `IMAGE_SIZE`. Paid calls share a per-session request limit (`SAM_MAX_REQUESTS`, default 25 under `npm run dev`), and narration has its own character budget.

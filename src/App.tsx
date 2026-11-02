@@ -214,54 +214,7 @@ export default function App() {
               videoUrl,
             });
           }
-
-          // If no matching video for this prompt, kick off background video rendering job (skip in automated tests)
-          if (!matchingCompletedVideo) {
-            if (typeof navigator === 'undefined' || !navigator.webdriver) {
-              fetch('/api/local-ai/jobs', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'x-anchorshot-local': '1',
-                },
-                body: JSON.stringify({
-                  kind: 'video',
-                  prompt: targetTranscript.slice(0, 500),
-                  seed: 42,
-                }),
-              })
-                .then(async (r) => {
-                  if (r.ok) {
-                    const newJob = await r.json();
-                    orcaTracker.trackAction('generation', 'Triggered background video generation job', { jobId: newJob.id });
-                    if (videoPollRef.current) clearInterval(videoPollRef.current);
-                    const pollInterval = setInterval(async () => {
-                      try {
-                        const checkRes = await fetch(`/api/local-ai/jobs/${newJob.id}`);
-                        if (checkRes.ok) {
-                          const checkData = await checkRes.json();
-                          if (checkData.status === 'completed') {
-                            clearInterval(pollInterval);
-                            const newVideoUrl = `/api/local-ai/jobs/${newJob.id}/assets/generated-video.mp4`;
-                            setProjectState((p) => p.projectId !== ownerProjectId ? p : ({
-                              ...p,
-                              shots: p.shots.map((shot) => ({ ...shot, videoUrl: newVideoUrl, generatedJobId: newJob.id })),
-                            }));
-                            orcaTracker.trackAction('generation', 'Background video generated and auto-mounted into storyboard', { videoUrl: newVideoUrl });
-                          } else if (checkData.status === 'failed' || checkData.status === 'cancelled') {
-                            clearInterval(pollInterval);
-                          }
-                        }
-                      } catch {
-                        clearInterval(pollInterval);
-                      }
-                    }, 3000);
-                    videoPollRef.current = pollInterval;
-                  }
-                })
-                .catch(() => {});
-            }
-          }
+          // Video is opt-in from Generate new media: a storyboard never starts a GPU or paid job.
         }
       } catch {
         // Fallback cleanly without video
