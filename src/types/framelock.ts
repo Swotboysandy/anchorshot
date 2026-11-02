@@ -19,6 +19,8 @@ export interface BoundingBox {
 }
 
 export interface SamMask {
+  /** How many matches SAM returned before the best was picked. */
+  candidateCount?: number;
   id: string;
   maskRef: string; // Versioned SAM 3.1 mask reference, e.g. "sam-3.1:cup-shot-2:v1"
   objectId: string;
