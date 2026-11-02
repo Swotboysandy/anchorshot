@@ -38,6 +38,32 @@ describe('continuity rules from the server planner', () => {
   });
 });
 
+describe('a scene with no stated continuity rule', () => {
+  const subjects = ['Courier enters the market', 'Courier passes the stalls', 'Courier reaches the door'];
+  it('keeps the planned shots and never invents a cup', async () => {
+    const prompts: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/health') return Response.json({ plannerLive: true, imageModel: 'img', sessionToken: 't' });
+      if (url === '/api/muse/spark')
+        return Response.json({ model: 'meta', ruleRevision: 1, rules: [], shots: subjects.map((subject) => ({ subject, seconds: 4 })) });
+      prompts.push(JSON.parse(String(init?.body)).prompt);
+      return Response.json({ url: `/api/muse/frames/${'a'.repeat(64)}.png`, width: 1024, height: 576, sourceHash: 'a'.repeat(64) });
+    }));
+    const { rules, shots } = await new MetaModelClient().generateStoryboardFromTranscript('A courier rides through a market.');
+    expect(rules).toEqual([]);
+    expect(shots.map((s) => s.promptDescription)).toEqual(subjects);
+    expect(prompts.join(' ')).not.toMatch(/cup/i);
+  });
+
+  it('offline, flags no mismatch and describes the actual scene', async () => {
+    stub({ plannerLive: false }, () => Response.json({}));
+    const { rules, shots } = await new MetaModelClient().generateStoryboardFromTranscript('A courier rides through a market.');
+    expect(rules).toEqual([]);
+    expect(shots.some((s) => s.status === 'mismatch')).toBe(false);
+    expect(shots.map((s) => s.promptDescription).join(' ')).not.toMatch(/cup/i);
+  });
+});
+
 describe('storyboard from a planned shot list', () => {
   const planned = [
     { subject: 'Night market in rain, courier on a bicycle', size: 'Establishing', angle: 'High', lens: '24mm', movement: 'Pan', light: 'Night', temp: 'Cool', seconds: 6 },

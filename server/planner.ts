@@ -55,11 +55,12 @@ export const fixturePlanner: Planner = {
     const object = Object.keys(OBJECTS).find((word) => lower.includes(word));
     const sentence = transcript.split('.')[0]?.toLowerCase() || lower;
     const color = Object.keys(COLORS).find((word) => sentence.includes(word));
+    if (!object) return { model: 'muse-spark-1.3', provenance: 'offline-fixture', ruleRevision: revision, rules: [] };
     return {
       model: 'muse-spark-1.3',
       provenance: 'offline-fixture',
       ruleRevision: revision,
-      rules: [rule(object ? OBJECTS[object] : 'cup', color ? COLORS[color] : 'blue', revision)],
+      rules: [rule(OBJECTS[object], color ? COLORS[color] : 'blue', revision)],
     };
   },
 };

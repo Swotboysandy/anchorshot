@@ -286,7 +286,7 @@ export default function App() {
 
         const resolvedColor =
           customColor || targetShot.proposedFix?.targetColor || 'blue';
-        const resolvedObject = targetShot.proposedFix?.targetObject || 'cup';
+        const resolvedObject = targetShot.proposedFix?.targetObject || 'object';
 
         const confirmationMessage = `Continuity verified on Shot ${updatedShot.shotNumber}. ${resolvedObject} recolored to ${resolvedColor} via SAM 3.1 mask ${updatedShot.pixelVerification?.maskRef || ''} with 0 outside-mask pixel drift.`;
 
@@ -428,8 +428,8 @@ export default function App() {
 
 
       const primaryRule = projectState.rules[0];
-      const targetObject = primaryRule?.targetObject || 'cup';
-      const expectedColor = primaryRule?.expectedValue || 'blue';
+      const targetObject = primaryRule.targetObject;
+      const expectedColor = primaryRule.expectedValue;
 
       const cameraAngles: Array<'wide' | 'medium' | 'closeup' | 'over_shoulder'> = [
         'wide',
@@ -782,14 +782,11 @@ export default function App() {
 
   // Run Full Sequence Continuity Audit (`muse-spark-1.3` + `sam-3.1`)
   const handleRunFullAudit = useCallback(async () => {
-    const primaryRule = projectState.rules[0] || {
-      id: 'rule-cup-color',
-      scope: 'all_shots',
-      targetObject: 'cup',
-      property: 'color',
-      expectedValue: 'blue',
-      revision: 1,
-    };
+    const primaryRule = projectState.rules[0];
+    if (!primaryRule) {
+      announceStatus('There are no continuity rules to check. Say which prop must stay which colour, for example the jacket must be emerald.', true);
+      return;
+    }
 
     setProjectState((prev) => ({
       ...prev,
@@ -798,11 +795,13 @@ export default function App() {
     }));
 
     const auditedShots: StoryboardShot[] = [];
-    for (const shot of projectState.shots) {
-      if (shot.status === 'uncertain' || isGeneratedImage(shot.currentImageUrl)) {
-        auditedShots.push(await metaModelClient.auditShotContinuity(shot, primaryRule));
-      } else {
-        auditedShots.push(shot);
+    try {
+      for (const shot of projectState.shots) {
+        if (shot.status === 'uncertain' || isGeneratedImage(shot.currentImageUrl)) {
+          auditedShots.push(await metaModelClient.auditShotContinuity(shot, primaryRule));
+        } else {
+          auditedShots.push(shot);
+        }
       }
     }
 
@@ -932,8 +931,12 @@ export default function App() {
               ? projectState.shots.find((s) => s.shotNumber === intent.shotNumber)
               : projectState.shots.find((s) => s.status === 'mismatch')) || activeShot || projectState.shots[0];
 
-          const targetObject = intent.object || projectState.rules[0]?.targetObject || 'cup';
-          await handleAddOrUpdateRule(targetObject, intent.color);
+          const targetObject = intent.object || projectState.rules[0]?.targetObject;
+          if (!targetObject) {
+            announceStatus('Say which object to recolour.', true);
+            return;
+          }
+          const reaudited = await handleAddOrUpdateRule(targetObject, intent.color);
 
           if (!targetShot) {
             announceStatus('All shots are already consistent.', true);
@@ -1052,7 +1055,11 @@ export default function App() {
         }
 
         case 'rule_update': {
-          const ruleObject = intent.object || projectState.rules[0]?.targetObject || 'cup';
+          const ruleObject = intent.object || projectState.rules[0]?.targetObject;
+          if (!ruleObject) {
+            announceStatus('Say which object the colour rule is for.', true);
+            return;
+          }
           await handleAddOrUpdateRule(ruleObject, intent.color);
           announceStatus(`Updated continuity rule: ${ruleObject} must be ${intent.color}.`, true);
           return;
