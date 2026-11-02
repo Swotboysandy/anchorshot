@@ -14,7 +14,7 @@ export const toDataUrl = async (url: string): Promise<string> => {
 
 /**
  * Asks the local server to encode the storyboard as an MP4 with each shot's
- * spoken description as narration. Returns null when the server cannot export,
+ * scene description as narration. Returns null when the server cannot export,
  * so the caller can fall back to the browser's silent WebM recorder.
  */
 export async function exportAnimaticMp4(
@@ -32,7 +32,9 @@ export async function exportAnimaticMp4(
           shots.map(async (shot) => ({
             image: await toDataUrl(shot.currentImageUrl),
             seconds: shot.durationSeconds,
-            narration: shot.spokenDescription,
+            // The film speaks the scene; camera terms and status are for the live studio.
+            narration: shot.promptDescription,
+            movement: shot.movement,
           })),
         ),
       }),

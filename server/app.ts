@@ -718,7 +718,7 @@ export function createApp(options: Options) {
       const seconds = Number(shot?.seconds);
       if (!image || !(seconds >= 0.5 && seconds <= 15))
         return res.status(400).json({ error: 'Each shot needs a PNG, JPEG or WebP frame and 0.5 to 15 seconds.' });
-      parsed.push({ image: Buffer.from(image, 'base64'), seconds });
+      parsed.push({ image: Buffer.from(image, 'base64'), seconds, movement: typeof shot.movement === 'string' ? shot.movement : undefined });
     }
     if (!(await (options.ffmpegAvailable ?? ffmpegAvailable)()))
       return res.status(501).json({ error: 'MP4 export needs ffmpeg on this computer.' });

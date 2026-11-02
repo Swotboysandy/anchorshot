@@ -30,6 +30,20 @@ describe.skipIf(!hasFfmpeg)('animatic encoding with local ffmpeg', () => {
     expect(Number(probe.format.duration)).toBeCloseTo(2.5, 0);
   }, 60_000);
 
+  it('moves the camera across a still for a planned move', async () => {
+    const image = await sharp({ create: { width: 800, height: 450, channels: 3, background: '#2255cc' } })
+      .composite([{ input: await sharp({ create: { width: 80, height: 80, channels: 3, background: '#ffffff' } }).png().toBuffer(), left: 100, top: 100 }])
+      .png()
+      .toBuffer();
+    const folder = mkdtempSync(path.join(tmpdir(), 'animatic-test-'));
+    const file = path.join(folder, 'out.mp4');
+    writeFileSync(file, await renderAnimatic([{ image, seconds: 2, movement: 'Push in' }]));
+    const grab = (at: string) => execFileSync('ffmpeg', ['-v', 'error', '-ss', at, '-i', file, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'gray', '-'], { maxBuffer: 1 << 24 });
+    const white = (b: Buffer) => b.reduce((n, v) => n + (v > 200 ? 1 : 0), 0);
+    // The white square grows on screen as the camera pushes in.
+    expect(white(grab('1.8'))).toBeGreaterThan(white(grab('0.1')) * 1.1);
+  }, 60_000);
+
   it('stretches a shot so its narration is never cut off', async () => {
     const folder = mkdtempSync(path.join(tmpdir(), 'animatic-test-'));
     const voice = path.join(folder, 'voice.mp3');

@@ -43,6 +43,8 @@ export interface StoryboardShot {
   id: string;
   shotNumber: number;
   durationSeconds: number;
+  /** Planned camera move (see shotLanguage MOVEMENTS). */
+  movement?: string;
   timestamp?: number;
   promptDescription: string;
   spokenDescription: string;
