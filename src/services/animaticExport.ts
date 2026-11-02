@@ -13,14 +13,13 @@ export const toDataUrl = async (url: string): Promise<string> => {
 };
 
 /**
- * Asks the local server to encode the storyboard as an MP4 with each shot's
- * scene description as narration. Returns null when the server cannot export,
+ * Asks the local server to encode the storyboard as an MP4. Returns null when the server cannot export,
  * so the caller can fall back to the browser's silent WebM recorder.
  */
 export async function exportAnimaticMp4(
   shots: StoryboardShot[],
   options?: { burnInTimecode?: boolean },
-): Promise<{ video: Blob; narratedShots: number } | null> {
+): Promise<{ video: Blob } | null> {
   try {
     const health = await (await fetch('/api/health')).json();
     const res = await fetch('/api/export/animatic', {
@@ -32,15 +31,13 @@ export async function exportAnimaticMp4(
           shots.map(async (shot) => ({
             image: await toDataUrl(shot.currentImageUrl),
             seconds: shot.durationSeconds,
-            // The film speaks the scene; camera terms and status are for the live studio.
-            narration: shot.promptDescription,
             movement: shot.movement,
           })),
         ),
       }),
     });
     if (!res.ok || !res.headers.get('content-type')?.startsWith('video/mp4')) return null;
-    return { video: await res.blob(), narratedShots: Number(res.headers.get('X-Anchorshot-Narrated-Shots')) || 0 };
+    return { video: await res.blob() };
   } catch {
     return null;
   }

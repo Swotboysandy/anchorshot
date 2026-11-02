@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion, useMotionValue, useReducedMotion } from 'motion/react';
-import type { VoiceConversation } from '@elevenlabs/client';
 import { VoiceOrb } from './agents/voice-orb';
 import './voiceOverlay.css';
 import { SPRING_PRESS } from '../lib/ease';
 import { Conversation, ConversationContent } from './ui/conversation';
 import { Message, MessageContent } from './ui/message';
-import { agentAvailable, startAgentConversation, type AgentTools } from '../services/voiceAgent';
+import { agentAvailable, startAgentConversation, type AgentConversation, type AgentTools } from '../services/voiceAgent';
 import { speechRecognitionService } from '../services/speechRecognitionService';
 import { speechService } from '../services/speechService';
 import { parseVoiceCommand } from '../services/voiceCommandParser';
@@ -19,7 +18,7 @@ type Props = {
   agentTools?: AgentTools;
 };
 
-/** Persistent entry to voice: an ElevenLabs agent when connected, otherwise local metering. */
+/** Persistent entry to voice: the voice agent when connected, otherwise local metering. */
 export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
   const reduced = useReducedMotion();
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
@@ -28,7 +27,7 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
   const [renderError, setRenderError] = useState(false);
   const resources = useRef<{ stream: MediaStream; context: AudioContext } | null>(null);
   const generation = useRef(0);
-  const conversation = useRef<VoiceConversation | null>(null);
+  const conversation = useRef<AgentConversation | null>(null);
   const frame = useRef(0);
   const agentActivity = useMotionValue(0);
   const [agentStatus, setAgentStatus] = useState('');

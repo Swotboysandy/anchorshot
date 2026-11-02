@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../server/app';
 import {
-  elevenLabsTranscriber,
   metaTranscriber,
   openAiTranscriber,
   readAudioDataUrl,
@@ -28,39 +27,14 @@ describe('transcription providers', () => {
     expect(create.mock.calls[0][0].file.name).toBe('director.webm');
   });
 
-  it('calls ElevenLabs Scribe with the key header and keeps word timings', async () => {
-    const fetch = vi.fn().mockResolvedValue(
-      Response.json({
-        text: 'Cup blue',
-        words: [
-          { text: 'Cup', start: 0, end: 0.3, type: 'word' },
-          { text: ' ', start: 0.3, end: 0.31, type: 'spacing' },
-          { text: 'blue', start: 0.31, end: 0.6, type: 'word' },
-        ],
-      }),
-    );
-    const result = await elevenLabsTranscriber({ model: 'scribe_v2', apiKey: 'test', fetch }).transcribe(clip);
-    expect(result.timestamps).toEqual([
-      { word: 'Cup', start: 0, end: 0.3 },
-      { word: 'blue', start: 0.31, end: 0.6 },
-    ]);
-    const [url, init] = fetch.mock.calls[0];
-    expect(url).toBe('https://api.elevenlabs.io/v1/speech-to-text');
-    expect(init.headers).toEqual({ 'xi-api-key': 'test' });
-    expect((init.body as FormData).get('model_id')).toBe('scribe_v2');
-  });
-
-  it('treats silence as a model error and surfaces HTTP failures', async () => {
+  it('treats silence as a model error', async () => {
     const silent = openAiTranscriber({ model: 'm', transcriptions: { create: vi.fn().mockResolvedValue({ text: ' ' }) } as never });
     await expect(silent.transcribe(clip)).rejects.toThrow(TranscriberOutputError);
-    const failing = elevenLabsTranscriber({ model: 's', apiKey: 'k', fetch: vi.fn().mockResolvedValue(new Response('', { status: 401 })) });
-    await expect(failing.transcribe(clip)).rejects.toThrow(/status 401/);
   });
 
   it('keeps browser speech recognition unless a provider is fully configured', () => {
     expect(transcriberFromSettings({})).toBeUndefined();
-    expect(transcriberFromSettings({ TRANSCRIBE_PROVIDER: 'elevenlabs' })).toBeUndefined();
-    expect(transcriberFromSettings({ TRANSCRIBE_PROVIDER: 'elevenlabs', ELEVENLABS_API_KEY: 'k' })?.model).toBe('scribe_v2');
+    expect(transcriberFromSettings({ TRANSCRIBE_PROVIDER: 'meta' })).toBeUndefined();
     expect(
       transcriberFromSettings({ TRANSCRIBE_PROVIDER: 'openai-compatible', TRANSCRIBE_BASE_URL: 'http://127.0.0.1:1/v1', TRANSCRIBE_API_KEY: 'k', TRANSCRIBE_MODEL: 'w' })?.model,
     ).toBe('w');

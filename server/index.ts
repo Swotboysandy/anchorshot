@@ -8,7 +8,6 @@ import { createApp } from './app';
 import { createLocalAi } from './localAi';
 import { imagerFromSettings } from './imager';
 import { agentFromSettings } from './agent';
-import { narratorFromSettings } from './narrator';
 import { plannerFromSettings } from './planner';
 import { transcriberFromSettings } from './transcriber';
 
@@ -42,7 +41,6 @@ app.use('/api/local-ai', localAi.app);
 app.use(createApp({ settings: localSettings, planner: plannerFromSettings(localSettings().values),
   imager: imagerFromSettings(localSettings().values),
   transcriber: transcriberFromSettings(localSettings().values),
-  narrator: narratorFromSettings(localSettings().values, resolve(root, '.artifacts/narration')),
   agent: agentFromSettings(localSettings().values) }));
 const server = createServer(app);
 server.once('close', () => localAi.stop('Local server stopped.'));

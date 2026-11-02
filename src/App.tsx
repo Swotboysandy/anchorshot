@@ -46,7 +46,7 @@ export default function App() {
   const [sessionProjects, setSessionProjects] = useState<ProjectState[]>([]);
   const [storageReady,setStorageReady]=useState(false);
   const [storageStatus,setStorageStatus]=useState('Loading local projects...');
-  useEffect(()=>{void speechRecognitionService.connectBackend();void speechService.connectBackend();},[]);
+  useEffect(()=>{void speechRecognitionService.connectBackend();},[]);
   useEffect(()=>{let alive=true;loadLocal<{active:string;projects:ProjectState[]}>('library').then(saved=>{
     if(!alive)return;if(saved?.projects?.length){const clean=saved.projects.map(item=>({...item,isProcessing:false,isRecording:false,isPlayingAnimatic:false}));setSessionProjects(clean);setProjectState(prev => (prev.shots.length > 0 || prev.transcript ? prev : (clean.find(item=>item.projectId===saved.active)||clean[0])));}setStorageReady(true);setStorageStatus('Saved locally');
   }).catch(()=>{if(alive)setStorageStatus('Local storage could not be opened. Reload to retry; existing data has not been overwritten.');});return()=>{alive=false};},[]);
@@ -1386,7 +1386,7 @@ export default function App() {
     URL.revokeObjectURL(url);
     announceStatus(
       mp4
-        ? `Exported MP4 animatic${burnInTimecode ? ' (BITC)' : ''} with narration on ${mp4.narratedShots} of ${projectState.shots.length} shots.`
+        ? `Exported MP4 animatic${burnInTimecode ? ' (BITC)' : ''}.`
         : 'MP4 export unavailable. Exported a silent WebM animatic instead.',
       true
     );
