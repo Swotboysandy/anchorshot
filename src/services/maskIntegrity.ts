@@ -68,9 +68,9 @@ export interface DetectedMaskColor {
   confidence: number;
 }
 
-/** Hue ranges in degrees; hue survives low film lighting where RGB distance does not. */
+/** Hue ranges in degrees; hue survives low film lighting where RGB distance does not. Teal film grades push dark greens towards 180. */
 const hueColour = (hue: number): string =>
-  hue < 15 || hue >= 340 ? 'red' : hue < 70 ? 'amber' : hue < 170 ? 'emerald' : hue < 200 ? 'cyan' : hue < 255 ? 'blue' : 'purple';
+  hue < 15 || hue >= 340 ? 'red' : hue < 70 ? 'amber' : hue < 182 ? 'emerald' : hue < 200 ? 'cyan' : hue < 255 ? 'blue' : 'purple';
 
 /**
  * Averages the pixels inside a binary mask, ignoring glare and deep shadow, and

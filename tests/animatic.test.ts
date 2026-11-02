@@ -106,6 +106,13 @@ describe('/api/export/animatic', () => {
     ]);
   });
 
+  it('accepts a film larger than the normal request limit', async () => {
+    const render = vi.fn().mockResolvedValue(Buffer.from('mp4'));
+    const app = createApp({ settings: () => ({ key: '', requestLimit: 10 }), renderAnimatic: render, ffmpegAvailable: async () => true });
+    const image = `data:image/png;base64,${Buffer.alloc(14 * 1024 * 1024).toString('base64')}`;
+    expect((await post(app, { shots: [{ image, seconds: 2 }] })).status).toBe(200);
+  });
+
   it('formats SMPTE timecode at 30 fps correctly', () => {
     expect(formatSmpteTimecode(0)).toBe('00:00:00:00');
     expect(formatSmpteTimecode(1)).toBe('00:00:01:00');

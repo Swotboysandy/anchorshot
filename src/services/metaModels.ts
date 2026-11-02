@@ -867,7 +867,7 @@ export class MetaModelClient {
     const expectedColor = rule.expectedValue;
 
     // Segment object on the real frame via SAM 3.1
-    const mask = await this.segmentObjectWithSam3(
+    let mask = await this.segmentObjectWithSam3(
       shot.shotNumber,
       targetObject,
       undefined,
@@ -875,6 +875,23 @@ export class MetaModelClient {
       rule.revision,
       shot.currentImageUrl
     );
+
+    // SAM often misses or doubts a bare noun ("jacket") but finds "green jacket". The colour only
+    // helps locate the object; the verdict below still comes from the measured pixels.
+    if (isGeneratedImage(shot.currentImageUrl) && (mask.provenance !== 'live-sam-3.1' || mask.confidence < 0.8)) {
+      const colourWord = expectedColor === 'emerald' ? 'green' : expectedColor;
+      const retry = await this.segmentObjectWithSam3(
+        shot.shotNumber,
+        `${colourWord} ${targetObject}`,
+        undefined,
+        0.986,
+        rule.revision,
+        shot.currentImageUrl
+      );
+      if (retry.provenance === 'live-sam-3.1' && (mask.provenance !== 'live-sam-3.1' || retry.confidence > mask.confidence)) {
+        mask = retry;
+      }
+    }
 
     // Sample actual color inside the detected mask
     let detectedColor: string | null = null;

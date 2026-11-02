@@ -242,6 +242,8 @@ export function createApp(options: Options) {
     });
   });
 
+  // A film carries every full-size frame; other routes keep the smaller limit.
+  app.use('/api/export/animatic', express.json({ limit: '128mb' }));
   app.use('/api', express.json({ limit: '12mb' }));
 
   const hasValidSession = (req: express.Request) => {
