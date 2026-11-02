@@ -30,7 +30,7 @@ import {
 import { toDataUrl } from './animaticExport';
 import { isGeneratedImage } from './localGeneration';
 import { expandMask } from '../lib/correction';
-import { buildShotPrompt, normalizeCast, normalizeShot, type CastMember, type ShotSize, type ShotSpec } from '../lib/shotLanguage';
+import { buildShotPrompt, normalizeCast, normalizeShot, propInShot, type CastMember, type ShotSize, type ShotSpec } from '../lib/shotLanguage';
 
 export type PlannedShot = ShotSpec & { seconds: number };
 
@@ -629,6 +629,7 @@ export class MetaModelClient {
         shotNumber,
         durationSeconds,
         movement: planned?.movement,
+        absentProps: colourRules.filter((r) => !propInShot(shot, r.targetObject, cast)).map((r) => r.targetObject),
         promptDescription: subject,
         spokenDescription: `Shot ${shotNumber}, ${describeFraming(shot)}, duration ${durationSeconds} seconds. ${subject}. Generated image; continuity unreviewed.`,
         currentImageUrl: frame.url,
@@ -877,6 +878,17 @@ export class MetaModelClient {
       rule.revision,
       shot.currentImageUrl
     );
+
+    // The plan leaves this prop out of the shot and SAM agrees, so the rule has nothing to check.
+    if (shot.absentProps?.includes(targetObject) && mask.provenance !== 'live-sam-3.1') {
+      return {
+        ...shot,
+        status: 'consistent',
+        spokenDescription: `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. The ${targetObject} is not in this shot, so its rule does not apply.`,
+        discrepancyMessage: undefined,
+        proposedFix: undefined,
+      };
+    }
 
     // SAM often misses or doubts a bare noun ("jacket") but finds "green jacket". The colour only
     // helps locate the object; the verdict below still comes from the measured pixels.

@@ -126,4 +126,17 @@ describe('Real SAM detection & color auditing on frames', () => {
     expect(auditedMismatch.proposedFix?.targetColor).toBe('blue');
     expect(auditedMismatch.proposedFix?.targetObject).toBe('cup');
   });
+
+  it('reports a prop the plan left out as not applicable, not unverified', async () => {
+    const shot: StoryboardShot = {
+      id: 'shot-4', shotNumber: 4, durationSeconds: 4, promptDescription: 'The clockmaker smiles', spokenDescription: '',
+      currentImageUrl: '/api/muse/frames/x.png', originalImageUrl: '/api/muse/frames/x.png', status: 'uncertain', revisions: [],
+    };
+    const rule = { id: 'r', scope: 'all_shots' as const, targetObject: 'jacket', property: 'color', expectedValue: 'emerald', revision: 1 };
+    const client = new MetaModelClient();
+    const absent = await client.auditShotContinuity({ ...shot, absentProps: ['jacket'] }, rule);
+    expect(absent.status).toBe('consistent');
+    expect(absent.spokenDescription).toMatch(/jacket is not in this shot/);
+    expect((await client.auditShotContinuity(shot, rule)).status).toBe('uncertain');
+  });
 });
