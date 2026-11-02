@@ -31,6 +31,41 @@ export interface ShotSpec {
   subject: string;
   /** Why this shot exists in the scene, e.g. "establish the diner". */
   intent?: string;
+  /** Names of the cast on screen in this shot. */
+  cast?: string[];
+}
+
+/** Fixed look for one character, repeated in every frame they appear in (Fylmer's cast brief). */
+export interface CastMember {
+  name: string;
+  age?: string;
+  build?: string;
+  features?: string;
+  wardrobe?: string;
+}
+
+const text = (value: unknown, max: number) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
+
+/** Keeps usable cast briefs from model output; a character needs a name and some visible detail. */
+export function normalizeCast(raw: unknown): CastMember[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      const c = (item ?? {}) as Record<string, unknown>;
+      return { name: text(c.name, 60), age: text(c.age, 30), build: text(c.build, 80), features: text(c.features, 200), wardrobe: text(c.wardrobe, 200) };
+    })
+    .filter((c) => c.name && (c.features || c.wardrobe))
+    .slice(0, 6);
+}
+
+const describeCast = (c: CastMember) =>
+  `${c.name}: ${[c.age, c.build, c.features, c.wardrobe && `wearing ${c.wardrobe}`].filter(Boolean).join(', ')}`;
+
+/** Cast listed on the shot, or named in its subject when the model did not list them. */
+function castInShot(shot: ShotSpec, cast: CastMember[]): CastMember[] {
+  const named = (shot.cast ?? []).map((n) => n.toLowerCase());
+  const subject = shot.subject.toLowerCase();
+  return cast.filter((c) => named.includes(c.name.toLowerCase()) || subject.includes(c.name.toLowerCase()));
 }
 
 /** Standard shot shorthands mapped to size, angle and lens (and movement where implied). */
@@ -63,6 +98,7 @@ export function normalizeShot(raw: Partial<Record<keyof ShotSpec, unknown>>): Sh
     temp: pick(COLOR_TEMPS, raw.temp, 'Neutral'),
     subject: typeof raw.subject === 'string' ? raw.subject.trim().slice(0, 400) : '',
     intent: typeof raw.intent === 'string' && raw.intent.trim() ? raw.intent.trim().slice(0, 200) : undefined,
+    ...(Array.isArray(raw.cast) ? { cast: raw.cast.filter((n): n is string => typeof n === 'string').slice(0, 6) } : {}),
   };
 }
 
@@ -79,19 +115,26 @@ export interface ContinuityAnchor {
 }
 
 /**
- * Builds a frame prompt. Fixed blocks lead (style, continuity, set), then the one
+ * Builds a frame prompt. The identity lock leads, then fixed blocks (style, continuity, set), then the one
  * block that varies per shot, then the locks and house look. Continuity comes first
  * because image models weight early text most (verified in Fylmer's A/B).
  */
 export function buildShotPrompt(options: {
   shot: ShotSpec;
   continuity?: ContinuityAnchor[];
+  cast?: CastMember[];
   setting?: string;
   style?: string;
   avoid?: string;
 }): string {
   const { shot } = options;
-  const anchors = (options.continuity ?? []).map(
+  // With a known cast, a prop rule only applies where the prop is in the shot; otherwise
+  // "the jacket is emerald" dresses whoever is on screen in that jacket.
+  const inShot = castInShot(shot, options.cast ?? []);
+  const shotText = [shot.subject, ...inShot.map((c) => `${c.wardrobe} ${c.features}`)].join(' ').toLowerCase();
+  const anchors = (options.continuity ?? [])
+    .filter((rule) => !options.cast?.length || shotText.includes(rule.targetObject.toLowerCase()))
+    .map(
     (rule) => `The ${rule.targetObject} is ${rule.expectedValue}: the same ${rule.targetObject}, same colour, in every shot.`,
   );
   const shotLine = [
@@ -101,7 +144,12 @@ export function buildShotPrompt(options: {
   ]
     .filter(Boolean)
     .join(' ');
+  const onScreen = inShot;
+  const identity = onScreen.length
+    ? `IDENTITY LOCK\n${onScreen.map(describeCast).join('\n')}\nThe same ${onScreen.length === 1 ? 'individual' : 'individuals'} in every shot: same face and facial structure, same skin tone, same hair, same wardrobe and headwear, not a look-alike or a different actor. Exactly ${onScreen.length} ${onScreen.length === 1 ? 'person' : 'distinct people'} from this list; never duplicate them.`
+    : '';
   return [
+    identity,
     options.style ? `STYLE LOCK\n${options.style}` : '',
     anchors.length ? `CONTINUITY\n${anchors.join(' ')}` : '',
     options.setting ? `SET\n${options.setting}` : '',

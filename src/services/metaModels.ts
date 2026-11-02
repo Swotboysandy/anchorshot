@@ -30,7 +30,7 @@ import {
 import { toDataUrl } from './animaticExport';
 import { isGeneratedImage } from './localGeneration';
 import { expandMask } from '../lib/correction';
-import { buildShotPrompt, normalizeShot, type ShotSize, type ShotSpec } from '../lib/shotLanguage';
+import { buildShotPrompt, normalizeCast, normalizeShot, type CastMember, type ShotSize, type ShotSpec } from '../lib/shotLanguage';
 
 export type PlannedShot = ShotSpec & { seconds: number };
 
@@ -287,7 +287,7 @@ export class MetaModelClient {
    * Returns null when only the offline fixture is available or the call fails, so the
    * local keyword planner still answers.
    */
-  private async planWithServer(transcript: string): Promise<{ rules: ContinuityRule[]; shots?: PlannedShot[] } | null> {
+  private async planWithServer(transcript: string): Promise<{ rules: ContinuityRule[]; shots?: PlannedShot[]; cast?: CastMember[] } | null> {
     if (typeof fetch !== 'function') return null;
     try {
       const health = await (await fetch('/api/health')).json();
@@ -322,6 +322,7 @@ export class MetaModelClient {
           },
         ],
         shots,
+        cast: normalizeCast(plan.cast),
       };
     } catch {
       return null;
@@ -409,7 +410,7 @@ export class MetaModelClient {
     if (health?.imageModel) {
       return {
         rules,
-        shots: await this.generateModelFrames(health.imageModel, rules, cameraSequence, parsedDescriptions, plannedShots),
+        shots: await this.generateModelFrames(health.imageModel, rules, cameraSequence, parsedDescriptions, plannedShots, plan?.cast),
       };
     }
 
@@ -588,7 +589,8 @@ export class MetaModelClient {
     rules: ContinuityRule[],
     cameraSequence: Array<SceneRenderSpec['cameraAngle']>,
     descriptions: Record<number, string>,
-    plannedShots?: PlannedShot[]
+    plannedShots?: PlannedShot[],
+    cast?: CastMember[]
   ): Promise<StoryboardShot[]> {
     const colourRules = rules.filter((r) => r.property === 'color');
     const anchor = colourRules[0] ?? rules[0];
@@ -609,7 +611,7 @@ export class MetaModelClient {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Framelock-Session': this.sessionToken ?? '' },
         body: JSON.stringify({
-          prompt: buildShotPrompt({ shot, continuity: colourRules }),
+          prompt: buildShotPrompt({ shot, continuity: colourRules, cast }),
           targetObject: anchor.targetObject,
           seed,
         }),

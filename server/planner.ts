@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { ANGLES, COLOR_TEMPS, LENSES, LIGHTS, MOVEMENTS, normalizeShot, SHOT_SIZES, type ShotSpec } from '../src/lib/shotLanguage';
+import { ANGLES, COLOR_TEMPS, LENSES, LIGHTS, MOVEMENTS, normalizeCast, normalizeShot, SHOT_SIZES, type CastMember, type ShotSpec } from '../src/lib/shotLanguage';
 
 /**
  * Shot-planning role behind `/api/muse/spark`. Prompts and the rule schema live
@@ -25,6 +25,7 @@ export interface PlanResult {
   rules: ContinuityRule[];
   /** Shot list chosen by the model; absent from the offline fixture. */
   shots?: PlannedShot[];
+  cast?: CastMember[];
 }
 export interface Planner {
   plan(transcript: string, revision: number, signal?: AbortSignal): Promise<PlanResult>;
@@ -69,18 +70,22 @@ export const MAX_SHOTS = 8;
 export const PLANNER_PROMPT = `You are a film director's first assistant. From the director's spoken notes, extract the visual continuity rules and plan the storyboard shot list.
 Reply with JSON only, no prose:
 {"rules":[{"targetObject":string,"expectedValue":string}],
- "shots":[{"subject":string,"intent":string,"size":string,"angle":string,"lens":string,"movement":string,"light":string,"temp":string,"seconds":number}]}
+ "cast":[{"name":string,"age":string,"build":string,"features":string,"wardrobe":string}],
+ "shots":[{"cast":[string],"subject":string,"intent":string,"size":string,"angle":string,"lens":string,"movement":string,"light":string,"temp":string,"seconds":number}]}
 
 Rules: targetObject is one of: ${[...new Set(Object.values(OBJECTS))].join(', ')}. expectedValue is that object's colour, one of: ${[...new Set(Object.values(COLORS))].join(', ')}. Only include rules the director actually stated; use an empty list if there are none.
 
+Cast: list everyone who appears. If the notes imply an unnamed person ("a courier"), invent a short working name like "THE COURIER". Fix one concrete look per person and keep it for the whole film: age like "30s", build, features (face, skin tone, hair), and wardrobe including headwear. Unless the director says a look changes, it never changes.
+
 Shots: plan ${MIN_SHOTS} to ${MAX_SHOTS} shots in story order. If the director numbers shots ("Shot 2: ..."), keep exactly those shots and that order. Otherwise start a new shot whenever the framing, who is on screen, the location or time of day, the dramatic turn or a significant action changes. Usually open wide to establish place, move closer as tension builds, and avoid the same size three times in a row.
+- cast: exact names from the cast list of who is on screen; empty if nobody is.
 - subject: what the frame shows, concrete and visible (people, action, setting, props with their continuity colour). No mood words without a visible cause, no on-screen text.
 - intent: one short phrase on why this shot exists, e.g. "establish the diner".
 - size: one of ${SHOT_SIZES.join(', ')}. angle: one of ${ANGLES.join(', ')}. lens: one of ${LENSES.join(', ')}. movement: one of ${MOVEMENTS.join(', ')}. light: one of ${LIGHTS.join(', ')}. temp: one of ${COLOR_TEMPS.join(', ')}.
 - seconds: 2 to 8; quicker for action, longer for quiet or emotional moments.`;
 
 /** Turns raw model text into rules and shots, or explains exactly what was wrong. */
-export function parsePlan(text: string, revision: number): { rules: ContinuityRule[]; shots?: PlannedShot[] } {
+export function parsePlan(text: string, revision: number): { rules: ContinuityRule[]; shots?: PlannedShot[]; cast?: CastMember[] } {
   const json = text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
   let data: unknown;
   try {
@@ -88,7 +93,8 @@ export function parsePlan(text: string, revision: number): { rules: ContinuityRu
   } catch {
     throw new PlannerOutputError('Reply was not valid JSON.');
   }
-  return { rules: parseRules(data, revision), shots: parseShots(data) };
+  const cast = normalizeCast((data as { cast?: unknown })?.cast);
+  return { rules: parseRules(data, revision), shots: parseShots(data), ...(cast.length ? { cast } : {}) };
 }
 
 /** Rules only, for callers that do not plan shots. */
@@ -151,8 +157,8 @@ export function chatPlanner(options: { model: string; chat: Chat; attempts?: num
         );
         const text = reply.choices[0]?.message?.content ?? '';
         try {
-          const { rules, shots } = parsePlan(text, revision);
-          return { model: options.model, provenance: 'live-model', ruleRevision: revision, rules, ...(shots && { shots }) };
+          const { rules, shots, cast } = parsePlan(text, revision);
+          return { model: options.model, provenance: 'live-model', ruleRevision: revision, rules, ...(shots && { shots }), ...(cast && { cast }) };
         } catch (error) {
           if (!(error instanceof PlannerOutputError)) throw error;
           problem = error.message;
