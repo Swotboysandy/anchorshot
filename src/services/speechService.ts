@@ -10,61 +10,6 @@ class AccessibleAudioService {
   // Narration is kept quieter than full scale so it sits under the user's own audio.
   private narrationVolume: number = 0.5;
   private onSpeakingChange?: (speaking: boolean) => void;
-  private serverVoice: string | null = null;
-  private serverSession = '';
-  private currentAudio: HTMLAudioElement | null = null;
-  private speakGeneration = 0;
-
-  /**
-   * Asks the local server whether a narration voice is connected. When one is,
-   * speak() plays its audio and falls back to the browser voice on any failure.
-   */
-  public async connectBackend(): Promise<string | null> {
-    try {
-      const health = await (await fetch('/api/health')).json();
-      this.serverVoice = typeof health?.narrationModel === 'string' ? health.narrationModel : null;
-      this.serverSession = typeof health?.sessionToken === 'string' ? health.sessionToken : '';
-    } catch {
-      this.serverVoice = null;
-    }
-    return this.serverVoice;
-  }
-
-  private stopServerAudio() {
-    this.speakGeneration++;
-    if (this.currentAudio) {
-      this.currentAudio.pause();
-      this.currentAudio = null;
-    }
-  }
-
-  private async speakWithServer(text: string, generation: number) {
-    try {
-      const res = await fetch('/api/muse/speak', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Anchorshot-Session': this.serverSession },
-        body: JSON.stringify({ text }),
-      });
-      if (!res.ok) throw new Error(`Narration failed with status ${res.status}`);
-      const url = URL.createObjectURL(await res.blob());
-      if (generation !== this.speakGeneration || this.isMuted) return URL.revokeObjectURL(url);
-      const audio = new Audio(url);
-      audio.playbackRate = this.speechRate;
-      audio.volume = this.narrationVolume;
-      const finish = () => {
-        URL.revokeObjectURL(url);
-        if (this.currentAudio === audio) this.currentAudio = null;
-        this.onSpeakingChange?.(false);
-      };
-      audio.onended = finish;
-      audio.onerror = finish;
-      this.currentAudio = audio;
-      this.onSpeakingChange?.(true);
-      await audio.play();
-    } catch {
-      if (generation === this.speakGeneration) this.speakWithBrowser(text);
-    }
-  }
 
   private getAudioContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
@@ -86,7 +31,6 @@ class AccessibleAudioService {
 
   public setMuted(muted: boolean) {
     this.isMuted = muted;
-    if (muted) this.stopServerAudio();
     if (muted && typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       this.onSpeakingChange?.(false);
@@ -105,23 +49,31 @@ class AccessibleAudioService {
     return this.speechRate;
   }
 
-  /**
-   * Speaks text aloud with the server narration voice when connected, otherwise
-   * via native Web Speech API (window.speechSynthesis).
-   */
-  public speak(text: string, interrupt: boolean = true) {
-    if (this.isMuted || typeof window === 'undefined') return;
-    // Server clips are not queued: the newest announcement replaces the previous one.
-    if (this.serverVoice && text.trim()) {
-      this.stopServerAudio();
-      if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-      void this.speakWithServer(text, this.speakGeneration);
-      return;
-    }
-    this.speakWithBrowser(text, interrupt);
+  /** Speaks and resolves when finished; resolves at once if nothing can be spoken. */
+  public speakAndWait(text: string): Promise<void> {
+    if (this.isMuted || typeof window === 'undefined' || !('speechSynthesis' in window)) return Promise.resolve();
+    const voices = window.speechSynthesis.getVoices().filter((voice) => voice.localService);
+    if (!voices.length) return Promise.resolve();
+    return new Promise((resolve) => {
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = this.speechRate;
+      utterance.volume = this.narrationVolume;
+      utterance.voice = voices.find((voice) => voice.lang.startsWith('en')) || voices[0];
+      // Browsers can drop the end event when speech is cancelled.
+      const timer = setTimeout(resolve, 3000 + text.length * 150);
+      utterance.onend = utterance.onerror = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(utterance);
+    });
   }
 
-  private speakWithBrowser(text: string, interrupt: boolean = true) {
+  /**
+   * Speaks text aloud via native Web Speech API (window.speechSynthesis)
+   */
+  public speak(text: string, interrupt: boolean = true) {
     if (this.isMuted || typeof window === 'undefined' || !('speechSynthesis' in window)) {
       return;
     }
@@ -153,7 +105,6 @@ class AccessibleAudioService {
   }
 
   public stopSpeaking() {
-    this.stopServerAudio();
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       this.onSpeakingChange?.(false);

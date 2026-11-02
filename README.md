@@ -2,7 +2,7 @@
 
 **Anchorshot** lets a blind or low-vision director build a film storyboard entirely by voice and keep it visually consistent without having to see it. Built for the Meta Global AI Developer Hackathon (Indie Developer track).
 
-**The moat:** other tools generate frames; Anchorshot proves continuity. Every prop that must stay the same ("the cup is blue in every shot") becomes a rule. SAM masks locate the prop, a mismatch is spoken aloud, the fix recolours only the masked pixels, and an evidence trail records the source hash, mask provenance and how many pixels changed inside and outside the mask. Accessibility is the core of the product, not an add-on: voice in, spoken narration and on-screen captions out, full keyboard control.
+**The moat:** other tools generate frames; Anchorshot proves continuity. Every prop that must stay the same ("the cup is blue in every shot") becomes a rule. SAM masks locate the prop, a mismatch is spoken aloud, the fix recolours only the masked pixels, and an evidence trail records the source hash, mask provenance and how many pixels changed inside and outside the mask. Accessibility is the core of the product, not an add-on: voice in, spoken replies and on-screen captions out, full keyboard control.
 
 ---
 
@@ -15,12 +15,12 @@ Each AI role sits behind a small provider adapter on the local server. Prompts a
 | Shot planning and continuity rules | `POST /api/muse/spark` | **Meta `muse-spark-1.3`** (also verified: `muse-spark-open-1026` through the Baseten x Meta endpoint; any OpenAI-compatible chat model works) | Keyword planner |
 | Object segmentation and colour check | `POST /api/segment`, `/api/segment/check` | **Meta `sam-3.1`**: real masks on generated frames; colour is measured from the masked pixels | Fixture masks, clearly labelled "offline fixture" |
 | Storyboard frames | `POST /api/muse/image` | **Meta `muse-image-1.0`** (any OpenAI-compatible `/images/generations` endpoint works); frames stay unreviewed until the continuity check runs | Canvas-drawn sample frames |
-| Voice to script | `POST /api/muse/transcribe` | **Meta `muse-voice-transcribe-1.0`** through `POST /asr/transcribe` (ElevenLabs Scribe v2 or any Whisper-compatible endpoint also work) | Browser speech recognition |
-| Spoken narration | `POST /api/muse/speak` | ElevenLabs premade voice, Flash model; each sentence cached so it is paid for once, per-session character budget | Browser `speechSynthesis` |
-| Voice co-director | `POST /api/agent/session` | ElevenLabs Agent on the orb, server-signed link, studio actions as client tools, live captions | Orb meters the microphone locally |
-| Film export | `POST /api/export/animatic` | Local ffmpeg: narrated 1280x720 H.264/AAC MP4, each shot held until its narration ends | Silent browser WebM |
+| Voice to script | `POST /api/muse/transcribe` | **Meta `muse-voice-transcribe-1.0`** through `POST /asr/transcribe` (any Whisper-compatible endpoint also works) | Browser speech recognition |
+| Spoken narration | Browser | Browser `speechSynthesis` (no Meta text-to-speech model is available) | Same |
+| Voice co-director | `POST /api/agent/turn` | **Meta `muse-spark-1.3`** with studio actions as tools; hands-free turns through Meta voice, spoken by the browser, with live captions | Orb meters the microphone locally |
+| Film export | `POST /api/export/animatic` | Local ffmpeg: silent 1280x720 H.264 MP4 with camera moves from the plan | Silent browser WebM |
 
-Planning, frames, segmentation and transcription are verified in live calls on Meta models, on a few scenes so far. Narration and the voice agent run on ElevenLabs. Video generation is opt-in from Generate new media and never starts by itself. A standalone offline dream workbench is at `/dream`.
+Planning, frames, segmentation, transcription and the voice agent all run on Meta models; speech output uses the browser voice. These are verified in live calls on a few scenes so far. Video generation is opt-in from Generate new media and never starts by itself. A standalone offline dream workbench is at `/dream`.
 
 ---
 
@@ -38,12 +38,9 @@ PLANNER_MODEL="muse-spark-1.3"
 # Meta SAM 3.1 gateway
 META_API_KEY="<your Meta key>"
 
-# ElevenLabs: dictation, narration and the voice agent
-ELEVENLABS_API_KEY=""
+# Meta voice and the voice agent use META_API_KEY
 TRANSCRIBE_PROVIDER="meta"
-NARRATION_PROVIDER="elevenlabs"
-AGENT_PROVIDER="elevenlabs"
-ELEVENLABS_AGENT_ID=""
+AGENT_PROVIDER="meta"
 
 # Meta muse-image for storyboard frames
 IMAGE_PROVIDER="openai-compatible"
@@ -52,7 +49,7 @@ IMAGE_API_KEY="<your Meta key>"
 IMAGE_MODEL="muse-image-1.0"
 ```
 
-`.env.example` documents the remaining settings, including `NARRATION_VOICE_ID`, `NARRATION_MODEL` and `IMAGE_SIZE`. Paid calls share a per-session request limit (`SAM_MAX_REQUESTS`, default 25 under `npm run dev`), and narration has its own character budget.
+`.env.example` documents the remaining settings, including `AGENT_MODEL` and `IMAGE_SIZE`. Paid calls share a per-session request limit (`SAM_MAX_REQUESTS`, default 25 under `npm run dev`).
 
 ---
 

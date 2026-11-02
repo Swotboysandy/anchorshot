@@ -6,7 +6,6 @@ import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import sharp from 'sharp';
 import { createApp } from '../server/app';
-import { cachedNarrator } from '../server/narrator';
 import { ffmpegAvailable, formatSmpteTimecode, renderAnimatic } from '../server/animatic';
 
 const frame = (background: string) =>
@@ -78,32 +77,6 @@ describe('/api/export/animatic', () => {
   it('reports 501 when ffmpeg is missing', async () => {
     const app = createApp({ settings: () => ({ key: '', requestLimit: 10 }), ffmpegAvailable: async () => false });
     expect((await post(app, { shots: [{ image: await dataUrl('#000'), seconds: 2 }] })).status).toBe(501);
-  });
-
-  it('adds narration within the budget and leaves the rest silent', async () => {
-    const render = vi.fn().mockResolvedValue(Buffer.from('mp4'));
-    const speak = vi.fn().mockResolvedValue(Buffer.from('mp3'));
-    const app = createApp({
-      settings: () => ({ key: '', requestLimit: 10 }),
-      narrator: cachedNarrator({ model: 'm', voice: 'v', speak }, mkdtempSync(path.join(tmpdir(), 'narr-'))),
-      narrationCharLimit: 10,
-      renderAnimatic: render,
-      ffmpegAvailable: async () => true,
-    });
-    const res = await post(app, {
-      shots: [
-        { image: await dataUrl('#111'), seconds: 2, narration: 'Shot one.' },
-        { image: await dataUrl('#222'), seconds: 3, narration: 'Shot two is far too long for the budget.' },
-      ],
-    });
-    expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toMatch(/video\/mp4/);
-    expect(res.headers['x-anchorshot-narrated-shots']).toBe('1');
-    const [shots] = render.mock.calls[0];
-    expect(shots.map((s: { seconds: number; narration?: Buffer }) => [s.seconds, Boolean(s.narration)])).toEqual([
-      [2, true],
-      [3, false],
-    ]);
   });
 
   it('accepts a film larger than the normal request limit', async () => {

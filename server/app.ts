@@ -14,9 +14,8 @@ import {
 } from './sam';
 import { ImagerOutputError, type Imager } from './imager';
 import { readAudioDataUrl, TranscriberOutputError, type Transcriber } from './transcriber';
-import type { VoiceAgent } from './agent';
+import type { AgentMessage, VoiceAgent } from './agent';
 import { AnimaticError, ffmpegAvailable, renderAnimatic, type AnimaticShot, type RenderAnimaticOptions } from './animatic';
-import { MAX_NARRATION_TEXT, NarratorOutputError, type CachedNarrator } from './narrator';
 import { fixturePlanner, PlannerOutputError, type Planner } from './planner';
 import type { ContinuityEvidenceStatus, SegmentationResult } from '../src/types';
 
@@ -189,8 +188,6 @@ interface Options {
   imager?: Imager;
   frameFolder?: string;
   transcriber?: Transcriber;
-  narrator?: Pick<CachedNarrator, 'model' | 'voice' | 'cached' | 'speak'>;
-  narrationCharLimit?: number;
   agent?: VoiceAgent;
   renderAnimatic?: (
     shots: AnimaticShot[],
@@ -210,7 +207,6 @@ export function createApp(options: Options) {
   let active = false;
   let imageActive = false;
   let transcribeActive = false;
-  let narrationCharsUsed = 0;
   let exportActive = false;
   const frameFolder = options.frameFolder ?? resolve('.artifacts/frames');
 
@@ -238,7 +234,6 @@ export function createApp(options: Options) {
       plannerLive: planner !== fixturePlanner,
       imageModel: options.imager?.model ?? null,
       transcribeModel: options.transcriber?.model ?? null,
-      narrationModel: options.narrator?.model ?? null,
       agentReady: Boolean(options.agent),
     });
   });
@@ -648,60 +643,24 @@ export function createApp(options: Options) {
   });
 
   /**
-   * Narration endpoint: `POST /api/muse/speak` returns MP3 for the given text.
-   * Cached clips are free; new text counts against a per-session character budget.
+   * Voice agent endpoint: `POST /api/agent/turn` runs one model turn. The browser
+   * runs any requested studio tools and sends the results in the next turn.
    */
-  const withinNarrationBudget = (text: string) =>
-    !!options.narrator &&
-    (options.narrator.cached(text) ||
-      narrationCharsUsed + text.length <= (options.narrationCharLimit ?? 20_000));
-  const narrate = (text: string, signal?: AbortSignal) => {
-    if (!options.narrator!.cached(text)) narrationCharsUsed += text.length;
-    return options.narrator!.speak(text, signal);
-  };
-
-  app.post('/api/muse/speak', async (req, res, next) => {
-    if (!hasValidSession(req))
-      return res.status(403).json({ error: 'Refresh the page before narration.' });
-    if (!options.narrator)
-      return res.status(501).json({ error: 'No narration voice is connected. The browser voice is used.' });
-    const text = typeof req.body?.text === 'string' ? req.body.text.replace(/\s+/g, ' ').trim() : '';
-    if (!text || text.length > MAX_NARRATION_TEXT)
-      return res.status(400).json({ error: `Narrate between 1 and ${MAX_NARRATION_TEXT} characters.` });
-    if (!withinNarrationBudget(text))
-      return res
-        .status(429)
-        .json({ error: 'The session narration budget has been reached. The browser voice is used.' });
-    const controller = new AbortController();
-    res.on('close', () => {
-      if (!res.writableEnded) controller.abort();
-    });
-    try {
-      const audio = await narrate(text, controller.signal);
-      if (!controller.signal.aborted) res.type('audio/mpeg').send(audio);
-    } catch (error) {
-      if (controller.signal.aborted) return;
-      if (error instanceof NarratorOutputError) return res.status(502).json({ error: error.message });
-      next(error);
-    }
-  });
-
-  /**
-   * Voice agent endpoint: `POST /api/agent/session` returns a signed link for one
-   * conversation. Each link counts against the session request limit.
-   */
-  app.post('/api/agent/session', async (req, res, next) => {
+  app.post('/api/agent/turn', async (req, res, next) => {
     if (!hasValidSession(req))
       return res.status(403).json({ error: 'Refresh the page before talking to the agent.' });
     if (!options.agent)
       return res.status(501).json({ error: 'No voice agent is connected. Set AGENT_PROVIDER in .env.local.' });
+    const messages = req.body?.messages;
+    if (!Array.isArray(messages) || !messages.length || messages.length > 80)
+      return res.status(400).json({ error: 'Send the conversation so far.' });
     if (requestsUsed >= options.settings().requestLimit)
       return res
         .status(429)
         .json({ error: 'The session request limit has been reached. No further call was sent.' });
     try {
       requestsUsed++;
-      res.json({ signedUrl: await options.agent.signedUrl() });
+      res.json({ message: await options.agent.turn(messages as AgentMessage[]) });
     } catch (error) {
       next(error);
     }
@@ -709,8 +668,7 @@ export function createApp(options: Options) {
 
   /**
    * Animatic export: `POST /api/export/animatic` with shots of
-   * `{image: data URL, seconds, narration?}` returns an H.264/AAC MP4. Narration uses
-   * the connected voice within its budget; shots without it stay silent.
+   * `{image: data URL, seconds, movement?}` returns a silent H.264/AAC MP4.
    */
   app.post('/api/export/animatic', async (req, res, next) => {
     if (!hasValidSession(req))
@@ -734,20 +692,8 @@ export function createApp(options: Options) {
     if (exportActive) return res.status(409).json({ error: 'An export is already running.' });
     exportActive = true;
     try {
-      let narrated = 0;
-      for (const [i, shot] of shots.entries()) {
-        const text = typeof shot.narration === 'string' ? shot.narration.replace(/\s+/g, ' ').trim() : '';
-        if (!text || text.length > MAX_NARRATION_TEXT || !withinNarrationBudget(text)) continue;
-        try {
-          parsed[i].narration = await narrate(text);
-          narrated++;
-        } catch {
-          /* A shot whose narration fails is exported silent rather than failing the film. */
-        }
-      }
       const burnInTimecode = Boolean(req.body?.burnInTimecode);
       const video = await (options.renderAnimatic ?? renderAnimatic)(parsed, undefined, undefined, { burnInTimecode });
-      res.setHeader('X-Anchorshot-Narrated-Shots', String(narrated));
       res.type('video/mp4').send(video);
     } catch (error) {
       if (error instanceof AnimaticError) return res.status(500).json({ error: 'The MP4 could not be encoded.' });

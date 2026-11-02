@@ -1,87 +1,77 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../server/app';
-import { agentFromSettings, elevenLabsAgent } from '../server/agent';
+import { AGENT_TOOLS, agentFromSettings, chatAgent } from '../server/agent';
+import { agentAvailable, runAgentTurn } from '../src/services/voiceAgent';
 
-const startSession = vi.hoisted(() => vi.fn());
-vi.mock('@elevenlabs/client', () => ({ Conversation: { startSession } }));
-import { agentAvailable, cleanCaption, startAgentConversation } from '../src/services/voiceAgent';
-
-afterEach(() => {
-  vi.unstubAllGlobals();
-  startSession.mockReset();
-});
+afterEach(() => vi.unstubAllGlobals());
 
 describe('voice agent server', () => {
-  it('asks ElevenLabs for a signed conversation link with the server key', async () => {
-    const fetch = vi.fn().mockResolvedValue(Response.json({ signed_url: 'wss://api.elevenlabs.io/v1/convai/x?token=t' }));
-    const url = await elevenLabsAgent({ apiKey: 'k', agentId: 'agent 1', fetch }).signedUrl();
-    expect(url).toMatch(/^wss:\/\//);
-    expect(fetch.mock.calls[0][0]).toBe('https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=agent%201');
-    expect(fetch.mock.calls[0][1].headers).toEqual({ 'xi-api-key': 'k' });
+  it('sends the prompt, conversation and studio tools to the model', async () => {
+    const create = vi.fn().mockResolvedValue({ choices: [{ message: { role: 'assistant', content: 'Ready.' } }] });
+    const message = await chatAgent({ model: 'm', chat: { create } as never }).turn([{ role: 'user', content: 'Hello' }]);
+    expect(message.content).toBe('Ready.');
+    const body = create.mock.calls[0][0];
+    expect(body.messages[0].role).toBe('system');
+    expect(body.messages[1]).toEqual({ role: 'user', content: 'Hello' });
+    expect(body.tools).toBe(AGENT_TOOLS);
   });
 
-  it('refuses replies without a usable link', async () => {
-    const bad = vi.fn().mockResolvedValue(Response.json({ signed_url: 'http://example.test' }));
-    await expect(elevenLabsAgent({ apiKey: 'k', agentId: 'a', fetch: bad }).signedUrl()).rejects.toThrow(/no conversation link/);
-    const denied = vi.fn().mockResolvedValue(new Response('', { status: 401 }));
-    await expect(elevenLabsAgent({ apiKey: 'k', agentId: 'a', fetch: denied }).signedUrl()).rejects.toThrow(/status 401/);
+  it('needs the provider and the Meta key', () => {
+    expect(agentFromSettings({ AGENT_PROVIDER: 'meta', META_API_KEY: '' })).toBeUndefined();
+    expect(agentFromSettings({ AGENT_PROVIDER: '', META_API_KEY: 'k' })).toBeUndefined();
+    expect(agentFromSettings({ AGENT_PROVIDER: 'meta', META_API_KEY: 'k' })?.model).toBe('muse-spark-1.3');
   });
 
-  it('needs the provider, key and agent id', () => {
-    expect(agentFromSettings({ AGENT_PROVIDER: 'elevenlabs', ELEVENLABS_API_KEY: 'k' })).toBeUndefined();
-    expect(agentFromSettings({ AGENT_PROVIDER: 'elevenlabs', ELEVENLABS_API_KEY: 'k', ELEVENLABS_AGENT_ID: 'a' })?.agentId).toBe('a');
-  });
-
-  it('serves links through /api/agent/session within the request limit', async () => {
-    const signedUrl = vi.fn().mockResolvedValue('wss://link');
-    const app = createApp({ settings: () => ({ key: '', requestLimit: 1 }), agent: { agentId: 'a', signedUrl } });
+  it('serves turns within the request limit, and validates input', async () => {
+    const turn = vi.fn().mockResolvedValue({ role: 'assistant', content: 'Ready.' });
+    const app = createApp({ settings: () => ({ key: '', requestLimit: 1 }), agent: { model: 'm', turn } });
     const health = await request(app).get('/api/health');
     expect(health.body.agentReady).toBe(true);
-    const post = () => request(app).post('/api/agent/session').set('X-Anchorshot-Session', health.body.sessionToken);
-    expect((await post()).body).toEqual({ signedUrl: 'wss://link' });
-    expect((await post()).status).toBe(429);
+    const post = (body: object) => request(app).post('/api/agent/turn').set('X-Anchorshot-Session', health.body.sessionToken).send(body);
+    expect((await post({ messages: [] })).status).toBe(400);
+    expect((await post({ messages: [{ role: 'user', content: 'Hi' }] })).body.message.content).toBe('Ready.');
+    expect((await post({ messages: [{ role: 'user', content: 'Hi' }] })).status).toBe(429);
     const none = createApp({ settings: () => ({ key: '', requestLimit: 1 }) });
     const token = (await request(none).get('/api/health')).body.sessionToken;
-    expect((await request(none).post('/api/agent/session').set('X-Anchorshot-Session', token)).status).toBe(501);
+    expect((await request(none).post('/api/agent/turn').set('X-Anchorshot-Session', token).send({ messages: [{ role: 'user', content: 'Hi' }] })).status).toBe(501);
   });
 });
 
 describe('voice agent client', () => {
-  it('starts a websocket conversation with the signed link and the app tools', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string) =>
-        url === '/api/health' ? Response.json({ agentReady: true, sessionToken: 't' }) : Response.json({ signedUrl: 'wss://link' }),
-      ),
+  const stubTurns = (...replies: object[]) => {
+    const fetch = vi.fn(async (url: string) =>
+      url === '/api/health' ? Response.json({ agentReady: true, sessionToken: 't' }) : Response.json({ message: replies.shift() }),
+    );
+    vi.stubGlobal('fetch', fetch);
+    return fetch;
+  };
+
+  it('runs requested studio tools, sends results back and returns the spoken reply', async () => {
+    const fetch = stubTurns(
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'select_shot', arguments: '{"number":2}' } }] },
+      { role: 'assistant', content: 'Shot two shows the cup.' },
     );
     expect(await agentAvailable()).toEqual({ ready: true, session: 't' });
-    startSession.mockResolvedValue({ endSession: vi.fn() });
-    const tools = { describe_storyboard: () => 'empty' };
-    const statuses: string[] = [];
-    await startAgentConversation('t', tools, {
-      onStatus: (s) => statuses.push(s),
-      onMessage: () => {},
-      onError: () => {},
-      onEnd: () => {},
-    });
-    const options = startSession.mock.calls[0][0];
-    expect(options).toMatchObject({ signedUrl: 'wss://link', connectionType: 'websocket', clientTools: tools });
-    options.onModeChange({ mode: 'speaking' });
-    expect(statuses).toEqual(['Agent speaking.']);
+    const select = vi.fn().mockReturnValue('The cup on the counter.');
+    const messages = [{ role: 'user', content: 'Open shot two' }];
+    expect(await runAgentTurn('t', messages, { select_shot: select })).toBe('Shot two shows the cup.');
+    expect(select).toHaveBeenCalledWith({ number: 2 });
+    expect(messages[2]).toEqual({ role: 'tool', tool_call_id: 'c1', content: 'The cup on the counter.' });
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it('reports the server error and never opens a session', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: 'No voice agent is connected.' }, { status: 501 })));
-    await expect(
-      startAgentConversation('t', {}, { onStatus() {}, onMessage() {}, onError() {}, onEnd() {} }),
-    ).rejects.toThrow(/No voice agent/);
-    expect(startSession).not.toHaveBeenCalled();
-  });
-});
-
-describe('agent captions', () => {
-  it('removes voice direction tags', () => {
-    expect(cleanCaption("[gentle] I'm here. [soft laugh] Ready?")).toBe("I'm here. Ready?");
+  it('reports an unknown or failing tool to the model instead of crashing', async () => {
+    stubTurns(
+      { role: 'assistant', tool_calls: [{ id: 'c1', function: { name: 'nope', arguments: '{}' } }, { id: 'c2', function: { name: 'bad', arguments: '{}' } }] },
+      { role: 'assistant', content: 'Sorry.' },
+    );
+    const messages = [{ role: 'user', content: 'x' }];
+    const bad = () => {
+      throw new Error('boom');
+    };
+    expect(await runAgentTurn('t', messages, { bad })).toBe('Sorry.');
+    expect(messages[2]).toMatchObject({ content: 'Unknown tool nope.' });
+    expect(messages[3]).toMatchObject({ content: 'That failed: boom' });
   });
 });

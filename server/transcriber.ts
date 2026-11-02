@@ -74,35 +74,6 @@ export function openAiTranscriber(options: { model: string; transcriptions: Tran
   };
 }
 
-/** ElevenLabs Scribe over its REST API, so no extra SDK is needed. */
-export function elevenLabsTranscriber(options: {
-  model: string;
-  apiKey: string;
-  fetch?: typeof fetch;
-}): Transcriber {
-  const send = options.fetch ?? fetch;
-  return {
-    model: options.model,
-    async transcribe({ bytes, mimeType }, signal) {
-      const form = new FormData();
-      form.append('file', new Blob([new Uint8Array(bytes)], { type: mimeType }), `director.${AUDIO_TYPES[mimeType]}`);
-      form.append('model_id', options.model);
-      const res = await send('https://api.elevenlabs.io/v1/speech-to-text', {
-        method: 'POST',
-        headers: { 'xi-api-key': options.apiKey },
-        body: form,
-        signal,
-      });
-      if (!res.ok) throw new Error(`ElevenLabs transcription failed with status ${res.status}.`);
-      const data = (await res.json()) as { text?: unknown; words?: Array<Record<string, unknown>> };
-      const timestamps = (data.words ?? [])
-        .filter((w) => w.type === 'word' && typeof w.text === 'string')
-        .map((w) => ({ word: String(w.text), start: Number(w.start) || 0, end: Number(w.end) || 0 }));
-      return accept(options.model, data.text, timestamps);
-    },
-  };
-}
-
 /** Meta's batch route only takes WAV, while browsers record WebM or Ogg. */
 async function toWav(clip: AudioClip): Promise<Buffer> {
   const folder = mkdtempSync(path.join(tmpdir(), 'anchorshot-voice-'));
@@ -152,8 +123,7 @@ export function metaTranscriber(options: {
 /**
  * TRANSCRIBE_PROVIDER=meta (META_API_KEY, optional TRANSCRIBE_MODEL), or
  * TRANSCRIBE_PROVIDER=openai-compatible (TRANSCRIBE_BASE_URL, TRANSCRIBE_API_KEY,
- * TRANSCRIBE_MODEL) or elevenlabs (ELEVENLABS_API_KEY, TRANSCRIBE_MODEL, default
- * scribe_v2). Anything else keeps the browser's own speech recognition.
+ * TRANSCRIBE_MODEL). Anything else keeps the browser's own speech recognition.
  */
 export function transcriberFromSettings(values: Record<string, string | undefined>): Transcriber | undefined {
   const pick = (name: string) => (process.env[name] ?? values[name] ?? '').trim();
@@ -162,10 +132,6 @@ export function transcriberFromSettings(values: Record<string, string | undefine
     const apiKey = pick('META_API_KEY');
     const baseURL = pick('META_API_BASE_URL') || 'https://api.meta.ai/v1';
     return apiKey ? metaTranscriber({ apiKey, baseURL, model: pick('TRANSCRIBE_MODEL') || 'muse-voice-transcribe-1.0' }) : undefined;
-  }
-  if (provider === 'elevenlabs') {
-    const apiKey = pick('ELEVENLABS_API_KEY');
-    return apiKey ? elevenLabsTranscriber({ apiKey, model: pick('TRANSCRIBE_MODEL') || 'scribe_v2' }) : undefined;
   }
   if (provider !== 'openai-compatible') return undefined;
   const [baseURL, apiKey, model] = ['TRANSCRIBE_BASE_URL', 'TRANSCRIBE_API_KEY', 'TRANSCRIBE_MODEL'].map(pick);
