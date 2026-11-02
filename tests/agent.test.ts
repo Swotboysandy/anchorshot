@@ -5,7 +5,7 @@ import { agentFromSettings, elevenLabsAgent } from '../server/agent';
 
 const startSession = vi.hoisted(() => vi.fn());
 vi.mock('@elevenlabs/client', () => ({ Conversation: { startSession } }));
-import { agentAvailable, startAgentConversation } from '../src/services/voiceAgent';
+import { agentAvailable, cleanCaption, startAgentConversation } from '../src/services/voiceAgent';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -77,5 +77,11 @@ describe('voice agent client', () => {
       startAgentConversation('t', {}, { onStatus() {}, onMessage() {}, onError() {}, onEnd() {} }),
     ).rejects.toThrow(/No voice agent/);
     expect(startSession).not.toHaveBeenCalled();
+  });
+});
+
+describe('agent captions', () => {
+  it('removes voice direction tags', () => {
+    expect(cleanCaption("[gentle] I'm here. [soft laugh] Ready?")).toBe("I'm here. Ready?");
   });
 });

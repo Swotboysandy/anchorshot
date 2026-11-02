@@ -9,6 +9,9 @@ export interface AgentHandlers {
   onEnd: () => void;
 }
 
+/** Agent replies can carry voice direction such as [gentle], which is not speech. */
+export const cleanCaption = (text: string) => text.replace(/\[[a-z][a-z -]*\]\s*/gi, '').trim();
+
 /** True when the local server can open an ElevenLabs agent conversation. */
 export async function agentAvailable(): Promise<{ ready: boolean; session: string }> {
   try {
@@ -42,7 +45,7 @@ export async function startAgentConversation(
     clientTools: tools,
     onConnect: () => handlers.onStatus('Agent connected. Speak your direction.'),
     onModeChange: ({ mode }) => handlers.onStatus(mode === 'speaking' ? 'Agent speaking.' : 'Agent listening.'),
-    onMessage: ({ message, source }) => handlers.onMessage(source === 'user' ? 'user' : 'agent', message),
+    onMessage: ({ message, source }) => handlers.onMessage(source === 'user' ? 'user' : 'agent', cleanCaption(message)),
     onError: (message) => handlers.onError(message),
     onDisconnect: () => handlers.onEnd(),
   });
