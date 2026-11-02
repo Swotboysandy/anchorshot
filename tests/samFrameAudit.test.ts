@@ -83,6 +83,17 @@ describe('Real SAM detection & color auditing on frames', () => {
       revision: 1,
     };
 
+    // A frame that cannot be measured is never reported as verified.
+    const unmeasured = await client.auditShotContinuity(consistentShot, rule);
+    expect(unmeasured.status).toBe('uncertain');
+    expect(unmeasured.spokenDescription).not.toMatch(/Continuity verified/);
+
+    vi.spyOn(canvasEngine, 'sampleImageColorInMask').mockResolvedValueOnce({
+      colorName: 'blue',
+      rgb: [37, 99, 235],
+      pixelCount: 120,
+      confidence: 0.96,
+    });
     const auditedConsistent = await client.auditShotContinuity(consistentShot, rule);
     expect(auditedConsistent.status).toBe('consistent');
     expect(auditedConsistent.discrepancyMessage).toBeUndefined();

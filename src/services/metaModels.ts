@@ -871,37 +871,36 @@ export class MetaModelClient {
     );
 
     // Sample actual color inside the detected mask
-    let detectedColor = expectedColor;
-    let confidence = mask.confidence;
+    let detectedColor: string | null = null;
     try {
       if (shot.currentImageUrl) {
-        const sample = await sampleImageColorInMask(shot.currentImageUrl, mask);
-        if (sample && sample.colorName) {
-          detectedColor = sample.colorName;
-          if (sample.confidence) confidence = Math.min(confidence, sample.confidence);
-        }
+        detectedColor = (await sampleImageColorInMask(shot.currentImageUrl, mask)).colorName;
       }
     } catch {
-      // Graceful fallback if sampling cannot decode image format
+      // An unreadable frame stays unverified below.
     }
 
-    const isMatch = detectedColor.toLowerCase().trim() === expectedColor.toLowerCase().trim();
-    const isAmbiguous = mask.confidence < 0.8;
+    const isMatch = detectedColor?.toLowerCase().trim() === expectedColor.toLowerCase().trim();
+    // Never report "verified" without a measured colour.
+    const unmeasured = detectedColor === null;
+    const isAmbiguous = mask.confidence < 0.8 || unmeasured;
     const status = isAmbiguous ? 'uncertain' : isMatch ? 'consistent' : 'mismatch';
 
-    const spokenDescription = isMatch
+    const spokenDescription = status === 'consistent'
       ? `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity verified: ${targetObject} color is ${expectedColor}.`
       : isAmbiguous
-      ? `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity uncertain: low SAM 3.1 confidence (${(mask.confidence * 100).toFixed(1)}%) on ${targetObject}.`
+      ? `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity uncertain: ${unmeasured ? 'the colour could not be measured' : `low SAM 3.1 confidence (${(mask.confidence * 100).toFixed(1)}%)`} on ${targetObject}.`
       : `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity Alert: ${targetObject} rendered in ${detectedColor} instead of expected ${expectedColor}. Press Y to apply SAM 3.1 mask recolor to ${expectedColor}.`;
 
-    const discrepancyMessage = isMatch
+    const discrepancyMessage = status === 'consistent'
       ? undefined
+      : unmeasured
+      ? `The ${targetObject} colour in Shot ${shot.shotNumber} could not be measured, so continuity is unverified.`
       : isAmbiguous
       ? `SAM 3.1 flagged ambiguity (${(mask.confidence * 100).toFixed(1)}% IoU) on ${targetObject} in Shot ${shot.shotNumber}. Confirm mask selection (${mask.maskRef}) to verify continuity.`
       : `Visual audit detected a ${detectedColor} ${targetObject} in Shot ${shot.shotNumber}, violating rule "${targetObject}.color = ${expectedColor}" (rev ${rule.revision}).`;
 
-    const proposedFix = !isMatch || isAmbiguous
+    const proposedFix = status !== 'consistent'
       ? {
           action: 'recolor' as const,
           targetObject,
