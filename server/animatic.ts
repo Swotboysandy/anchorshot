@@ -13,6 +13,8 @@ import sharp from 'sharp';
 export interface AnimaticShot {
   image: Buffer;
   seconds: number;
+  /** Planned camera move, drawn as a slow move across the still. */
+  movement?: string;
   narration?: Buffer;
 }
 
@@ -94,6 +96,24 @@ export async function ffmpegAvailable(ffmpeg = 'ffmpeg'): Promise<boolean> {
   }
 }
 
+/** A gentle Ken Burns move for a planned camera move; locked and unknown moves stay still. */
+export function cameraMove(movement: string | undefined, seconds: number): string {
+  const total = Math.max(1, Math.round(seconds * 30));
+  const t = `min(on/${total},1)`;
+  const centre = { x: 'iw/2-(iw/zoom/2)', y: 'ih/2-(ih/zoom/2)' };
+  const moves: Record<string, { z: string; x: string; y: string }> = {
+    'Push in': { z: `1+0.12*${t}`, ...centre },
+    Dolly: { z: `1+0.08*${t}`, ...centre },
+    'Pull out': { z: `1.12-0.12*${t}`, ...centre },
+    Pan: { z: '1.12', x: `(iw-iw/zoom)*${t}`, y: centre.y },
+    Tilt: { z: '1.12', x: centre.x, y: `(ih-ih/zoom)*${t}` },
+  };
+  const move = movement ? moves[movement] : undefined;
+  if (!move) return '';
+  // Upscale first so the slow move does not jitter from whole-pixel steps.
+  return `,scale=${WIDTH * 2}:${HEIGHT * 2},zoompan=z='${move.z}':x='${move.x}':y='${move.y}':d=1:s=${WIDTH}x${HEIGHT}:fps=30`;
+}
+
 export async function renderAnimatic(
   shots: AnimaticShot[],
   ffmpeg = 'ffmpeg',
@@ -132,7 +152,7 @@ export async function renderAnimatic(
       else args.push('-f', 'lavfi', '-t', String(seconds), '-i', 'anullsrc=r=44100:cl=stereo');
       const v = i * 2;
       filters.push(
-        `[${v}:v]scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[v${i}]`,
+        `[${v}:v]scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30${cameraMove(shot.movement, seconds)},format=yuv420p[v${i}]`,
         `[${v + 1}:a]aresample=44100,aformat=channel_layouts=stereo,apad,atrim=0:${seconds},asetpts=PTS-STARTPTS[a${i}]`,
       );
     }

@@ -522,6 +522,7 @@ export class MetaModelClient {
         id: `shot-${shotNumber}`,
         shotNumber,
         durationSeconds,
+        movement: planned?.movement,
         promptDescription: basePrompt,
         spokenDescription,
         currentImageUrl: imageUrl,
@@ -625,6 +626,7 @@ export class MetaModelClient {
         id: `shot-${shotNumber}`,
         shotNumber,
         durationSeconds,
+        movement: planned?.movement,
         promptDescription: subject,
         spokenDescription: `Shot ${shotNumber}, ${describeFraming(shot)}, duration ${durationSeconds} seconds. ${subject}. Generated image; continuity unreviewed.`,
         currentImageUrl: frame.url,
@@ -1007,6 +1009,9 @@ export class MetaModelClient {
     return {
       ...shot,
       currentImageUrl: updatedImageUrl,
+      // A video rendered before the fix would still show the old colour.
+      videoUrl: undefined,
+      generatedJobId: undefined,
       status: 'consistent',
       discrepancyMessage: undefined,
       spokenDescription: updatedSpoken,
