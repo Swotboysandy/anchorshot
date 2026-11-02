@@ -54,6 +54,7 @@ type Props = {
   muted: boolean;
   progressPercent?: number;
   onTranscript: (s: string) => void;
+  onGenerateFrom: (script: string) => void;
   onGenerate: () => void;
   onCommand: (s: string) => void;
   onSelect: (id: string) => void;
@@ -184,9 +185,6 @@ export function CleanStudio(p: Props) {
   };
 
   // Real studio actions the voice agent may call; each returns what happened so the agent can say it.
-  const agentTools: AgentTools = {
-    set_direction: ({ text }) => {
-      if (typeof text !== 'string' || !text.trim()) return 'No direction was given.';
   const spokenDirection = useRef('');
   // Results are shown briefly as well as announced, so a finished action is visible.
   const [notice, setNotice] = useState('');
@@ -201,13 +199,21 @@ export function CleanStudio(p: Props) {
     return () => clearTimeout(timer);
   }, [p.status]);
   const reviewTools = useRef<HTMLElement>(null);
+  const agentTools: AgentTools = {
+    set_direction: ({ text }) => {
+      if (typeof text !== 'string' || !text.trim()) return 'No direction was given.';
       p.onTranscript(text.trim());
+      spokenDirection.current = text.trim();
       return 'Direction saved to the script.';
     },
     generate_storyboard: () => {
       if (p.processing) return 'A storyboard is already being generated.';
-      p.onGenerate();
-      return 'Storyboard generation started.';
+      // The script state may not have rendered yet when both tools run in one turn.
+      const script = spokenDirection.current || p.transcript;
+      spokenDirection.current = '';
+      if (!script.trim()) return 'The script is empty, so nothing was generated. Ask the director for a scene.';
+      p.onGenerateFrom(script);
+      return 'Storyboard generation started. It can take a few minutes.';
     },
     run_command: ({ command }) => {
       if (typeof command !== 'string' || !command.trim()) return 'No command was given.';
@@ -261,12 +267,6 @@ export function CleanStudio(p: Props) {
           </Button>
         </div>
       </header>
-      <Tabs value={workspace} onValueChange={selectWorkspace}>
-        <div className="workspace-nav">
-          <TabsList aria-label="Workspace">
-            <TabsTrigger value="create">
-              <Film size={18} aria-hidden="true"/> Create
-            </TabsTrigger>
       {(p.processing || p.exporting) && (
         <div className="studio-activity">
           <p>{p.exporting && !p.processing ? 'Exporting film...' : p.status}</p>
@@ -274,6 +274,12 @@ export function CleanStudio(p: Props) {
         </div>
       )}
       {notice && !p.processing && !p.exporting && <p className="studio-notice" aria-hidden="true">{notice}</p>}
+      <Tabs value={workspace} onValueChange={selectWorkspace}>
+        <div className="workspace-nav">
+          <TabsList aria-label="Workspace">
+            <TabsTrigger value="create">
+              <Film size={18} aria-hidden="true"/> Create
+            </TabsTrigger>
             <TabsTrigger value="dream">
               <Layers size={18} aria-hidden="true"/> Dream
             </TabsTrigger>

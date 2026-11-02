@@ -19,8 +19,12 @@ type Message = Record<string, unknown> & { role: string };
 
 const GREETING = 'Hi, I am your co-director. Tell me the scene, or ask me to read the storyboard.';
 /** Quiet this long after speech ends the director's turn. */
-const SILENCE_MS = 1200;
+const SILENCE_MS = 2000;
 const SPEECH_LEVEL = 0.04;
+/** Room noise is sampled this long, so a noisy room still counts as quiet. */
+const CALIBRATE_MS = 500;
+/** A turn ends here even if the room never goes quiet. */
+const MAX_TURN_MS = 30_000;
 const MAX_TOOL_ROUNDS = 5;
 
 /** True when the local server can run the voice agent. */
@@ -123,13 +127,25 @@ export async function startAgentConversation(
       active.onstop = () => resolve(heard && !ended ? new Blob(chunks, { type: active.mimeType || 'audio/webm' }) : null);
       active.start();
       handlers.onStatus('Agent listening.');
+      const startedAt = Date.now();
+      let noise = 0;
       const watch = setInterval(() => {
         if (ended) {
           clearInterval(watch);
           if (active.state !== 'inactive') active.stop();
           return;
         }
-        if (level() > SPEECH_LEVEL) {
+        const now = level();
+        if (Date.now() - startedAt < CALIBRATE_MS) {
+          noise = Math.max(noise, now);
+          return;
+        }
+        if (heard && Date.now() - startedAt > MAX_TURN_MS) {
+          clearInterval(watch);
+          active.stop();
+          return;
+        }
+        if (now > Math.max(SPEECH_LEVEL, noise * 2)) {
           heard = true;
           quietSince = 0;
         } else if (heard) {
@@ -153,14 +169,25 @@ export async function startAgentConversation(
         let transcript = '';
         try {
           transcript = (await post('/api/muse/transcribe', session, { audio: await toDataUrl(clip) })).transcript;
-        } catch {
-          continue; // Noise or silence is not an error worth announcing.
+        } catch (error) {
+          if (!ended) await say(`I could not transcribe that. ${error instanceof Error ? error.message : ''}`.trim());
+          continue;
         }
-        if (!transcript || ended) continue;
+        if (ended) break;
+        if (!transcript) {
+          await say('I did not catch any words. Please say that again.');
+          continue;
+        }
         handlers.onMessage('user', transcript);
         messages.push({ role: 'user', content: transcript });
-        const reply = await runAgentTurn(session, messages, tools);
-        if (!ended && reply) await say(reply);
+        let reply: string;
+        try {
+          reply = await runAgentTurn(session, messages, tools);
+        } catch (error) {
+          messages.pop();
+          reply = `I could not respond. ${error instanceof Error ? error.message : ''}`.trim();
+        }
+        if (!ended) await say(reply || 'I have no reply for that.');
       }
     } catch (error) {
       if (!ended) {

@@ -179,8 +179,12 @@ export default function App() {
           ({ rules, shots } = await metaModelClient.generateStoryboardFromTranscript(
             targetTranscript,
             undefined,
-            injectDiscrepancy
-          ));
+            injectDiscrepancy,
+            (message, percent) => {
+              setGenerationPercent(percent);
+              setProjectState((prev) => ({ ...prev, statusAnnouncement: message }));
+            }
+          ).finally(() => setGenerationPercent(undefined)));
         } catch (error) {
           const message = `Storyboard generation failed: ${error instanceof Error ? error.message : String(error)}`;
           speechService.playEarcon('mismatch');
@@ -386,11 +390,6 @@ export default function App() {
       if (!targetShot) return;
       const rev = targetShot.revisions.find((r) => r.revisionId === revisionId);
       if (!rev) return;
-
-      const isInitialMismatch =
-        revisionId.endsWith('-initial') &&
-        rev.actionApplied.toLowerCase().includes('red');
-
       // Re-selecting the current take must not discard the shot's verified status.
       if (rev.imageUrl === targetShot.currentImageUrl) {
         const takeNumber = targetShot.revisions.indexOf(rev) + 1;
@@ -400,6 +399,11 @@ export default function App() {
         }));
         return;
       }
+
+      const isInitialMismatch =
+        revisionId.endsWith('-initial') &&
+        rev.actionApplied.toLowerCase().includes('red');
+
       speechService.playEarcon('focus');
       setProjectState((prev) => ({
         ...prev,
@@ -428,7 +432,7 @@ export default function App() {
     (shotId: string, newPrompt: string, newDuration: number) => {
       const targetShot = projectState.shots.find((s) => s.id === shotId);
       if (!targetShot) return;
-      if (isGeneratedImage(targetShot.currentImageUrl)) {
+      if (isGeneratedImage(targetShot.currentImageUrl) || !projectState.rules[0]) {
         setProjectState(prev => ({...prev, shots: prev.shots.map(shot => shot.id === shotId ? {
           ...shot, promptDescription: newPrompt, durationSeconds: newDuration,
           spokenDescription: `Shot ${shot.shotNumber}. ${newPrompt}. Generated image, continuity unreviewed.`,
@@ -786,6 +790,7 @@ export default function App() {
         statusAnnouncement: msg,
       }));
       speechService.speak(msg, true);
+      return updatedShots;
     },
     [projectState.rules, projectState.shots]
   );
@@ -800,7 +805,6 @@ export default function App() {
 
     setProjectState((prev) => ({
       ...prev,
-      return updatedShots;
       isProcessing: true,
       statusAnnouncement: 'Running SAM 3.1 continuity audit across sequence...',
     }));
@@ -814,15 +818,15 @@ export default function App() {
           auditedShots.push(shot);
         }
       }
+    } catch (error) {
+      setProjectState((prev) => ({ ...prev, isProcessing: false }));
+      announceStatus(`The continuity check failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      return;
     }
 
     const unreviewed = auditedShots.filter((s) => s.status === 'uncertain').length;
     if (unreviewed) {
       speechService.playEarcon('focus');
-    } catch (error) {
-      setProjectState((prev) => ({ ...prev, isProcessing: false }));
-      announceStatus(`The continuity check failed: ${error instanceof Error ? error.message : String(error)}`, true);
-      return;
       setProjectState((prev) => ({ ...prev, isProcessing: false, shots: auditedShots }));
       announceStatus(
         `${unreviewed} shots require candidate selection. Their continuity has not been verified.`,
@@ -958,15 +962,52 @@ export default function App() {
             return;
           }
 
-          if (isLocalImage(targetShot.currentImageUrl)) {
+          // A named shot changes alone; otherwise the colour applies to the whole film.
+          const candidates = intent.shotNumber
+            ? reaudited.filter((s) => s.id === targetShot.id)
+            : reaudited.filter((s) => s.status === 'mismatch');
+          const targets = candidates.filter((s) => s.proposedFix && !isLocalImage(s.currentImageUrl));
+          const unconfirmed = reaudited.filter((s) => s.status === 'uncertain').length;
+          if (!targets.length) {
             announceStatus(
-              'Local AI image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.',
+              `Nothing was recoloured. The ${targetObject} rule is now ${intent.color}${unconfirmed ? `, and ${unconfirmed} shots could not be confirmed` : ''}.`,
               true
             );
             return;
           }
 
-          await handleApplyProposedFix(targetShot.id, intent.color);
+          const revision = (projectState.rules[0]?.revision || 1) + 1;
+          setShowBeforeComparison(false);
+          setProjectState((prev) => ({ ...prev, isProcessing: true }));
+          let recoloured = 0;
+          let failed = 0;
+          try {
+            for (const [index, shot] of targets.entries()) {
+              setGenerationPercent(Math.round((index / targets.length) * 100));
+              setProjectState((prev) => ({
+                ...prev,
+                statusAnnouncement: `Recolouring the ${targetObject} in Shot ${shot.shotNumber}, ${index + 1} of ${targets.length}...`,
+              }));
+              try {
+                const updated = await metaModelClient.applyContinuityFix(shot, intent.color, revision);
+                recoloured++;
+                setProjectState((prev) => ({
+                  ...prev,
+                  shots: prev.shots.map((s) => (s.id === updated.id ? updated : s)),
+                }));
+              } catch {
+                failed++;
+              }
+            }
+          } finally {
+            setGenerationPercent(undefined);
+            setProjectState((prev) => ({ ...prev, isProcessing: false }));
+          }
+          speechService.playEarcon(failed ? 'mismatch' : 'fixApplied');
+          announceStatus(
+            `Recoloured the ${targetObject} to ${intent.color} in ${recoloured} of ${targets.length} shots.${failed ? ` ${failed} failed.` : ''}${unconfirmed ? ` ${unconfirmed} could not be confirmed.` : ''}`,
+            true
+          );
           return;
         }
 
@@ -981,13 +1022,7 @@ export default function App() {
             return;
           }
 
-          // A named shot changes alone; otherwise the colour applies to the whole film.
-          const candidates = intent.shotNumber
-            ? reaudited.filter((s) => s.id === targetShot.id)
-            : reaudited.filter((s) => s.status === 'mismatch');
-          const targets = candidates.filter((s) => s.proposedFix && !isLocalImage(s.currentImageUrl));
-          const unconfirmed = reaudited.filter((s) => s.status === 'uncertain').length;
-          if (!targets.length) {
+          if (isLocalImage(targetShot.currentImageUrl)) {
             announceStatus(
               'Local AI image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.',
               true
@@ -1593,6 +1628,7 @@ export default function App() {
         activeShot={activeShot}
         transcript={projectState.transcript}
         processing={projectState.isProcessing}
+        progressPercent={generationPercent}
         playing={projectState.isPlayingAnimatic}
         time={currentTimeSeconds}
         duration={totalDurationSeconds}
@@ -1601,6 +1637,7 @@ export default function App() {
         onMute={handleToggleMute}
         onTranscript={(text) => setProjectState((prev) => ({ ...prev, transcript: text }))}
         onGenerate={() => void handleRebuildFromTranscript(true)}
+        onGenerateFrom={(script) => void handleRebuildFromTranscript(true, script)}
         onCommand={(text) => void handleExecuteVoiceCommand(text)}
         onSelect={(id) => handleSelectShot(id)}
         onPlay={handleTogglePlayAnimatic}
@@ -1628,7 +1665,6 @@ export default function App() {
         voiceNotice={voiceNotice}
         inspector={
           <ShotInspectorPanel
-        progressPercent={generationPercent}
             onUseLocalImage={handleUseLocalImage}
             onUseLocalVideo={handleUseLocalVideo}
             onUpdateDetectedObjects={handleUpdateDetectedObjects}

@@ -438,9 +438,9 @@ export class MetaModelClient {
       const basePrompt =
         parsedDescriptions[shotNumber] ||
         planned?.subject ||
+        (rules.length ? '' : transcript.trim()) ||
         (targetObject === 'car'
           ? `${cameraAngle.replace('_', ' ')} shot of the ${actualRenderedColor} wedding car on the way to the ceremony`
-        (rules.length ? '' : transcript.trim()) ||
           : targetObject === 'altar'
           ? `${cameraAngle.replace('_', ' ')} shot of the flower-draped wedding altar`
           : `${cameraAngle.replace('_', ' ')} shot featuring the ${actualRenderedColor} ${targetObject}`);

@@ -66,8 +66,12 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
     },
     [],
   );
+  // A conversation outlives many renders, so tools must see the current storyboard.
+  const latestTools = useRef(agentTools);
+  latestTools.current = agentTools;
   const startAgent = async (request: number, session: string) => {
-    const active = await startAgentConversation(session, agentTools ?? {}, {
+    const liveTools = new Proxy({} as AgentTools, { get: (_, name) => latestTools.current?.[name as string] });
+    const active = await startAgentConversation(session, liveTools, {
       onStatus: (status) => request === generation.current && setAgentStatus(status),
       onMessage: (role, text) => {
         if (request !== generation.current) return;
@@ -224,8 +228,8 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
             onError={() => {setRenderError(true);stop();}} />
         </motion.div>
       </motion.button>
-      <span id="voice-orb-status" className="sr-only" role="status">
-        {error || (renderError ? 'Orb unavailable' : pending ? 'Waiting for microphone permission' : agentStatus ? agentStatus : analyser ? 'Microphone on. Local audio meter active.' : 'Microphone off')}
+      <span id="voice-orb-status" className={open || error ? 'voice-orb-status' : 'sr-only'} role="status">
+        {error || (renderError ? 'Orb unavailable' : pending ? 'Waiting for microphone permission' : agentStatus ? agentStatus : analyser ? 'Microphone on. Voice agent not connected, so speech only goes into the script.' : 'Microphone off')}
       </span>
     </div>
   );
