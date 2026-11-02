@@ -1,3 +1,7 @@
+import { execFile } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import OpenAI, { toFile } from 'openai';
 
 /**
@@ -99,7 +103,54 @@ export function elevenLabsTranscriber(options: {
   };
 }
 
+/** Meta's batch route only takes WAV, while browsers record WebM or Ogg. */
+async function toWav(clip: AudioClip): Promise<Buffer> {
+  const folder = mkdtempSync(path.join(tmpdir(), 'anchorshot-voice-'));
+  try {
+    const input = path.join(folder, `in.${AUDIO_TYPES[clip.mimeType]}`);
+    const output = path.join(folder, 'out.wav');
+    writeFileSync(input, clip.bytes);
+    await new Promise<void>((resolve, reject) =>
+      execFile('ffmpeg', ['-v', 'error', '-y', '-i', input, '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', output], (error) =>
+        error ? reject(new TranscriberOutputError('The recording could not be converted for transcription.')) : resolve(),
+      ),
+    );
+    return readFileSync(output);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/** Meta muse-voice through `POST /asr/transcribe` (multipart request JSON plus WAV audio). */
+export function metaTranscriber(options: {
+  apiKey: string;
+  baseURL: string;
+  model: string;
+  fetch?: typeof fetch;
+  convert?: (clip: AudioClip) => Promise<Buffer>;
+}): Transcriber {
+  const send = options.fetch ?? fetch;
+  return {
+    model: options.model,
+    async transcribe(clip, signal) {
+      const wav = await (options.convert ?? toWav)(clip);
+      const form = new FormData();
+      form.append('request', new Blob([JSON.stringify({ model: options.model, audioEncoding: 'WAV', mode: 'PUSH_TO_TALK' })], { type: 'application/json' }));
+      form.append('audio', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'director.wav');
+      const res = await send(`${options.baseURL}/asr/transcribe`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${options.apiKey}`, Accept: 'application/json' },
+        body: form,
+        signal,
+      });
+      if (!res.ok) throw new Error(`Meta transcription failed with status ${res.status}.`);
+      return accept(options.model, ((await res.json()) as { transcript?: unknown }).transcript, []);
+    },
+  };
+}
+
 /**
+ * TRANSCRIBE_PROVIDER=meta (META_API_KEY, optional TRANSCRIBE_MODEL), or
  * TRANSCRIBE_PROVIDER=openai-compatible (TRANSCRIBE_BASE_URL, TRANSCRIBE_API_KEY,
  * TRANSCRIBE_MODEL) or elevenlabs (ELEVENLABS_API_KEY, TRANSCRIBE_MODEL, default
  * scribe_v2). Anything else keeps the browser's own speech recognition.
@@ -107,6 +158,11 @@ export function elevenLabsTranscriber(options: {
 export function transcriberFromSettings(values: Record<string, string | undefined>): Transcriber | undefined {
   const pick = (name: string) => (process.env[name] ?? values[name] ?? '').trim();
   const provider = pick('TRANSCRIBE_PROVIDER');
+  if (provider === 'meta') {
+    const apiKey = pick('META_API_KEY');
+    const baseURL = pick('META_API_BASE_URL') || 'https://api.meta.ai/v1';
+    return apiKey ? metaTranscriber({ apiKey, baseURL, model: pick('TRANSCRIBE_MODEL') || 'muse-voice-transcribe-1.0' }) : undefined;
+  }
   if (provider === 'elevenlabs') {
     const apiKey = pick('ELEVENLABS_API_KEY');
     return apiKey ? elevenLabsTranscriber({ apiKey, model: pick('TRANSCRIBE_MODEL') || 'scribe_v2' }) : undefined;
