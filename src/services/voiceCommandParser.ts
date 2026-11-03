@@ -3,13 +3,14 @@
  *
  * From BZcreativ's feat/claude-sam-meta (parse-then-switch voice router), merged
  * with main's fixes: colours limited to the continuity palette with cyan kept
- * distinct, shot numbers 1-8 including ordinals, narration only when the command
+ * distinct, explicit shot numbers including ordinals, narration only when the command
  * itself asks for it, and a bare colour updating the current rule's object.
  */
 
 export type VoiceIntent =
   | { kind: 'playback'; action: 'play' | 'stop' }
   | { kind: 'help' }
+  | { kind: 'invalid_command'; message: string }
   | { kind: 'audit' }
   | { kind: 'narrate' }
   | { kind: 'fix'; shotNumber?: number; color?: string; object?: string }
@@ -34,8 +35,9 @@ const COLORS = Object.keys(COLOR_MAP).join('|');
 const NUMBER_WORDS: Record<string, number> = {
   one: 1, first: 1, two: 2, second: 2, three: 3, third: 3, four: 4, fourth: 4,
   five: 5, fifth: 5, six: 6, sixth: 6, seven: 7, seventh: 7, eight: 8, eighth: 8,
+  nine: 9, ninth: 9, ten: 10, tenth: 10, eleven: 11, eleventh: 11, twelve: 12, twelfth: 12,
 };
-const NUMBERS = `[1-8]|${Object.keys(NUMBER_WORDS).join('|')}`;
+const NUMBERS = `\\d+|${Object.keys(NUMBER_WORDS).join('|')}`;
 
 const toShot = (raw?: string) => (raw ? (NUMBER_WORDS[raw.toLowerCase()] ?? Number(raw)) : undefined);
 
@@ -43,8 +45,8 @@ const toShot = (raw?: string) => (raw ? (NUMBER_WORDS[raw.toLowerCase()] ?? Numb
 function shotNumberIn(text: string): number | undefined {
   const match =
     text.match(new RegExp(`\\b(?:shot|scene|frame)\\s*#?\\s*(${NUMBERS})\\b`, 'i')) ??
-    text.match(new RegExp(`#\\s*([1-8])\\b`)) ??
-    text.match(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth)\s+(?:shot|scene|frame)\b/i);
+    text.match(new RegExp(`#\\s*(\\d+)\\b`)) ??
+    text.match(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth)\s+(?:shot|scene|frame)\b/i);
   return toShot(match?.[1]);
 }
 
@@ -58,6 +60,15 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
   const lower = cleaned.toLowerCase();
   if (!lower) return { kind: 'rebuild', transcript: '' };
 
+  if (/^(?:fix|repair|make|turn|change|paint|recolou?r|segment|detect|select|find|track)\b/.test(lower)) {
+    const reference=lower.match(/\b(?:shot|scene|frame)\s*#?\s*([^\s,;!?]+)/)?.[1] ?? lower.match(/#\s*([^\s,;!?]+)/)?.[1];
+    if(reference){
+      const number=NUMBER_WORDS[reference] ?? (/^\d+$/.test(reference)?Number(reference):NaN);
+      if(!Number.isSafeInteger(number)||number<1)return {kind:'invalid_command',message:'Use a positive whole scene number, for example: fix shot 2. Your film has not changed.'};
+    }
+  }
+
+
   if (/^(?:play|resume|start\s+animatic)\b/.test(lower)) return { kind: 'playback', action: 'play' };
   if (/^(?:stop|pause)\b/.test(lower)) return { kind: 'playback', action: 'stop' };
   if (/\b(?:help|shortcuts?|hotkeys?|keybindings?)\b/.test(lower)) return { kind: 'help' };
@@ -69,9 +80,14 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
   )
     return { kind: 'narrate' };
 
-  // "modify video cup to blue", "recolor video umbrella to amber", "track video car"
-  const video = lower.match(new RegExp(`\\b(?:modify|recolou?r|track)\\s+video\\s+(?:the\\s+)?([a-z0-9_-]+)(?:\\s+(?:to|into)\\s+(${COLORS}))?`));
-  if (video) return { kind: 'modify_video', object: cleanObject(video[1]), color: video[2] ? COLOR_MAP[video[2]] : 'emerald' };
+  // Video edits require an explicit object and colour; tracking never implies recolouring.
+  if (/^(?:modify|recolou?r|track)\s+video\b/.test(lower)) {
+    const video = lower.match(new RegExp(`^(?:modify|recolou?r)\\s+video\\s+(?:the\\s+)?([a-z0-9_-]+)\\s+(?:to|into)\\s+(${COLORS})$`));
+    if (video) return {kind:'modify_video',object:cleanObject(video[1]),color:COLOR_MAP[video[2]]};
+    return {kind:'invalid_command',message:lower.startsWith('track ')
+      ? 'Open Review video masks to select and review each object. Tracking does not recolor the video.'
+      : 'Name one object and its color, for example: recolor video cup to blue. Your film has not changed.'};
+  }
 
   // "generative edit: add steam to the cup", "inpaint: yellow flowers"
   const edit = cleaned.match(/\b(?:generative\s+edit|inpaint|edit\s+frame|add\s+to\s+frame)\s*[:,-]?\s*(.+)/i);

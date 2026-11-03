@@ -78,8 +78,8 @@ Default reports say technical_pass and visualReview pending. A person must inspe
 1. Run `npm run dev` from this project. Open http://127.0.0.1:4317/.
 2. Select a shot and find **Local GPU generation** in its inspector (below the storyboard on narrow windows).
 3. Enter a prompt and seed. Choose **Generate image** or **Generate video**. One GPU job runs at a time. Progress, failures and cancellation appear in the same section.
-4. Review the generated media and measured inference time/GPU allocation. Images can be applied using **Use image in Shot N**. Video has a native player and download; it is not inserted into the animatic and is not image-conditioned.
-5. **Saved local results** survives refresh/server restart. Outputs and metadata live in `.artifacts/local-ai/ui-jobs/<id>`. Storyboard assignments remain session-only; after reload, reapply a saved image. Existing export saves the storyboard reference URLs, not a portable copy of these generated files.
+4. Review the generated media and measured inference time/GPU allocation. Images can be applied using **Use image in Shot N**. Video can be applied explicitly to the selected shot and included in local MP4 export. It is not image-conditioned.
+5. **Saved local results** survives refresh/server restart. Outputs and metadata live in `.artifacts/local-ai/ui-jobs/<id>`. Storyboard assignments now persist in IndexedDB, including takes and video references. Existing export saves the storyboard reference URLs, not a portable copy of these generated files.
 
 Applying an image removes the fixture mask and marks continuity **Unreviewed**. Keyboard/voice correction and rule updates cannot apply fabricated sample masks to generated images. Prompt/duration edits keep the generated image until another generation is explicitly applied. Local image revisions can be restored. This is not live SAM or a neural continuity audit.
 
@@ -96,3 +96,8 @@ The Vite dev server hosts `/api/local-ai` on loopback. It rejects non-local Host
 Vite ignores `.artifacts` when watching and scans only `index.html` for dependencies; scanning the model environment caused startup stalls before this exclusion.
 
 Run `npm run test:local-ai`, `npm run test:rendering`, `npm run lint` and `npm run build`. The service test uses a fake worker to cover validation, queue exclusion, progress, failure, cancellation, persisted results and restricted/range asset serving. Browser generation above used actual CUDA workers, not that test double.
+
+
+## Audit update — 3 November 2026
+
+See [FULL_AUDIT.md](FULL_AUDIT.md) for current fixes and test scope. Local actions cannot route automatically to cloud video via an environment setting. First-frame region proposals are not SAM tracks; video recolouring is unavailable until verified per-frame masks exist. Generated media remains unreviewed until actual continuity checks run. The GPU timings above are historical, not rerun measurements.

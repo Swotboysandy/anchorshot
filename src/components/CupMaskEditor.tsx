@@ -2,10 +2,11 @@ import {useEffect,useRef,useState} from 'react';
 import {brushMask,decodeCupPhoto,polygonMask,umbrellaSample,requestSamCupCutout,type CupSelection,type Point} from '../services/cupSelection';
 import type {Pixels} from '../services/dreamTransition';
 const button='min-h-[40px] px-3 py-2 border border-[#4B5563] rounded bg-[#16191E] text-sm text-white disabled:opacity-40';
-export function CupMaskEditor({initial,onApply,onCancel,objectKind='cup'}:{objectKind?:'cup'|'umbrella';initial:CupSelection|null;onApply:(s:CupSelection)=>void;onCancel:()=>void}) {
+export function CupMaskEditor({initial,onApply,onCancel,objectKind='cup',fixedFrame=false,onDirty}:{onDirty?:()=>void;fixedFrame?:boolean;objectKind?:'cup'|'umbrella';initial:CupSelection|null;onApply:(s:CupSelection)=>void;onCancel:()=>void}) {
   const [photo,setPhoto]=useState<Pixels|null>(initial?.photo||null),[name,setName]=useState(initial?.name||'');
   const [mask,setMask]=useState<Uint8Array>(initial?.mask.slice()||new Uint8Array()),[points,setPoints]=useState<Point[]>([]);
-  const [tool,setTool]=useState<'polygon'|'add'|'erase'>('polygon'),[radius,setRadius]=useState(12);
+  const [tool,setTool]=useState<'polygon'|'subtract'|'add'|'erase'>('polygon'),[radius,setRadius]=useState(12);
+  const tracing=tool==='polygon'||tool==='subtract';
   const [history,setHistory]=useState<Uint8Array[]>([]),[error,setError]=useState(''),[loading,setLoading]=useState(false);
   const [cursor,setCursor]=useState<Point>({x:200,y:150});
   const [samLoading,setSamLoading]=useState(false);
@@ -16,7 +17,7 @@ export function CupMaskEditor({initial,onApply,onCancel,objectKind='cup'}:{objec
   const maskRef=useRef(mask),stroke=useRef<Point|null>(null),request=useRef(0);
   useEffect(()=>()=>{request.current++;},[]);
   const update=(next:Uint8Array)=>{setSamInfo(null);maskRef.current=next;setMask(next);};
-  const checkpoint=()=>{const snapshot=maskRef.current.slice();setHistory(h=>[...h.slice(-19),snapshot]);};
+  const checkpoint=()=>{onDirty?.();const snapshot=maskRef.current.slice();setHistory(h=>[...h.slice(-19),snapshot]);};
   const load=async(blob:Blob,label:string)=>{
     const id=++request.current;setLoading(true);setError('');
     try{const decoded=await decodeCupPhoto(blob);if(request.current!==id)return;
@@ -51,29 +52,29 @@ export function CupMaskEditor({initial,onApply,onCancel,objectKind='cup'}:{objec
     ctx.putImageData(image,0,0);preview.current.getContext('2d')!.putImageData(cut,0,0);
     if(points.length){ctx.strokeStyle='white';ctx.lineWidth=2;ctx.beginPath();points.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.stroke();
       for(const p of points){ctx.fillStyle='white';ctx.fillRect(p.x-3,p.y-3,6,6);}}
-    ctx.strokeStyle='white';ctx.lineWidth=1;ctx.beginPath();ctx.arc(cursor.x,cursor.y,tool==='polygon'?4:radius,0,Math.PI*2);ctx.stroke();
-  },[photo,mask,points,cursor,tool,radius]);
+    ctx.strokeStyle='white';ctx.lineWidth=1;ctx.beginPath();ctx.arc(cursor.x,cursor.y,tracing?4:radius,0,Math.PI*2);ctx.stroke();
+  },[photo,mask,points,cursor,tool,radius,tracing]);
   const point=(event:React.PointerEvent<HTMLCanvasElement>)=>{const r=event.currentTarget.getBoundingClientRect();return {x:Math.max(0,Math.min(photo!.width-1,(event.clientX-r.left)/r.width*photo!.width)),y:Math.max(0,Math.min(photo!.height-1,(event.clientY-r.top)/r.height*photo!.height))};};
   const paint=(p:Point,from=p)=>{if(photo)update(brushMask(maskRef.current,photo.width,photo.height,from,p,radius,tool==='add'));};
-  const finish=()=>{if(photo&&points.length>=3){checkpoint();update(polygonMask(photo.width,photo.height,points));setPoints([]);setTool('add');}};
+  const finish=()=>{if(photo&&points.length>=3){checkpoint();const outline=polygonMask(photo.width,photo.height,points);update(tool==='subtract'?maskRef.current.map((value,i)=>outline[i]?0:value):outline);setPoints([]);setTool(tool==='subtract'?'subtract':'add');}};
   const count=mask.reduce((a,v)=>a+v,0);
   return <section aria-label={objectKind==='cup'?'Real cup mask editor':'Umbrella mask editor'} className="space-y-3 border border-[#4B5563] rounded p-3 text-[#E2E8F0]">
     <h3 className="font-semibold text-white">Select your {objectKind}</h3>
-    <p className="text-sm">Trace the {objectKind}, close the outline, then add missing pixels or erase background and handle holes. Review the cutout before applying. Photos stay in this browser.</p>
+    <p className="text-sm">Trace the {objectKind}, close the outline, then use Trace hole to remove background inside a handle. Brushes refine the edges. Review the cutout before applying. Photos stay in this browser.</p>
     <fieldset disabled={loading||samLoading} className="space-y-3 min-w-0">
-      <div className="flex flex-wrap gap-2 items-center">
+      {!fixedFrame && <div className="flex flex-wrap gap-2 items-center">
         <label className="text-sm">{objectKind} photo <input aria-label={`Upload ${objectKind} photo`} type="file" accept="image/png,image/jpeg,image/webp" className="block max-w-full" onChange={e=>{const file=e.target.files?.[0];if(file)void load(file,file.name);e.target.value='';}}/></label>
         <button type="button" className={button} onClick={()=>{if(objectKind==='cup')void sample();else{const sample=umbrellaSample();setPhoto(sample.photo);setName('Authored umbrella illustration');update(new Uint8Array(sample.mask.length));setPoints([]);setHistory([]);setTool('polygon');}}}>{objectKind==='cup'?'Use real cup sample':'Use umbrella sample'}</button>
-      </div>
+      </div>}
       {photo && <>
         <div className="flex flex-wrap items-center gap-2" aria-label="Mask tools">
-          {(['polygon','add','erase'] as const).map(t=><button type="button" key={t} className={button} aria-pressed={tool===t} onClick={()=>{setTool(t);setPoints([]);}}>{t==='polygon'?'Trace outline':t==='add'?'Add brush':'Erase brush'}</button>)}
+          {(['polygon','subtract','add','erase'] as const).map(t=><button type="button" key={t} className={button} disabled={t==='subtract'&&!count} aria-pressed={tool===t} onClick={()=>{setTool(t);setPoints([]);}}>{t==='polygon'?'Trace outline':t==='subtract'?'Trace hole':t==='add'?'Add brush':'Erase brush'}</button>)}
           <button type="button" className={button} disabled={points.length<3} onClick={finish}>Close outline</button>
           <button type="button" className={button} disabled={!history.length&&!points.length} onClick={()=>{if(points.length){setPoints(p=>p.slice(0,-1));return;}update(history[history.length-1]);setHistory(h=>h.slice(0,-1));}}>Undo mask edit</button>
           <button type="button" className={button} disabled={!count} onClick={()=>{checkpoint();update(new Uint8Array(mask.length));setPoints([]);}}>Clear mask</button>
-          <button type="button" className={`${button} border-[#38BDF8] text-[#38BDF8] hover:bg-[#38BDF8]/10 flex items-center gap-1.5`} disabled={samLoading||loading} onClick={()=>void handleSamCutout()}>
+          {!fixedFrame && <button type="button" className={`${button} border-[#38BDF8] text-[#38BDF8] hover:bg-[#38BDF8]/10 flex items-center gap-1.5`} disabled={samLoading||loading} onClick={()=>void handleSamCutout()}>
             {samLoading?'Preparing offline mask...':'Preview cutout (offline)'}
-          </button>
+          </button>}
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {objectKind==='umbrella' && name==='Authored umbrella illustration' && <button type="button" className={button} onClick={()=>{checkpoint();update(umbrellaSample().mask);setPoints([]);setTool('erase');}}>Start umbrella sample mask</button>}
@@ -88,20 +89,20 @@ export function CupMaskEditor({initial,onApply,onCancel,objectKind='cup'}:{objec
         <label className="text-sm flex items-center gap-2">Brush radius <input aria-label="Brush radius" type="range" min="2" max="40" value={radius} onChange={e=>setRadius(Number(e.target.value))}/>{radius}px</label>
         <p id="cup-edit-help" className="text-xs">Click outline points or paint with a brush. Keyboard: arrows move the cursor, Shift + arrows move 10px, Space marks/paints, Enter closes an outline. Undo restores a whole brush stroke.</p>
         <canvas ref={canvas} width={photo.width} height={photo.height} tabIndex={0} role="img" aria-label={`${objectKind==='cup'?'Cup':'Umbrella'} selection canvas`} aria-describedby="cup-edit-help" className="w-full rounded touch-none cursor-crosshair focus:outline-2 focus:outline-white"
-          onPointerDown={e=>{if(loading||samLoading)return;e.preventDefault();e.currentTarget.focus();const p=point(e);setCursor(p);if(tool==='polygon'){setPoints(v=>[...v,p]);return;}checkpoint();stroke.current=p;e.currentTarget.setPointerCapture(e.pointerId);paint(p);}}
+          onPointerDown={e=>{if(loading||samLoading)return;e.preventDefault();e.currentTarget.focus();const p=point(e);setCursor(p);if(tracing){onDirty?.();setPoints(v=>[...v,p]);return;}checkpoint();stroke.current=p;e.currentTarget.setPointerCapture(e.pointerId);paint(p);}}
           onPointerMove={e=>{if(loading||samLoading||!stroke.current)return;const p=point(e);paint(p,stroke.current);stroke.current=p;setCursor(p);}}
           onPointerUp={()=>{stroke.current=null;}} onPointerCancel={()=>{stroke.current=null;}} onLostPointerCapture={()=>{stroke.current=null;}}
           onKeyDown={e=>{e.stopPropagation();if(loading||samLoading)return;if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' ','Enter'].includes(e.key))e.preventDefault();const d=e.shiftKey?10:1;
             if(e.key.startsWith('Arrow'))setCursor(p=>({x:Math.max(0,Math.min(photo.width-1,p.x+(e.key==='ArrowRight'?d:e.key==='ArrowLeft'?-d:0))),y:Math.max(0,Math.min(photo.height-1,p.y+(e.key==='ArrowDown'?d:e.key==='ArrowUp'?-d:0)))}));
-            if(e.key===' '){if(tool==='polygon')setPoints(p=>[...p,cursor]);else{checkpoint();paint(cursor);}}
-            if(e.key==='Enter'&&tool==='polygon')finish();}}/>
-        <p className="text-sm" role="status">{count} selected pixels · {points.length?`${points.length} outline points pending`:'Review edges and holes below'}</p>
-        <div className="bg-[#4B5563] border border-white/20 rounded p-2"><p className="text-xs mb-2">Cutout preview — gray areas will reveal the changing background</p><canvas ref={preview} width={photo.width} height={photo.height} role="img" aria-label={`Selected ${objectKind} cutout`} className="w-full"/></div>
-        <button type="button" className={button} disabled={count<16||points.length>0} onClick={()=>{try{onApply({photo,mask:mask.slice(),name,revision:(initial?.revision||0)+1,source:samInfo?.provenance==='live-sam-3.1'?'sam-3.1-photo':'local-manual-photo',provenance:samInfo?.provenance,confidence:samInfo?.confidence,maskRef:samInfo?.maskRef});}catch(e){setError(e instanceof Error?e.message:'Selection failed.');}}}>Apply {objectKind} to dream</button>
+            if(e.key===' '){if(tracing){onDirty?.();setPoints(p=>[...p,cursor]);}else{checkpoint();paint(cursor);}}
+            if(e.key==='Enter'&&tracing)finish();}}/>
+        <p className="text-sm" role="status">{tool==='subtract'?'Trace a hole, then close the outline to remove only its pixels. ':''}{count} selected pixels · {points.length?`${points.length} outline points pending`:'Review edges and holes below'}</p>
+        <div className="bg-[#4B5563] border border-white/20 rounded p-2"><p className="text-xs mb-2">{fixedFrame ? 'Selection preview — only these pixels will be corrected' : 'Cutout preview — gray areas will reveal the changing background'}</p><canvas ref={preview} width={photo.width} height={photo.height} role="img" aria-label={`Selected ${objectKind} cutout`} className="w-full"/></div>
+        <button type="button" className={button} disabled={count<16||points.length>0} onClick={()=>{try{onApply({photo,mask:mask.slice(),name,revision:(initial?.revision||0)+1,source:samInfo?.provenance==='live-sam-3.1'?'sam-3.1-photo':'local-manual-photo',provenance:samInfo?.provenance,confidence:samInfo?.confidence,maskRef:samInfo?.maskRef});}catch(e){setError(e instanceof Error?e.message:'Selection failed.');}}}>{fixedFrame ? `Approve ${objectKind} in this frame` : `Apply ${objectKind} to dream`}</button>
       </>}
     </fieldset>
     {loading&&<p role="status">Loading photo locally…</p>}{error&&<p role="alert" className="text-[#FDE047]">{error}</p>}
     <button type="button" className={button} onClick={onCancel}>Cancel mask editing</button>
-    <p className="text-xs">Offline mode: the starter shape is synthetic, not SAM segmentation. Trace or correct it before applying. No model calls or credits are used. Umbrella sample: authored illustration. Cup sample: Rachel Michetti / Pikolo Espresso Bar, CC0, via scikit-image. PNG, JPEG or WebP; max 8 MB / 24 MP. Working image is resized to at most 800 × 600. Only fully opaque photo pixels are protected.</p>
+    <p className="text-xs">{fixedFrame ? 'This selection applies only to this video frame. Review each frame before creating a corrected take.' : <>Offline mode: the starter shape is synthetic, not SAM segmentation. Trace or correct it before applying. No model calls or credits are used. Umbrella sample: authored illustration. Cup sample: Rachel Michetti / Pikolo Espresso Bar, CC0, via scikit-image. PNG, JPEG or WebP; max 8 MB / 24 MP. Working image is resized to at most 800 × 600. Only fully opaque photo pixels are protected.</>}</p>
   </section>;
 }

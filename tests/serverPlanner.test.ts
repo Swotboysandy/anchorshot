@@ -30,11 +30,11 @@ describe('continuity rules from the server planner', () => {
     ]);
   });
 
-  it('falls back to the local planner when the server has no live model or fails', async () => {
+  it('uses the local planner only when no live model is connected', async () => {
     stub({ plannerLive: false }, () => Response.json({}));
     expect((await new MetaModelClient().extractContinuityRules('The jacket must be amber.'))[0]).toMatchObject({ targetObject: 'jacket', expectedValue: 'amber' });
     stub({ plannerLive: true }, () => Response.json({ error: 'invalid plan' }, { status: 502 }));
-    expect((await new MetaModelClient().extractContinuityRules('The jacket must be amber.'))[0]).toMatchObject({ targetObject: 'jacket' });
+    await expect(new MetaModelClient().extractContinuityRules('The jacket must be amber.')).rejects.toThrow('invalid plan');
   });
 });
 
@@ -60,6 +60,9 @@ describe('a scene with no stated continuity rule', () => {
     const { rules, shots } = await new MetaModelClient().generateStoryboardFromTranscript('A courier rides through a market.');
     expect(rules).toEqual([]);
     expect(shots.some((s) => s.status === 'mismatch')).toBe(false);
+    expect(shots.map(s => s.spokenDescription).join(' ')).not.toMatch(/\bcup\b/i);
+    expect(shots.every(s => s.status === 'uncertain' && !s.proposedFix)).toBe(true);
+    expect(shots.every(s => s.revisions[0].ruleRevision === 0)).toBe(true);
     expect(shots.map((s) => s.promptDescription).join(' ')).not.toMatch(/cup/i);
   });
 });
@@ -99,4 +102,31 @@ describe('storyboard from a planned shot list', () => {
     expect(prompts[0].startsWith('CONTINUITY\nThe jacket is emerald')).toBe(true);
     expect(prompts[0]).toContain('Establishing shot, high angle, 24mm, pan camera. Night market in rain, courier on a bicycle.');
   });
+});
+
+
+describe('offline rule keywords use whole words',()=>{
+ it.each(['The room is occupied.','A cupboard opens into the ocean.','A carpet floats over the market.','An address appears on the wall.','A smuggler crosses the river.'])('does not invent an object from %s',async(text)=>{
+  stub({plannerLive:false},()=>Response.json({}));
+  expect(await new MetaModelClient().extractContinuityRules(text)).toEqual([]);
+ });
+ it('does not infer red from tired',async()=>{
+  stub({plannerLive:false},()=>Response.json({}));
+  const rules=await new MetaModelClient().extractContinuityRules('A tired courier carries a cup.');
+  expect(rules[0]).toMatchObject({targetObject:'cup',expectedValue:'blue'});
+ });
+ it.each(['The BLUE cup stays still.','Two blue cups stay still.','Keep the blue mug still.'])('retains explicit cup and mug recognition: %s',async(text)=>{
+  stub({plannerLive:false},()=>Response.json({}));
+  expect((await new MetaModelClient().extractContinuityRules(text))[0]).toMatchObject({targetObject:'cup',expectedValue:'blue'});
+ });
+});
+
+
+it.each(['dog','dress','notebook','carpet'])('offline renderer does not substitute a cup or claim a correction for %s',async(targetObject)=>{
+ stub({plannerLive:false},()=>Response.json({}));
+ const rules=[{id:'custom-color',targetObject,property:'color',expectedValue:'blue',revision:1,scope:'all_shots' as const}];
+ const result=await new MetaModelClient().generateStoryboardFromTranscript(`Keep the ${targetObject} blue.`,rules,true);
+ expect(result.rules).toEqual(rules);
+ expect(result.shots.every(s=>s.status==='uncertain'&&!s.proposedFix)).toBe(true);
+ expect(result.shots.every(s=>s.spokenDescription.includes('not rendered'))).toBe(true);
 });

@@ -28,7 +28,7 @@ export interface PlanResult {
   cast?: CastMember[];
 }
 export interface Planner {
-  plan(transcript: string, revision: number, signal?: AbortSignal): Promise<PlanResult>;
+  plan(transcript: string, revision: number, signal?: AbortSignal, beforeRetry?: () => void): Promise<PlanResult>;
 }
 
 export class PlannerOutputError extends Error {}
@@ -145,13 +145,14 @@ type Chat = Pick<OpenAI['chat']['completions'], 'create'>;
 export function chatPlanner(options: { model: string; chat: Chat; attempts?: number }): Planner {
   const attempts = options.attempts ?? 2;
   return {
-    async plan(transcript, revision, signal) {
+    async plan(transcript, revision, signal, beforeRetry) {
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
         { role: 'system', content: PLANNER_PROMPT },
         { role: 'user', content: transcript },
       ];
       let problem = '';
       for (let attempt = 0; attempt < attempts; attempt++) {
+        if (attempt > 0) beforeRetry?.();
         const reply = await options.chat.create(
           { model: options.model, messages, temperature: 0 },
           { signal },

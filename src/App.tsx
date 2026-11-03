@@ -1,6 +1,10 @@
-import {loadLocal,saveLocal} from './services/projectStorage';
+import {correctReviewedVideoObject} from './services/videoTracking';
+import {validNarrationUrl,type NarrationAttachment} from './services/narration';
+import type {VideoTrackPlan} from './types/videoTracks';
+import { updateShotDetails, restoreShotTake } from './lib/shotEdits';
+import {loadLocal,saveLocal,localSaveError,flushLocalSaves,type ProjectLibrary} from './services/projectStorage';
 import {CleanStudio} from './components/CleanStudio';
-import {isGeneratedImage, isLocalImage, modifyLocalVideo} from './services/localGeneration';
+import {isGeneratedImage, isGeneratedShot, isLocalImage} from './services/localGeneration';
 import { useReducedMotion } from 'motion/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -30,8 +34,8 @@ export default function App() {
   const initialPreset = DIRECTOR_PRESETS[0];
 
   const [projectState, setProjectState] = useState<ProjectState>({
-    projectId: 'proj-anchorshot-01',
-    title: initialPreset.title,
+    projectId: crypto.randomUUID(),
+    title: 'Untitled film',
     transcript: '',
     isRecording: false,
     rules: [],
@@ -43,29 +47,64 @@ export default function App() {
       'Describe your story or paste a script to begin.',
   });
 
+  const currentProjectRef = useRef(projectState);
+  currentProjectRef.current = projectState;
+  const candidateRequest=useRef<AbortController|null>(null);
+  useEffect(()=>()=>candidateRequest.current?.abort(),[projectState.projectId]);
+  const videoReviewRequest=useRef<AbortController|null>(null);
+  useEffect(()=>()=>videoReviewRequest.current?.abort(),[]);
+  const generativeEditRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => generativeEditRequest.current?.abort(), []);
+
   const [sessionProjects, setSessionProjects] = useState<ProjectState[]>([]);
   const [storageReady,setStorageReady]=useState(false);
   const [storageStatus,setStorageStatus]=useState('Loading local projects...');
   useEffect(()=>{void speechRecognitionService.connectBackend();},[]);
-  useEffect(()=>{let alive=true;loadLocal<{active:string;projects:ProjectState[]}>('library').then(saved=>{
+  useEffect(()=>{let alive=true;loadLocal<ProjectLibrary>('library').then(saved=>{
     if(!alive)return;if(saved?.projects?.length){const clean=saved.projects.map(item=>({...item,isProcessing:false,isRecording:false,isPlayingAnimatic:false}));setSessionProjects(clean);setProjectState(prev => (prev.shots.length > 0 || prev.transcript ? prev : (clean.find(item=>item.projectId===saved.active)||clean[0])));}setStorageReady(true);setStorageStatus('Saved locally');
-  }).catch(()=>{if(alive)setStorageStatus('Local storage could not be opened. Reload to retry; existing data has not been overwritten.');});return()=>{alive=false};},[]);
+  }).catch(error=>{if(alive)setStorageStatus(localSaveError(error));});return()=>{alive=false};},[]);
   useEffect(()=>{if(!storageReady)return;setStorageStatus('Saving locally...');let cancelled=false;
-    saveLocal('library',{active:projectState.projectId,projects:[...sessionProjects.filter(item=>item.projectId!==projectState.projectId),{...projectState,isRecording:false,isPlayingAnimatic:false,isProcessing:false}]}).then(()=>{if(!cancelled)setStorageStatus('Saved locally');}).catch(()=>{if(!cancelled)setStorageStatus('Local save failed. Keep this page open and free browser storage.');});return()=>{cancelled=true};
+    saveLocal('library',{active:projectState.projectId,projects:[...sessionProjects.filter(item=>item.projectId!==projectState.projectId),{...projectState,isRecording:false,isPlayingAnimatic:false,isProcessing:false}]}).then(()=>{if(!cancelled)setStorageStatus('Saved locally');}).catch(error=>{if(!cancelled)setStorageStatus(localSaveError(error));});return()=>{cancelled=true};
   },[storageReady,projectState,sessionProjects]);
   const [directionDraft, setDirectionDraft] = useState('');
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
-  const switchProject = (id?: string) => {
-    if (projectState.isProcessing || isExportingVideo) return;
-    speechRecognitionService.stopListening();
-    setSessionProjects(previous => [...previous.filter(item => item.projectId !== projectState.projectId), {...projectState,isPlayingAnimatic:false,isRecording:false}]);
-    const selected = sessionProjects.find(item => item.projectId === id);
-    setProjectState(selected ? {...selected,isPlayingAnimatic:false,isRecording:false} : {
-      projectId: crypto.randomUUID(), title:'Untitled film', transcript:'',isRecording:false,rules:[],shots:[],activeShotId:null,isPlayingAnimatic:false,isProcessing:false,statusAnnouncement:'New project. Describe your story to begin.'
-    });
-    setCurrentTimeSeconds(0);
-    setDirectionDraft('');
-    setVoiceNotice(null);
+  const switchingProject = useRef(false);
+  const archiveLock = useRef(false);
+  const [archiveBusy,setArchiveBusy]=useState(false);
+  const [archiveMessage,setArchiveMessage]=useState('');
+  const switchProject = async (id?: string) => {
+    if (!storageReady || switchingProject.current || archiveLock.current || projectState.isProcessing || isExportingVideo) return;
+    switchingProject.current = true;
+    setStorageStatus('Switching projects...');
+    speechRecognitionService.cancelListening();
+    try {
+      // Flush current edits before switching, then read other tabs' latest projects.
+      await saveLocal('library', {active: projectState.projectId, projects: [
+        ...sessionProjects.filter(item => item.projectId !== projectState.projectId),
+        {...projectState,isPlayingAnimatic:false,isRecording:false,isProcessing:false},
+      ]});
+      await flushLocalSaves();
+      const saved = await loadLocal<ProjectLibrary>('library');
+      const projects = saved?.projects ?? [];
+      const selected = projects.find(item => item.projectId === id);
+      if (id && !selected) throw new Error('This project could not be found. Your current edits are still open.');
+      const nextProject: ProjectState = selected ? {...selected,isPlayingAnimatic:false,isRecording:false,isProcessing:false} : {
+        projectId: crypto.randomUUID(), title:'Untitled film', transcript:'',isRecording:false,rules:[],shots:[],activeShotId:null,isPlayingAnimatic:false,isProcessing:false,statusAnnouncement:'New project. Describe your story to begin.'
+      };
+      await saveLocal('library', {active:nextProject.projectId,projects:[
+        ...projects.filter(item => item.projectId !== nextProject.projectId),nextProject,
+      ]});
+      setSessionProjects(projects);
+      setProjectState(nextProject);
+      setStorageStatus('Saved locally');
+      setCurrentTimeSeconds(0);
+      setDirectionDraft('');
+      setVoiceNotice(null);
+    } catch (error) {
+      setStorageStatus(localSaveError(error));
+    } finally {
+      switchingProject.current = false;
+    }
   };
 
   const [activePresetId, setActivePresetId] = useState<string>(initialPreset.id);
@@ -158,11 +197,15 @@ export default function App() {
   const videoPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => () => { if (videoPollRef.current) clearInterval(videoPollRef.current); }, []);
 
+  const storyboardGenerationActive = useRef(false);
+
   // Rebuild storyboard from transcript (`muse-spark-1.3` + `muse-image-1.0` + `sam-3.1`)
   const handleRebuildFromTranscript = useCallback(
     async (injectDiscrepancy: boolean = true, overrideTranscript?: string) => {
       const targetTranscript = overrideTranscript ?? projectState.transcript;
-      if (!targetTranscript.trim()) return;
+      if (!targetTranscript.trim()) return 'The script is empty, so nothing was generated.';
+      if (storyboardGenerationActive.current || currentProjectRef.current.isProcessing) return 'Wait for the current operation to finish before generating another storyboard.';
+      storyboardGenerationActive.current = true;
       orcaTracker.trackAction('generation', `Rebuilding storyboard from transcript: "${targetTranscript.slice(0, 60)}..."`, { targetTranscript });
       setProjectState((prev) => ({
         ...prev,
@@ -171,7 +214,7 @@ export default function App() {
           'Running muse-spark-1.3 shot planner and muse-image-1.0 storyboard synthesis...',
       }));
 
-      const ownerProjectId = projectState.projectId;
+      setCurrentTimeSeconds(0);
       let rules: ContinuityRule[];
       let shots: StoryboardShot[];
       try {
@@ -190,40 +233,13 @@ export default function App() {
           speechService.playEarcon('mismatch');
           setProjectState((prev) => ({ ...prev, isProcessing: false, statusAnnouncement: message }));
           speechService.speak(message, true);
-          return;
+          return message;
         }
       orcaTracker.trackAction('generation', `Generated ${shots.length} shots (${rules.length} rules)`, { shotCount: shots.length, rulesCount: rules.length });
 
       const mismatchShot = shots.find((s) => s.status === 'mismatch');
 
-      // Auto-mount video into canvas preview across all shots, or trigger background generation
-      try {
-        const jobsRes = await fetch('/api/local-ai/jobs');
-        if (jobsRes.ok) {
-          const jobsData = await jobsRes.json();
-          // Reuse a finished video only when it was rendered from this exact script.
-          const targetPrompt = targetTranscript.slice(0, 500).trim();
-          const matchingCompletedVideo = Array.isArray(jobsData)
-            ? jobsData.find((j: any) => j.status === 'completed' && j.kind === 'video' && j.prompt?.trim() === targetPrompt)
-            : null;
-          const completedVideo = matchingCompletedVideo;
-          if (completedVideo) {
-            const videoUrl = `/api/local-ai/jobs/${completedVideo.id}/assets/generated-video.mp4`;
-            shots = shots.map((s) => ({
-              ...s,
-              videoUrl,
-              generatedJobId: completedVideo.id,
-            }));
-            orcaTracker.trackAction('generation', `Auto-mounted video into Canvas Storyboard (${shots.length} shots)`, {
-              jobId: completedVideo.id,
-              videoUrl,
-            });
-          }
-          // Video is opt-in from Generate new media: a storyboard never starts a GPU or paid job.
-        }
-      } catch {
-        // Fallback cleanly without video
-      }
+      // Generated clips are applied explicitly to a selected shot from the media panel.
 
       speechService.playEarcon(mismatchShot ? 'mismatch' : shots.some((s) => s.status === 'uncertain') ? 'focus' : 'consistent');
 
@@ -236,13 +252,16 @@ export default function App() {
       setProjectState((prev) => ({
         ...prev,
         transcript: targetTranscript,
+        isPlayingAnimatic: false,
         rules,
         shots,
         activeShotId: mismatchShot ? mismatchShot.id : shots[0]?.id || null,
         statusAnnouncement: summaryMsg,
       }));
       speechService.speak(summaryMsg, true);
+      return summaryMsg;
       } finally {
+        storyboardGenerationActive.current = false;
         setProjectState((prev) => ({ ...prev, isProcessing: false }));
       }
     },
@@ -268,10 +287,15 @@ export default function App() {
   // Apply SAM 3.1 Continuity Fix (`sam-3.1` mask isolation + client-side canvas pixel recoloring)
   const handleApplyProposedFix = useCallback(
     async (shotId: string, customColor?: string) => {
-      const targetShot = projectState.shots.find((s) => s.id === shotId);
+      const sourceState = currentProjectRef.current;
+      const targetShot = sourceState.shots.find((s) => s.id === shotId);
       if (!targetShot) return;
 
-      const ruleRevision = projectState.rules[0]?.revision || 1;
+      const projectId = sourceState.projectId;
+      const sourceMatches = (state: ProjectState) => state.projectId === projectId
+        && state.shots.find(s => s.id === shotId) === targetShot && state.rules === sourceState.rules;
+      const staleMessage = 'The scene changed during correction. Your edits were kept; apply the correction again.';
+      const ruleRevision = sourceState.rules.find(rule => rule.targetObject === targetShot.proposedFix?.targetObject && rule.property === 'color')?.revision || 1;
       setShowBeforeComparison(false);
       setProjectState((prev) => ({
         ...prev,
@@ -287,15 +311,19 @@ export default function App() {
           customColor,
           ruleRevision
         );
+        if (!sourceMatches(currentProjectRef.current)) {
+          setProjectState(prev => prev.projectId === projectId ? { ...prev, statusAnnouncement: staleMessage } : prev);
+          return;
+        }
         speechService.playEarcon('fixApplied');
 
         const resolvedColor =
           customColor || targetShot.proposedFix?.targetColor || 'blue';
         const resolvedObject = targetShot.proposedFix?.targetObject || 'object';
 
-        const confirmationMessage = `Continuity verified on Shot ${updatedShot.shotNumber}. ${resolvedObject} recolored to ${resolvedColor} via SAM 3.1 mask ${updatedShot.pixelVerification?.maskRef || ''} with 0 outside-mask pixel drift.`;
+        const confirmationMessage = `Shot ${updatedShot.shotNumber}: ${resolvedObject} recolored to ${resolvedColor} via SAM 3.1 mask ${updatedShot.pixelVerification?.maskRef || ''} with 0 outside-mask pixel drift. Continuity ${updatedShot.status}.`;
 
-        setProjectState((prev) => ({
+        setProjectState((prev) => prev.projectId !== projectId ? prev : !sourceMatches(prev) ? { ...prev, statusAnnouncement: staleMessage } : ({
           ...prev,
           shots: prev.shots.map((s) => (s.id === shotId ? updatedShot : s)),
           activeShotId: shotId,
@@ -305,269 +333,153 @@ export default function App() {
         speechService.speak(confirmationMessage, true);
       } catch (error) {
         const message = `Continuity fix failed: ${error instanceof Error ? error.message : String(error)}`;
-        setProjectState((prev) => ({ ...prev, statusAnnouncement: message }));
+        setProjectState((prev) => prev.projectId === projectId ? ({ ...prev, statusAnnouncement: message }) : prev);
         speechService.speak(message, true);
       } finally {
-        setProjectState((prev) => ({ ...prev, isProcessing: false }));
+        setProjectState((prev) => prev.projectId === projectId ? ({ ...prev, isProcessing: false }) : prev);
       }
     },
     [projectState.shots, projectState.rules]
   );
 
   // Disambiguate an uncertain SAM 3.1 candidate selection (`POST /api/masks/disambiguate`)
-  const handleDisambiguateShot = useCallback(
-    async (shotId: string, selectedObjectId: string) => {
-      const targetShot = projectState.shots.find((s) => s.id === shotId);
-      if (!targetShot) return;
+  const handleDisambiguateShot = useCallback(async (shotId:string,selectedObjectId:string)=>{
+    const targetShot=projectState.shots.find(shot=>shot.id===shotId);
+    if(!targetShot||projectState.isProcessing)return;
+    const projectId=projectState.projectId;
+    candidateRequest.current?.abort();
+    const controller=new AbortController();candidateRequest.current=controller;
+    const unchanged=(state:ProjectState)=>state.projectId===projectId&&state.shots.find(shot=>shot.id===shotId)===targetShot;
+    try{
+      const updatedShot=await metaModelClient.disambiguateMaskSelection(targetShot,selectedObjectId,controller.signal);
+      if(controller.signal.aborted||candidateRequest.current!==controller)return;
+      if(!unchanged(currentProjectRef.current)){
+        if(currentProjectRef.current.projectId===projectId)announceStatus('The scene changed. Confirm the object again.');
+        return;
+      }
+      const message=`Ambiguity resolved on Shot ${updatedShot.shotNumber}. Selected object ${selectedObjectId}. Continuity is ${updatedShot.status}.`;
+      setProjectState(prev=>unchanged(prev)?{...prev,shots:prev.shots.map(shot=>shot.id===shotId?updatedShot:shot),activeShotId:shotId,statusAnnouncement:message}:prev);
+      speechService.playEarcon('fixApplied');speechService.speak(message,true);
+    }catch(error){
+      if(!controller.signal.aborted&&currentProjectRef.current.projectId===projectId)announceStatus(`Selection failed: ${(error as Error).message}`);
+    }finally{if(candidateRequest.current===controller)candidateRequest.current=null;}
+  },[projectState.shots,projectState.projectId,projectState.isProcessing,announceStatus]);
 
-      const updatedShot = await metaModelClient.disambiguateMaskSelection(
-        targetShot,
-        selectedObjectId
-      );
-      speechService.playEarcon('fixApplied');
-
-      const confirmationMessage = `Ambiguity resolved on Shot ${updatedShot.shotNumber}. Locked SAM 3.1 object ${selectedObjectId} (${updatedShot.proposedFix?.mask?.maskRef ?? ''}) as consistent.`;
-
-      setProjectState((prev) => ({
-        ...prev,
-        shots: prev.shots.map((s) => (s.id === shotId ? updatedShot : s)),
-        activeShotId: shotId,
-        statusAnnouncement: confirmationMessage,
-      }));
-      speechService.speak(confirmationMessage, true);
-    },
-    [projectState.shots]
-  );
-
-  // Manual SAM 3.1 Segmentation trigger on any shot
-  const handleSegmentObjectManual = useCallback(
-    async (shotId: string, targetObject: string) => {
-      const targetShot = projectState.shots.find((s) => s.id === shotId);
-      if (!targetShot) return;
-
-      const primaryRuleColor = projectState.rules[0]?.expectedValue || 'blue';
-      setProjectState((prev) => ({
-        ...prev,
-        isProcessing: true,
-        statusAnnouncement: `Running SAM 3.1 segmentation on Shot ${targetShot.shotNumber} for target "${targetObject}"...`,
-      }));
-
-      const mask = await metaModelClient.segmentObjectWithSam3(
-        targetShot.shotNumber,
-        targetObject
-      );
+  // Segment the selected frame, including generated media. Never claim a fixture is a live mask.
+  const handleSegmentObjectManual = useCallback(async (shotId: string, targetObject: string) => {
+    const shot = projectState.shots.find(value => value.id === shotId);
+    if (!shot || projectState.isProcessing) return;
+    const rule = projectState.rules.find(value => value.targetObject === targetObject && value.property === 'color');
+    setProjectState(prev => ({ ...prev, isProcessing: true, statusAnnouncement: `Selecting ${targetObject} in Shot ${shot.shotNumber}...` }));
+    try {
+      const mask = await metaModelClient.segmentObjectWithSam3(shot.shotNumber, targetObject, undefined, undefined, rule?.revision ?? 1, shot.currentImageUrl);
+      if (isGeneratedShot(shot) && mask.provenance !== 'live-sam-3.1') throw new Error('No real segmentation provider is connected for this frame. A sample mask cannot select its object.');
       setShowSamMaskOverlay(true);
-      speechService.playEarcon('focus');
+      setProjectState(prev => ({ ...prev, shots: prev.shots.map(value => value.id === shotId ? {
+        ...value, status: 'uncertain', proposedFix: {action:'recolor',targetObject,targetColor:rule?.expectedValue ?? 'blue',mask,candidates:mask.candidates},
+      } : value), statusAnnouncement: mask.provenance === 'live-sam-3.1'
+        ? `SAM returned ${mask.candidateCount ?? 1} candidate masks for ${targetObject}. Confirm the selection before correction.`
+        : `Sample ${targetObject} mask selected. No live segmentation was used.` }));
+    } catch (error) {
+      announceStatus(`Selection failed: ${(error as Error).message}`);
+    } finally { setProjectState(prev => ({...prev,isProcessing:false})); }
+  }, [projectState.shots, projectState.rules, projectState.isProcessing, announceStatus]);
 
-      setProjectState((prev) => ({
-        ...prev,
-        isProcessing: false,
-        shots: prev.shots.map((s) =>
-          s.id === shotId
-            ? {
-                ...s,
-                proposedFix: {
-                  action: 'recolor',
-                  targetObject,
-                  targetColor: primaryRuleColor,
-                  mask,
-                },
-              }
-            : s
-        ),
-        statusAnnouncement: `SAM 3.1 isolated ${targetObject} in Shot ${
-          targetShot.shotNumber
-        } with ${(mask.confidence * 100).toFixed(1)}% confidence.`,
-      }));
-    },
-    [projectState.shots, projectState.rules]
-  );
+  // Restore a take's media; old colour verdicts do not survive a take change.
+  const handleRevertShotRevision = useCallback((shotId: string, revisionId: string) => {
+    const shot = projectState.shots.find(value => value.id === shotId);
+    if (!shot || projectState.isProcessing) return;
+    try {
+      const restored = restoreShotTake(shot, revisionId);
+      setProjectState(prev => ({ ...prev, isPlayingAnimatic:false,
+        shots:prev.shots.map(value => value.id === shotId ? restored : value),
+        statusAnnouncement: restored === shot ? `This take is already in use on Shot ${shot.shotNumber}.` : `Restored Shot ${shot.shotNumber}. Continuity needs review.` }));
+    } catch (error) { announceStatus((error as Error).message); }
+  }, [projectState.shots, projectState.isProcessing, announceStatus]);
 
-  // Revert a shot to an earlier revision
-  const handleRevertShotRevision = useCallback(
-    (shotId: string, revisionId: string) => {
-      const targetShot = projectState.shots.find((s) => s.id === shotId);
-      if (!targetShot) return;
-      const rev = targetShot.revisions.find((r) => r.revisionId === revisionId);
-      if (!rev) return;
-      // Re-selecting the current take must not discard the shot's verified status.
-      if (rev.imageUrl === targetShot.currentImageUrl) {
-        const takeNumber = targetShot.revisions.indexOf(rev) + 1;
-        setProjectState((prev) => ({
-          ...prev,
-          statusAnnouncement: `Take ${takeNumber} is already in use on Shot ${targetShot.shotNumber}.`,
-        }));
-        return;
-      }
-
-      const isInitialMismatch =
-        revisionId.endsWith('-initial') &&
-        rev.actionApplied.toLowerCase().includes('red');
-
-      speechService.playEarcon('focus');
-      setProjectState((prev) => ({
-        ...prev,
-        shots: prev.shots.map((s) =>
-          s.id === shotId
-            ? {
-                ...s,
-                currentImageUrl: rev.imageUrl,
-                status: isGeneratedImage(rev.imageUrl) ? 'uncertain' : isInitialMismatch ? 'mismatch' : 'consistent',
-                proposedFix: undefined,
-                pixelVerification: rev.pixelVerification,
-                discrepancyMessage: isInitialMismatch
-                  ? `Restored initial revision containing continuity discrepancy (${rev.actionApplied}).`
-                  : undefined,
-              }
-            : s
-        ),
-        statusAnnouncement: `Restored Shot ${targetShot.shotNumber} to revision: ${rev.actionApplied}.`,
-      }));
-    },
-    [projectState.shots]
-  );
-
-  // Update shot prompt description and duration, regenerating its canvas frame
-  const handleUpdateShotPrompt = useCallback(
-    (shotId: string, newPrompt: string, newDuration: number) => {
-      const targetShot = projectState.shots.find((s) => s.id === shotId);
-      if (!targetShot) return;
-      if (isGeneratedImage(targetShot.currentImageUrl) || !projectState.rules[0]) {
-        setProjectState(prev => ({...prev, shots: prev.shots.map(shot => shot.id === shotId ? {
-          ...shot, promptDescription: newPrompt, durationSeconds: newDuration,
-          spokenDescription: `Shot ${shot.shotNumber}. ${newPrompt}. Generated image, continuity unreviewed.`,
-        } : shot)}));
-        return;
-      }
-
-
-      const primaryRule = projectState.rules[0];
-      const targetObject = primaryRule.targetObject;
-      const expectedColor = primaryRule.expectedValue;
-
-      const cameraAngles: Array<'wide' | 'medium' | 'closeup' | 'over_shoulder'> = [
-        'wide',
-        'medium',
-        'closeup',
-        'over_shoulder',
-      ];
-      const angle = cameraAngles[(targetShot.shotNumber - 1) % cameraAngles.length];
-
-      const { imageUrl } = renderMuseStoryboardFrame({
-        shotNumber: targetShot.shotNumber,
-        cameraAngle: angle,
-        settingTitle: 'Studio Stage',
-        targetObject,
-        objectColorName: expectedColor,
-        weatherOrMood: 'rain_noir',
-        characterPose: 'seated_detective',
-        seed: targetShot.shotNumber * 23 + Date.now() % 100,
-      });
-
-      const updatedSpoken = `Shot ${targetShot.shotNumber}, duration ${newDuration.toFixed(
-        1
-      )} seconds. ${newPrompt}. Continuity verified: ${targetObject} is ${expectedColor}.`;
-
-      speechService.playEarcon('consistent');
-      setProjectState((prev) => ({
-        ...prev,
-        shots: prev.shots.map((s) =>
-          s.id === shotId
-            ? {
-                ...s,
-                promptDescription: newPrompt,
-                durationSeconds: newDuration,
-                spokenDescription: updatedSpoken,
-                currentImageUrl: imageUrl,
-                status: 'consistent',
-                discrepancyMessage: undefined,
-                revisions: [
-                  ...s.revisions,
-                  {
-                    revisionId: `rev-${s.shotNumber}-${s.revisions.length + 1}`,
-                    timestamp: Date.now(),
-                    imageUrl,
-                    actionApplied: `Prompt updated & regenerated via muse-image-1.0`,
-                  },
-                ],
-              }
-            : s
-        ),
-        statusAnnouncement: `Updated Shot ${targetShot.shotNumber} prompt and duration (${newDuration}s).`,
-      }));
-    },
-    [projectState.shots, projectState.rules]
-  );
+  // Save scene metadata without replacing selected media or masks.
+  const handleUpdateShotPrompt = useCallback((shotId: string, newPrompt: string, newDuration: number) => {
+    const target = projectState.shots.find(shot => shot.id === shotId);
+    if (!target || projectState.isProcessing) return;
+    try {
+      const updated = updateShotDetails(target, newPrompt, newDuration);
+      setCurrentTimeSeconds(0);
+      setProjectState(prev => ({ ...prev, isPlayingAnimatic: false,
+        shots: prev.shots.map(shot => shot.id === shotId ? updated : shot),
+        statusAnnouncement: `Saved Shot ${target.shotNumber}. Image and masks were not regenerated.` }));
+    } catch (error) { announceStatus((error as Error).message); }
+  }, [projectState.shots, projectState.isProcessing, announceStatus]);
 
   const handleUseLocalImage = useCallback((shotId: string, imageUrl: string, prompt: string) => {
     if (!isLocalImage(imageUrl)) return;
     setProjectState(prev => ({...prev, isPlayingAnimatic: false, shots: prev.shots.map(shot => shot.id === shotId ? {
-      ...shot, currentImageUrl: imageUrl, promptDescription: prompt, status: 'uncertain',
+      ...shot, currentImageUrl: imageUrl, promptDescription: prompt, status: 'uncertain', mediaSource: 'generated',
+      videoUrl: undefined, generatedJobId: undefined, videoMaskPlan: undefined, detectedObjects: undefined,
       proposedFix: undefined, discrepancyMessage: undefined, pixelVerification: undefined,
       spokenDescription: `Shot ${shot.shotNumber}. ${prompt}. Local AI image; continuity unreviewed.`,
-      revisions: [...shot.revisions, {revisionId: `local-${Date.now()}`, timestamp: Date.now(), imageUrl, actionApplied: 'Local SD1.5 image; unreviewed'}],
+      revisions: [...shot.revisions, {revisionId: `local-${Date.now()}`, timestamp: Date.now(), imageUrl, mediaSource: 'generated', actionApplied: 'Local SD1.5 image; unreviewed'}],
     } : shot), statusAnnouncement: 'Local image applied. Continuity remains unreviewed.'}));
     setShowSamMaskOverlay(false);
   }, []);
 
-  const handleUseLocalVideo = useCallback((shotId: string, videoUrl: string, prompt: string, jobId: string) => {
-    orcaTracker.trackAction('generation', `Bound local video ${jobId} to Shot ${shotId}`, { videoUrl, prompt, jobId });
-    const frameIndices = [0, 4, 8, 12];
-    setProjectState(prev => {
-      const updatedShots = prev.shots.map((shot, idx) => {
-        const frameNum = String(frameIndices[idx % frameIndices.length]).padStart(3, '0');
-        const frameImg = `/api/local-ai/jobs/${jobId}/assets/frame-${frameNum}.png`;
-        return {
-          ...shot,
-          videoUrl,
-          generatedJobId: jobId,
-          currentImageUrl: frameImg,
-          timestamp: (idx % frameIndices.length) * 0.5,
-          status: 'consistent' as const,
-          revisions: [
-            ...shot.revisions,
-            {
-              revisionId: `video-${Date.now()}-${idx}`,
-              timestamp: Date.now(),
-              imageUrl: frameImg,
-              actionApplied: `Keyframe ${frameNum} ingested from 16-frame video (time: ${(idx % frameIndices.length) * 0.5}s)`
-            }
-          ]
-        };
-      });
+  const handleUpdateNarration=useCallback((shotId:string,value:NarrationAttachment|null)=>{
+    if(value&&(!validNarrationUrl(value.dataUrl)||!Number.isFinite(value.durationSeconds)||value.durationSeconds<=0||value.durationSeconds>14.6))return;
+    setProjectState(prev=>prev.projectId!==projectState.projectId?prev:{...prev,shots:prev.shots.map(shot=>shot.id!==shotId?shot:{...shot,narrationDataUrl:value?.dataUrl,narrationName:value?.name,narrationDurationSeconds:value?.durationSeconds,durationSeconds:value?Math.max(shot.durationSeconds,Math.ceil((value.durationSeconds+.4)*10)/10):shot.durationSeconds})});
+  },[projectState.projectId]);
 
-      return {
-        ...prev,
-        isPlayingAnimatic: false,
-        shots: updatedShots,
-        statusAnnouncement: 'Video keyframes ingested into Storyboard strip. Click any shot to inspect or seek.'
-      };
-    });
-    setShowSamMaskOverlay(true);
-  }, []);
+  const handleUpdateVideoMasks = useCallback((shotId:string,jobId:string,plan:VideoTrackPlan)=>{
+    setProjectState(prev=>prev.projectId!==projectState.projectId || plan.sourceJobId!==jobId ? prev : {...prev,shots:prev.shots.map(shot=>shot.id!==shotId || shot.generatedJobId!==jobId ? shot : {...shot,videoMaskPlan:plan,revisions:shot.revisions.map(take=>take.generatedJobId===jobId?{...take,videoMaskPlan:plan}:take)})});
+  },[projectState.projectId]);
+
+  const handleUseLocalVideo = useCallback((shotId: string, videoUrl: string, prompt: string, jobId: string, expectedSourceJobId?:string) => {
+    const frameImg = `/api/local-ai/jobs/${jobId}/assets/frame-000.png`;
+    setProjectState(prev => prev.projectId !== projectState.projectId || !prev.shots.some(shot=>shot.id===shotId && (!expectedSourceJobId || shot.generatedJobId===expectedSourceJobId)) ? prev : ({ ...prev, isPlayingAnimatic: false,
+      shots: prev.shots.map(shot => shot.id !== shotId || (expectedSourceJobId && shot.generatedJobId!==expectedSourceJobId) ? shot : {
+        ...shot, videoMaskPlan: undefined, videoUrl, generatedJobId: jobId, mediaSource: 'generated', currentImageUrl: frameImg, continuityChecks: undefined,
+        promptDescription: prompt, timestamp: 0, status: 'uncertain',
+        proposedFix: undefined, discrepancyMessage: undefined, pixelVerification: undefined, detectedObjects: undefined,
+        spokenDescription: `Shot ${shot.shotNumber}. ${prompt}. Local video; continuity unreviewed.`,
+        revisions: [...shot.revisions, { revisionId: `video-${Date.now()}`, timestamp: Date.now(), imageUrl: frameImg, videoUrl, generatedJobId: jobId, sourceTime: 0, mediaSource: 'generated', actionApplied: 'Local video applied to this shot; unreviewed' }],
+      }), statusAnnouncement: 'Video applied to the selected shot. Continuity needs review.' }));
+    setShowSamMaskOverlay(false);
+  }, [projectState.projectId]);
 
   const handleGenerativeEdit = useCallback(async (shotId: string, prompt: string, objectId?: string) => {
     const targetShot = projectState.shots.find((s) => s.id === shotId);
-    if (!targetShot) return;
+    if (!targetShot) throw new Error('Select a scene before editing.');
+    if (generativeEditRequest.current || projectState.isProcessing) throw new Error('Wait for the current operation to finish.');
+    const projectId=projectState.projectId;
+    const controller=new AbortController();
+    generativeEditRequest.current=controller;
+    const sourceMatches=(state:ProjectState)=>state.projectId===projectId && state.shots.some(shot=>shot.id===shotId && shot.currentImageUrl===targetShot.currentImageUrl && shot.generatedJobId===targetShot.generatedJobId && shot.revisions.length===targetShot.revisions.length && shot.proposedFix?.mask?.maskRef===targetShot.proposedFix?.mask?.maskRef);
+
 
     orcaTracker.trackAction('generation', `Generative edit requested for Shot ${targetShot.shotNumber}: "${prompt}"`, { shotId, prompt, objectId });
     setProjectState((prev) => ({
       ...prev,
       isProcessing: true,
-      statusAnnouncement: `Running muse-image-1.0 generative edit: "${prompt}" with 0 outside pixel drift...`,
+      statusAnnouncement: `Generating a masked edit: "${prompt}"...`,
     }));
 
     try {
       const selectedObj = targetShot.detectedObjects?.find((o: any) => o.objectId === objectId || o.id === objectId);
+      const mask = targetShot.proposedFix?.mask;
+      if (!mask?.maskBase64 || (objectId && mask.objectId !== objectId)) throw new Error('Select and confirm this object mask in the current frame first.');
+      if (mask.sourceImageUrl !== targetShot.currentImageUrl) throw new Error('This mask belongs to another frame or has no source. Select the object in the current frame again.');
+      if (isGeneratedShot(targetShot) && mask.provenance !== 'live-sam-3.1') throw new Error('A real object mask is required for this generated frame. Sample masks cannot be used.');
+      if ((mask.candidateCount ?? 1) > 1) throw new Error('Multiple objects match. Confirm one object before editing.');
       const res = await metaModelClient.editFrameGenerative(
         targetShot.currentImageUrl,
         prompt,
         targetShot.proposedFix?.mask?.maskBase64,
-        selectedObj?.bounds
+        selectedObj?.bounds,
+        controller.signal
       );
 
+      controller.signal.throwIfAborted();
+      if (!sourceMatches(currentProjectRef.current)) throw new Error('The scene changed while editing. The result was not applied.');
       const updatedImageUrl = res.editedImageUrl;
-      setProjectState((prev) => ({
+      setProjectState((prev) => !sourceMatches(prev) ? prev : ({
         ...prev,
         isProcessing: false,
         shots: prev.shots.map((shot) =>
@@ -575,59 +487,67 @@ export default function App() {
             ? {
                 ...shot,
                 currentImageUrl: updatedImageUrl,
-                status: 'consistent',
+                status: 'uncertain', mediaSource: 'generated',
+                videoUrl: undefined, generatedJobId: undefined, videoMaskPlan: undefined, detectedObjects: undefined, proposedFix: undefined, discrepancyMessage: undefined,
                 pixelVerification: {
-                  passed: res.outsideDrift === 0,
-                  changedInside: 1250,
+                  passed: res.verified,
+                  changedInside: res.changedInside,
                   changedOutside: res.outsideDrift,
-                  selectedPixels: 1250,
-                  totalPixels: 262144,
-                  selectedMaskPixels: 1250,
-                  changedInsideMask: 1250,
+                  selectedPixels: res.selectedPixels,
+                  totalPixels: res.totalPixels,
+                  selectedMaskPixels: res.selectedPixels,
+                  changedInsideMask: res.changedInside,
                   changedOutsideMask: res.outsideDrift,
                   outsideDriftPercent: Number(res.outsideDriftPercent) || 0,
                   verifiedAt: Date.now(),
                   ruleRevision: 1,
-                  maskRef: selectedObj?.maskRef || 'sam-3.1:gen-edit:0:v1',
+                  maskRef: targetShot.proposedFix!.mask!.maskRef,
                 },
                 revisions: [
                   ...shot.revisions,
                   {
                     revisionId: `gen-edit-${Date.now()}`,
                     timestamp: Date.now(),
-                    imageUrl: updatedImageUrl,
-                    actionApplied: `Generative edit: ${prompt} (0-drift verified)`,
+                    imageUrl: updatedImageUrl, mediaSource: 'generated',
+                    actionApplied: `Generative edit: ${prompt} (${res.outsideDrift} outside pixels changed; continuity unreviewed)`,
                   },
                 ],
               }
             : shot
         ),
-        statusAnnouncement: `Generative edit applied via ${res.model}: 0 outside pixel drift verified.`,
+        statusAnnouncement: `Masked edit applied: ${res.changedInside} selected pixels changed, ${res.outsideDrift} outside. Continuity needs review.`,
       }));
     } catch (err: any) {
-      setProjectState((prev) => ({
+      setProjectState((prev) => prev.projectId!==projectId ? prev : ({
         ...prev,
         statusAnnouncement: `Generative edit failed: ${err.message}`,
       }));
+      throw err;
     } finally {
-      setProjectState((prev) => ({ ...prev, isProcessing: false }));
+      if(generativeEditRequest.current===controller)generativeEditRequest.current=null;
+      setProjectState((prev) => prev.projectId!==projectId ? prev : ({ ...prev, isProcessing: false }));
     }
-  }, [projectState.shots]);
+  }, [projectState.shots, projectState.projectId, projectState.isProcessing]);
 
   // Meta muse-spark-1.3 video continuity analysis: inspect the rendered sequence and
   // suggest real continuity fixes evaluated against the project's ContinuityRule records.
   const handleAnalyzeVideoContinuity = useCallback(async (shotId: string) => {
     const targetShot = projectState.shots.find((s) => s.id === shotId);
-    if (!targetShot) return;
+    if (!targetShot || projectState.isProcessing || videoReviewRequest.current) return;
     if (!targetShot.videoUrl && !targetShot.generatedJobId) {
       announceStatus('No generated video available for this shot. Render a video first, then analyze continuity.', true);
       return;
     }
 
+    const projectId=projectState.projectId;
+    const index=projectState.shots.findIndex(shot=>shot.id===shotId);
+    const rulesSnapshot=JSON.stringify(projectState.rules);
+    const sourceMatches=(state:ProjectState)=>state.projectId===projectId && JSON.stringify(state.rules)===rulesSnapshot && state.shots[index]?.id===shotId && state.shots[index]?.generatedJobId===targetShot.generatedJobId && state.shots[index]?.videoUrl===targetShot.videoUrl && state.shots[index]?.currentImageUrl===targetShot.currentImageUrl;
+    const controller=new AbortController();videoReviewRequest.current=controller;
     setProjectState((prev) => ({
       ...prev,
       isProcessing: true,
-      statusAnnouncement: 'Running muse-spark-1.3 video and audio continuity analysis...',
+      statusAnnouncement: 'Reviewing saved local video evidence...',
     }));
 
     try {
@@ -635,10 +555,17 @@ export default function App() {
         targetShot.videoUrl,
         projectState.transcript,
         targetShot.generatedJobId,
-        projectState.rules
+        projectState.rules,
+        index,
+        controller.signal
       );
+      controller.signal.throwIfAborted();
+      if(!sourceMatches(currentProjectRef.current))throw new Error('The video or its rules changed. Run the review again.');
+      // This endpoint reviewed one source, so findings cannot address other scenes.
+      analysis.findings=analysis.findings.filter(f=>f.shotIndex===index);
       const flagged = analysis.findings.filter((f) => f.status === 'mismatch' || f.status === 'uncertain');
       setProjectState((prev) => {
+        if(!sourceMatches(prev))return prev;
         const shots = applyVideoFindingsToShots(prev.shots, analysis.findings, analysis.detectedObjects);
         const firstFlaggedIdx = analysis.findings.findIndex((f) => f.status !== 'consistent');
         const activeShotId =
@@ -647,99 +574,53 @@ export default function App() {
             : prev.activeShotId;
         const summary =
           flagged.length > 0
-            ? `Meta muse-spark-1.3 analyzed the sequence: ${flagged.length} continuity finding${flagged.length > 1 ? 's' : ''}. ${flagged[0].explanation}`
-            : `Meta muse-spark-1.3 analyzed the sequence: no continuity discrepancies detected across ${analysis.findings.length} rule check${analysis.findings.length === 1 ? '' : 's'}.`;
+            ? `Local video review: ${flagged.length} unverified rule finding${flagged.length > 1 ? 's' : ''}. ${flagged[0].explanation}`
+            : 'No verified video continuity measurements are available. The video still needs review.';
         speechService.speak(summary, true);
         return { ...prev, shots, activeShotId, statusAnnouncement: summary };
       });
     } catch (err) {
       const message = `Video continuity analysis failed: ${err instanceof Error ? err.message : String(err)}`;
-      setProjectState((prev) => ({ ...prev, statusAnnouncement: message }));
-      speechService.speak(message, true);
+      setProjectState((prev) => prev.projectId!==projectId?prev:({ ...prev, statusAnnouncement: message }));
+      if(currentProjectRef.current.projectId===projectId&&!controller.signal.aborted)speechService.speak(message, true);
     } finally {
-      setProjectState((prev) => ({ ...prev, isProcessing: false }));
+      if(videoReviewRequest.current===controller)videoReviewRequest.current=null;
+      setProjectState((prev) => prev.projectId!==projectId?prev:({ ...prev, isProcessing: false }));
     }
-  }, [projectState.shots, projectState.transcript, projectState.rules, announceStatus]);
+  }, [projectState.shots, projectState.transcript, projectState.rules, projectState.projectId, projectState.isProcessing, announceStatus]);
 
-  const handleUpdateDetectedObjects = useCallback((shotId: string, objects: any[]) => {
-    orcaTracker.trackAction('sam', `SAM 3.1 identified ${objects.length} objects for Shot ${shotId}`, { count: objects.length, objects });
-    setProjectState(prev => ({
-      ...prev,
-      shots: prev.shots.map(shot => shot.id === shotId ? {
-        ...shot,
-        detectedObjects: objects,
-      } : shot),
-      statusAnnouncement: `Identified ${objects.length} objects via SAM 3.1 multi-frame analysis.`
-    }));
-    setShowSamMaskOverlay(true);
+  const handleUpdateDetectedObjects = useCallback((shotId: string, objects: NonNullable<StoryboardShot["detectedObjects"]>, jobId: string) => {
+    orcaTracker.trackAction('sam', `Local proposal scan returned ${objects.length} regions for Shot ${shotId}`, { count: objects.length, objects });
+    setProjectState(prev => {
+      if (prev.projectId !== projectState.projectId || !prev.shots.some(shot => shot.id === shotId && shot.generatedJobId === jobId)) return prev;
+      return { ...prev, shots: prev.shots.map(shot => shot.id === shotId ? { ...shot, detectedObjects: objects } : shot),
+        statusAnnouncement: `Found ${objects.length} local region proposals. Object identity and tracking are unverified.` };
+    });
+  }, [projectState.projectId]);
+
+  const handleRefreshVideoUrl = useCallback((shotId: string, newVideoUrl: string,
+    modReport?: { outsideDrift?: number; totalPixelsRecolored?: number; color?: string; framesModified?: number }) => {
+    setProjectState(prev => ({ ...prev, shots: prev.shots.map(shot => shot.id !== shotId ? shot : {
+      ...shot, videoUrl: newVideoUrl, status: 'uncertain', pixelVerification: undefined,
+      proposedFix: undefined, discrepancyMessage: undefined, detectedObjects: undefined,
+      currentImageUrl: shot.generatedJobId ? `/api/local-ai/jobs/${shot.generatedJobId}/assets/frame-000.png?rev=${Date.now()}` : shot.currentImageUrl,
+    }), statusAnnouncement: `Video updated${modReport?.framesModified ? ` (${modReport.framesModified} frames)` : ''}. Encoded video continuity needs review.` }));
   }, []);
-
-  const handleRefreshVideoUrl = useCallback(
-    (
-      shotId: string,
-      newVideoUrl: string,
-      modReport?: { outsideDrift?: number; totalPixelsRecolored?: number; color?: string; framesModified?: number }
-    ) => {
-      const revTime = Date.now();
-      setProjectState((prev) => {
-        const targetRuleRev = prev.rules[0]?.revision || 1;
-        return {
-          ...prev,
-          shots: prev.shots.map((shot) => {
-            if (shot.id !== shotId) return shot;
-            const updatedFrameUrl = shot.generatedJobId
-              ? `/api/local-ai/jobs/${shot.generatedJobId}/assets/frame-000.png?rev=${revTime}`
-              : shot.currentImageUrl;
-            const drift = modReport?.outsideDrift ?? 0;
-            const recolored = modReport?.totalPixelsRecolored ?? 1250;
-            const colorName = modReport?.color || 'recolored';
-            return {
-              ...shot,
-              videoUrl: newVideoUrl,
-              currentImageUrl: updatedFrameUrl,
-              status: 'consistent',
-              pixelVerification: {
-                passed: drift === 0,
-                changedInside: recolored,
-                changedOutside: drift,
-                selectedPixels: recolored,
-                totalPixels: 262144,
-                selectedMaskPixels: recolored,
-                changedInsideMask: recolored,
-                changedOutsideMask: drift,
-                outsideDriftPercent: 0,
-                verifiedAt: revTime,
-                ruleRevision: targetRuleRev,
-                maskRef: shot.detectedObjects?.[0]?.maskRef || 'sam-3.1:video:mod:0',
-              },
-              revisions: [
-                ...shot.revisions,
-                {
-                  revisionId: `mod-${revTime}`,
-                  timestamp: revTime,
-                  imageUrl: updatedFrameUrl,
-                  actionApplied: `Modified video object across ${modReport?.framesModified || 16} frames with verified 0 outside pixel drift (${colorName})`,
-                },
-              ],
-            };
-          }),
-          statusAnnouncement: 'Video modified and re-encoded across all frames. Verified 0 outside pixel drift.',
-        };
-      });
-    },
-    []
-  );
 
   // Add or update a ContinuityRule and re-audit all shots
   const handleAddOrUpdateRule = useCallback(
     async (targetObject: string, expectedValue: string) => {
+      const source = currentProjectRef.current;
+      const sourceMatches = (state: ProjectState) => state.projectId === source.projectId
+        && state.shots === source.shots && state.rules === source.rules;
+      const staleMessage = 'The sequence changed during the rule update. Your edits were kept; try the rule again.';
       const newRule: ContinuityRule = {
         id: `rule-${targetObject}-color`,
         scope: 'all_shots',
         targetObject,
         property: 'color',
         expectedValue,
-        revision: (projectState.rules[0]?.revision || 1) + 1,
+        revision: (source.rules.find(rule => rule.targetObject === targetObject && rule.property === 'color')?.revision ?? 0) + 1,
       };
 
       setProjectState((prev) => ({
@@ -748,41 +629,22 @@ export default function App() {
         statusAnnouncement: `Updated continuity rule: ${targetObject}.color must be ${expectedValue}. Re-auditing all shots with muse-spark-1.3 and SAM 3.1...`,
       }));
 
-      // Re-audit all shots against the new expected color
-      const updatedShots: StoryboardShot[] = [];
-      for (const shot of projectState.shots) {
-        if (isGeneratedImage(shot.currentImageUrl)) {
-          const audited = await metaModelClient.auditShotContinuity(shot, newRule);
-          updatedShots.push(audited);
-          continue;
-        }
-        const mask =
-          shot.proposedFix?.mask ||
-          (await metaModelClient.segmentObjectWithSam3(shot.shotNumber, targetObject));
-        const currentRevAction =
-          shot.revisions[shot.revisions.length - 1]?.actionApplied.toLowerCase() || '';
-        const matchesNewRule = currentRevAction.includes(expectedValue.toLowerCase());
-
-        updatedShots.push({
-          ...shot,
-          status: matchesNewRule ? 'consistent' : 'mismatch',
-          discrepancyMessage: matchesNewRule
-            ? undefined
-            : `Rule updated to "${targetObject}.color = ${expectedValue}". Shot ${shot.shotNumber} requires SAM 3.1 recolor to ${expectedValue}.`,
-          proposedFix: {
-            action: 'recolor',
-            targetObject,
-            targetColor: expectedValue,
-            mask,
-          },
-        });
+      let updatedShots: StoryboardShot[];
+      try {
+        updatedShots = await metaModelClient.auditAllShots(source.shots,
+          [newRule, ...source.rules.filter(rule => rule.id !== newRule.id)]);
+        if (!sourceMatches(currentProjectRef.current)) throw new Error(staleMessage);
+      } catch (error) {
+        setProjectState(prev => prev.projectId === source.projectId ? ({ ...prev, isProcessing: false }) : prev);
+        if (currentProjectRef.current.projectId === source.projectId) announceStatus(`Rule update failed: ${error instanceof Error ? error.message : String(error)}`);
+        throw error;
       }
 
       const mismatchCount = updatedShots.filter((s) => s.status === 'mismatch').length;
       speechService.playEarcon(mismatchCount > 0 ? 'mismatch' : 'consistent');
 
       const msg = `Continuity rule updated: ${targetObject} color = ${expectedValue}. ${mismatchCount} shots flagged for SAM 3.1 recolor.`;
-      setProjectState((prev) => ({
+      setProjectState((prev) => prev.projectId !== source.projectId ? prev : !sourceMatches(prev) ? { ...prev, isProcessing: false, statusAnnouncement: staleMessage } : ({
         ...prev,
         isProcessing: false,
         rules: [newRule, ...prev.rules.filter((r) => r.id !== newRule.id)],
@@ -792,11 +654,15 @@ export default function App() {
       speechService.speak(msg, true);
       return updatedShots;
     },
-    [projectState.rules, projectState.shots]
+    [announceStatus]
   );
 
   // Run Full Sequence Continuity Audit (`muse-spark-1.3` + `sam-3.1`)
   const handleRunFullAudit = useCallback(async () => {
+    const projectId = projectState.projectId;
+    const sourceMatches = (state: ProjectState) => state.projectId === projectId
+      && state.shots === projectState.shots && state.rules === projectState.rules;
+    const staleMessage = 'The sequence changed during the continuity check. Your edits were kept; run the check again.';
     const primaryRule = projectState.rules[0];
     if (!primaryRule) {
       announceStatus('There are no continuity rules to check. Say which prop must stay which colour, for example the jacket must be emerald.', true);
@@ -809,54 +675,41 @@ export default function App() {
       statusAnnouncement: 'Running SAM 3.1 continuity audit across sequence...',
     }));
 
-    const auditedShots: StoryboardShot[] = [];
+    let auditedShots: StoryboardShot[];
     try {
-      for (const shot of projectState.shots) {
-        if (shot.status === 'uncertain' || isGeneratedImage(shot.currentImageUrl)) {
-          auditedShots.push(await metaModelClient.auditShotContinuity(shot, primaryRule));
-        } else {
-          auditedShots.push(shot);
-        }
-      }
+      auditedShots = await metaModelClient.auditAllShots(projectState.shots, projectState.rules);
     } catch (error) {
       setProjectState((prev) => ({ ...prev, isProcessing: false }));
       announceStatus(`The continuity check failed: ${error instanceof Error ? error.message : String(error)}`, true);
       return;
     }
 
-    const unreviewed = auditedShots.filter((s) => s.status === 'uncertain').length;
-    if (unreviewed) {
-      speechService.playEarcon('focus');
-      setProjectState((prev) => ({ ...prev, isProcessing: false, shots: auditedShots }));
-      announceStatus(
-        `${unreviewed} shots require candidate selection. Their continuity has not been verified.`,
-        true
-      );
+    if (!sourceMatches(currentProjectRef.current)) {
+      setProjectState(prev => prev.projectId === projectId
+        ? { ...prev, isProcessing: false, statusAnnouncement: staleMessage } : prev);
       return;
     }
+
+    const unreviewed = auditedShots.filter((s) => s.status === 'uncertain').length;
     const mismatches = auditedShots.filter((s) => s.status === 'mismatch');
-    if (mismatches.length === 0) {
-      speechService.playEarcon('consistent');
-      setProjectState((prev) => ({ ...prev, isProcessing: false, shots: auditedShots }));
-      announceStatus(
-        `Continuity Audit Complete: All ${auditedShots.length} shots satisfy active continuity rules.`,
-        true
-      );
-    } else {
-      const firstMismatch = mismatches[0];
-      speechService.playEarcon('mismatch');
-      setProjectState((prev) => ({
-        ...prev,
-        isProcessing: false,
-        shots: auditedShots,
-        activeShotId: firstMismatch.id,
-      }));
-      announceStatus(
-        `Continuity Audit found ${mismatches.length} discrepancy. Focused on Shot ${firstMismatch.shotNumber}: ${firstMismatch.discrepancyMessage} Press Y to apply SAM 3.1 fix.`,
-        true
-      );
-    }
-  }, [projectState.shots, projectState.rules, announceStatus]);
+    const firstMismatch = mismatches[0];
+    const message = unreviewed
+      ? `${unreviewed} shots require candidate selection. Their continuity has not been verified.`
+      : !firstMismatch
+      ? `Continuity Audit Complete: All ${auditedShots.length} shots pass the active colour checks.`
+      : `Continuity Audit found ${mismatches.length} discrepancy. Focused on Shot ${firstMismatch.shotNumber}: ${firstMismatch.discrepancyMessage} Press Y to apply SAM 3.1 fix.`;
+    setProjectState(prev => {
+      if (prev.projectId !== projectId) return prev;
+      // Recheck in the updater too: another edit may already be queued by React.
+      if (!sourceMatches(prev)) return { ...prev, isProcessing: false, statusAnnouncement: staleMessage };
+      return {
+        ...prev, isProcessing: false, shots: auditedShots, statusAnnouncement: message,
+        activeShotId: !unreviewed && firstMismatch ? firstMismatch.id : prev.activeShotId,
+      };
+    });
+    speechService.playEarcon(unreviewed ? 'focus' : firstMismatch ? 'mismatch' : 'consistent');
+    speechService.speak(message, true);
+  }, [projectState.shots, projectState.rules, projectState.projectId, announceStatus]);
 
   // Toggle Animatic Playback (`isPlayingAnimatic`)
   const handleTogglePlayAnimatic = useCallback(() => {
@@ -883,18 +736,27 @@ export default function App() {
     async (commandText: string) => {
       const trimmed = commandText.trim();
       if (!trimmed) return;
+      const intent = parseVoiceCommand(trimmed);
+      // Commands can also arrive from the voice agent, outside disabled form controls.
+      if (currentProjectRef.current.isProcessing && !['playback', 'help', 'narrate', 'invalid_command'].includes(intent.kind)) {
+        announceStatus('Wait for the current edit to finish before starting another change.', true);
+        return;
+      }
       if (!projectState.shots.length) {
         await handleRebuildFromTranscript(true, trimmed);
         return;
       }
 
-      const intent = parseVoiceCommand(trimmed);
       if ('shotNumber' in intent && intent.shotNumber && !projectState.shots.some((s) => s.shotNumber === intent.shotNumber)) {
         announceStatus(`There is no shot ${intent.shotNumber}.`, true);
         return;
       }
 
+      try {
       switch (intent.kind) {
+        case 'invalid_command':
+          announceStatus(intent.message, true);
+          return;
         case 'playback': {
           if (intent.action === 'play') {
             if (!projectState.isPlayingAnimatic) handleTogglePlayAnimatic();
@@ -932,14 +794,6 @@ export default function App() {
             return;
           }
 
-          if (isLocalImage(targetShot.currentImageUrl)) {
-            announceStatus(
-              'Local AI image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.',
-              true
-            );
-            return;
-          }
-
           await handleSegmentObjectManual(targetShot.id, intent.object);
           return;
         }
@@ -966,7 +820,7 @@ export default function App() {
           const candidates = intent.shotNumber
             ? reaudited.filter((s) => s.id === targetShot.id)
             : reaudited.filter((s) => s.status === 'mismatch');
-          const targets = candidates.filter((s) => s.proposedFix && !isLocalImage(s.currentImageUrl));
+          const targets = candidates.filter((s) => s.proposedFix?.targetObject === targetObject && !isLocalImage(s.currentImageUrl));
           const unconfirmed = reaudited.filter((s) => s.status === 'uncertain').length;
           if (!targets.length) {
             announceStatus(
@@ -976,7 +830,7 @@ export default function App() {
             return;
           }
 
-          const revision = (projectState.rules[0]?.revision || 1) + 1;
+          const revision = (projectState.rules.find(rule => rule.targetObject === targetObject && rule.property === 'color')?.revision ?? 0) + 1;
           setShowBeforeComparison(false);
           setProjectState((prev) => ({ ...prev, isProcessing: true }));
           let recoloured = 0;
@@ -1022,14 +876,6 @@ export default function App() {
             return;
           }
 
-          if (isLocalImage(targetShot.currentImageUrl)) {
-            announceStatus(
-              'Local AI image: automatic segmentation and continuity correction are not connected. Sample masks are disabled.',
-              true
-            );
-            return;
-          }
-
           if (intent.object && intent.color) {
             await handleAddOrUpdateRule(intent.object, intent.color);
           }
@@ -1039,64 +885,18 @@ export default function App() {
         }
 
         case 'modify_video': {
-          const targetShot = activeShot?.generatedJobId
-            ? activeShot
-            : projectState.shots.find((s) => s.generatedJobId) || activeShot;
-          const jobId = targetShot?.generatedJobId;
-
-          if (!targetShot || !jobId) {
-            announceStatus('No generated video found on active shot. Generate a local video first.', true);
-            return;
-          }
-
-          const detected = targetShot.detectedObjects || [];
-          const matches = detected.filter(
-            (o) =>
-              o.label?.toLowerCase().includes(intent.object.toLowerCase()) ||
-              o.concept?.toLowerCase().includes(intent.object.toLowerCase()) ||
-              o.objectId === intent.object
-          );
-
-          if (matches.length === 0) {
-            announceStatus(
-              `Object "${intent.object}" has not been detected in video yet. Use "Detect Objects" or segment first.`,
-              true
-            );
-            return;
-          }
-
-          if (matches.length > 1) {
-            const ids = matches.map((m) => `#${m.objectId} (${m.label})`).join(', ');
-            announceStatus(
-              `Multiple instances of "${intent.object}" found: ${ids}. Please specify object ID.`,
-              true
-            );
-            return;
-          }
-
-          const targetObjId = matches[0].objectId;
-          setProjectState((prev) => ({
-            ...prev,
-            isProcessing: true,
-            statusAnnouncement: `Modifying video object ${matches[0].label} (#${targetObjId}) to ${intent.color}...`,
-          }));
-
-          try {
-            const res = await modifyLocalVideo(jobId, targetObjId, intent.color);
-            handleRefreshVideoUrl(
-              targetShot.id,
-              `/api/local-ai/jobs/${jobId}/assets/generated-video.mp4?rev=${Date.now()}`,
-              res
-            );
-            announceStatus(
-              `Video updated: ${res.framesModified} frames recolored to ${intent.color.toUpperCase()} with 0 outside drift (${res.outsideDrift}px).`,
-              true
-            );
-          } catch (err: any) {
-            announceStatus(`Video modification failed: ${err.message}`, true);
-          } finally {
-            setProjectState((prev) => ({ ...prev, isProcessing: false }));
-          }
+          const targetShot=activeShot,jobId=targetShot?.generatedJobId;
+          if(!targetShot?.videoUrl||!jobId){announceStatus('Select a generated video scene before correcting its objects.',true);return;}
+          const projectId=projectState.projectId;
+          setProjectState(prev=>({...prev,isProcessing:true,statusAnnouncement:`Checking approved ${intent.object} masks...`}));
+          try{
+            const result=await correctReviewedVideoObject(jobId,targetShot.videoMaskPlan,intent.object,intent.color,AbortSignal.timeout(90000));
+            handleUseLocalVideo(targetShot.id,result.videoUrl,targetShot.promptDescription,result.id,jobId);
+          }catch(error){
+            const message=error instanceof Error?error.message:'Video correction failed.';
+            setProjectState(prev=>prev.projectId===projectId?{...prev,statusAnnouncement:message}:prev);
+            speechService.speak(message);
+          }finally{setProjectState(prev=>prev.projectId===projectId?{...prev,isProcessing:false}:prev);}
           return;
         }
 
@@ -1106,7 +906,12 @@ export default function App() {
             announceStatus('No shot selected for generative edit.', true);
             return;
           }
-          await handleGenerativeEdit(targetShot.id, intent.prompt, intent.object);
+          try {
+            await handleGenerativeEdit(targetShot.id, intent.prompt, intent.object);
+          } catch (error) {
+            // Inspector callers consume the rejection themselves; commands must do so too.
+            announceStatus(`Generative edit failed: ${error instanceof Error ? error.message : String(error)}`, true);
+          }
           return;
         }
 
@@ -1128,6 +933,11 @@ export default function App() {
           return;
         }
       }
+      } catch (error) {
+        // Button submissions do not await this callback; consume failed rule/audit
+        // operations here instead of leaving an unhandled rejection.
+        announceStatus(`Command failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
     },
     [
       projectState.shots,
@@ -1142,12 +952,13 @@ export default function App() {
       handleRunFullAudit,
       handleSegmentObjectManual,
       handleGenerativeEdit,
-      handleRefreshVideoUrl,
+      handleUseLocalVideo,
+      projectState.projectId,
       announceStatus,
     ]
   );
 
-  // The only voice recorder: Web Speech dictation into the direction box. No simulated fallback.
+  // Dictation uses the configured server provider; unconfigured mode stays local.
   const handleToggleRecording = useCallback(() => {
     if (speechRecognitionService.isListening() || projectState.isRecording) {
       speechRecognitionService.stopListening();
@@ -1162,7 +973,7 @@ export default function App() {
       announceStatus(`Voice unavailable: ${reason}`);
     };
     if (!speechRecognitionService.isSupported()) {
-      unavailable('this browser has no speech recognition.');
+      unavailable('transcription is not connected or microphone recording is unavailable.');
       return;
     }
     const base = directionDraft.trim();
@@ -1178,6 +989,19 @@ export default function App() {
     });
     if (!started) unavailable('the microphone could not start.');
   }, [announceStatus, directionDraft, projectState.isRecording]);
+
+  // A hidden tab cannot keep canvas, media and spoken narration synchronized.
+  useEffect(() => {
+    const pauseHidden = () => {
+      if (!document.hidden) return;
+      speechService.stopSpeaking();
+      setProjectState(previous => previous.isPlayingAnimatic ? {...previous,
+        isPlayingAnimatic:false, statusAnnouncement:'Preview paused while this tab is hidden. Press Play to continue.'} : previous);
+    };
+    document.addEventListener('visibilitychange',pauseHidden);
+    pauseHidden();
+    return () => document.removeEventListener('visibilitychange',pauseHidden);
+  }, [projectState.isPlayingAnimatic]);
 
   // Animatic Timeline Clock Effect
   useEffect(() => {
@@ -1210,7 +1034,8 @@ export default function App() {
                 activeShotId: shot.id,
                 statusAnnouncement: `Animatic playing Shot ${shot.shotNumber}: ${shot.promptDescription}`,
               }));
-              speechService.speak(shot.spokenDescription, true);
+              if(shot.narrationDataUrl)speechService.stopSpeaking();
+              else speechService.speak(shot.spokenDescription, true);
             }
             break;
           }
@@ -1250,11 +1075,39 @@ export default function App() {
     [totalDurationSeconds, projectState.shots, projectState.activeShotId]
   );
 
+  const handleProjectArchive = async (file?: File) => {
+    if(archiveLock.current || !storageReady || projectState.isProcessing || isExportingVideo || switchingProject.current)return;
+    archiveLock.current=true;setArchiveBusy(true);setArchiveMessage(file?'Restoring projectÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦':'Preparing backupÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦');
+    speechRecognitionService.cancelListening();
+    speechService.stopSpeaking();
+    try {
+      const {collectProjectArchive,serializeProjectArchive,restoreProjectArchive}=await import('./services/projectArchive');
+      await flushLocalSaves();
+      if(file) {
+        if(file.size>200*1024*1024)throw new Error('Project backup exceeds the 200 MB limit.');
+        const result=await restoreProjectArchive(await file.text());
+        setSessionProjects(result.library.projects);
+        setProjectState(result.project);
+        setCurrentTimeSeconds(0);setDirectionDraft('');setVoiceNotice(null);
+        setArchiveMessage(result.warning||'Project restored as a separate copy.');
+      }else{
+        const dream=await loadLocal(`dream:${projectState.projectId}`);
+        const archive=await collectProjectArchive(projectState,dream);
+        const url=URL.createObjectURL(new Blob([serializeProjectArchive(archive)],{type:'application/json'}));
+        const link=document.createElement('a');link.href=url;link.download=`${projectState.projectId}.anchorshot.json`;link.click();
+        setTimeout(()=>URL.revokeObjectURL(url),10000);
+        setArchiveMessage('Project backup downloaded. Keep this file to restore scenes and masks.');
+      }
+    }catch(error){setArchiveMessage(error instanceof Error?error.message:'Project backup operation failed.');}
+    finally{archiveLock.current=false;setArchiveBusy(false);}
+  };
+
   // Export Project JSON
   const handleExportProjectJson = useCallback(() => {
     const exportPayload = {
       app: 'Anchorshot',
-      mode: 'offline-fixture',
+      mode: 'continuity-report',
+      portableBackup: false,
       transitionsEnabled: !reducedMotion,
       projectId: projectState.projectId,
       title: projectState.title,
@@ -1358,8 +1211,9 @@ export default function App() {
         ...prev,
         shots: renumbered,
         activeShotId: moved.id,
-        currentTimeSeconds: offset,
+        isPlayingAnimatic: false,
       }));
+      setCurrentTimeSeconds(offset);
 
       // Pure state update: run side-effects outside updater
       speechService.playEarcon('focus');
@@ -1373,17 +1227,21 @@ export default function App() {
     (shotId: string, delta: number) => {
       const target = projectState.shots.find((s) => s.id === shotId);
       if (!target) return;
-      const newDuration = Math.max(0.5, Math.min(15, Math.round((target.durationSeconds + delta) * 10) / 10));
+      const minimumDuration = target.narrationDurationSeconds
+        ? Math.ceil((target.narrationDurationSeconds + 0.4) * 10) / 10 : 0.5;
+      const newDuration = Math.max(minimumDuration, Math.min(15, Math.round((target.durationSeconds + delta) * 10) / 10));
       if (newDuration === target.durationSeconds) return;
-
-      const updated = projectState.shots.map((s) =>
-        s.id === shotId ? { ...s, durationSeconds: newDuration } : s
-      );
+      let edited: StoryboardShot;
+      try { edited = updateShotDetails(target, target.promptDescription, newDuration); }
+      catch (error) { announceStatus((error as Error).message); return; }
+      const updated = projectState.shots.map((s) => s.id === shotId ? edited : s);
 
       setProjectState((prev) => ({
         ...prev,
         shots: updated,
+        isPlayingAnimatic: false,
       }));
+      setCurrentTimeSeconds(0);
 
       // Pure state update: run side-effects outside updater
       speechService.playEarcon('scrub');
@@ -1432,28 +1290,25 @@ export default function App() {
 
   // Export Animatic Video: narrated MP4 from the server, silent browser WebM as fallback
   const handleExportAnimaticVideo = useCallback(async () => {
+    if (isExportingVideo || !projectState.shots.length) return;
     setIsExportingVideo(true);
-    announceStatus(`Rendering narrated MP4 animatic${burnInTimecode ? ' with burn-in timecode' : ''}...`, false);
-    const mp4 = await exportAnimaticMp4(projectState.shots, { burnInTimecode });
-    const blob = mp4?.video ?? (await exportStoryboardAnimaticVideo(projectState.shots, projectState.title));
-    setIsExportingVideo(false);
-    if (!blob) {
-      announceStatus('Video export requires a browser supporting HTML5 Canvas MediaRecorder.', true);
-      return;
-    }
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${projectState.projectId}-animatic.${mp4 ? 'mp4' : 'webm'}`;
-    a.click();
-    URL.revokeObjectURL(url);
-    announceStatus(
-      mp4
-        ? `Exported MP4 animatic${burnInTimecode ? ' (BITC)' : ''}.`
-        : 'MP4 export unavailable. Exported a silent WebM animatic instead.',
-      true
-    );
-  }, [projectState.shots, projectState.title, projectState.projectId, burnInTimecode, announceStatus]);
+    try {
+      const audioLabel = projectState.shots.some(shot=>shot.narrationDataUrl) ? 'narrated' : projectState.shots.some(shot=>shot.videoUrl) ? 'video' : 'silent';
+      announceStatus(`Rendering ${audioLabel} MP4 film${burnInTimecode ? ' with burn-in timecode' : ''}...`, false);
+      const mp4 = await exportAnimaticMp4(projectState.shots, { burnInTimecode });
+      const blob = mp4?.video ?? (await exportStoryboardAnimaticVideo(projectState.shots, projectState.title));
+      if (!blob) throw new Error('This browser cannot record a WebM fallback. Install ffmpeg for MP4 export.');
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${projectState.projectId}-animatic.${mp4 ? 'mp4' : 'webm'}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      announceStatus(mp4 ? `Exported ${audioLabel} MP4 film${burnInTimecode ? ' (BITC)' : ''}.` : 'MP4 export unavailable. Exported a silent WebM animatic instead.');
+    } catch (error) {
+      announceStatus(`Export failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally { setIsExportingVideo(false); }
+  }, [projectState.shots, projectState.title, projectState.projectId, burnInTimecode, announceStatus, isExportingVideo]);
 
   const handleToggleBeforeComparison = useCallback(() => {
     setShowBeforeComparison((prev) => {
@@ -1471,6 +1326,7 @@ export default function App() {
   // Global Keyboard Navigation (WCAG 2.2 AAA Full Keyboard Control)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if(archiveLock.current)return;
       const target = e.target as HTMLElement | null;
       const isTextInputFocused =
         target &&
@@ -1492,6 +1348,15 @@ export default function App() {
           target.tagName === 'SELECT');
 
       const key = e.key.toLowerCase();
+      // Disabled buttons do not disable global shortcuts. A second mutation can
+      // overwrite the first result and clear its processing flag prematurely.
+      const changesScene = ['y', 'a', 'g', 't', '[', ']'].includes(key)
+        || (e.altKey && ['ArrowLeft', 'ArrowRight'].includes(e.key));
+      if (currentProjectRef.current.isProcessing && changesScene) {
+        e.preventDefault();
+        announceStatus('Wait for the current edit to finish before starting another change.', false);
+        return;
+      }
 
       if (e.code === 'Space') {
         // Allow Space to natively activate focused buttons and links without hijacking animatic playback
@@ -1611,7 +1476,13 @@ export default function App() {
   if (!storageReady) return <main className="p-8 text-white bg-black min-h-dvh" role="status">{storageStatus}</main>;
   return (
     <>
+      <div inert={archiveBusy} style={{display:"contents"}}>
       <CleanStudio
+        onPlaybackError={message=>{setProjectState(previous=>({...previous,isPlayingAnimatic:false,statusAnnouncement:message}));}}
+        onBackupProject={()=>void handleProjectArchive()}
+        onRestoreProject={file=>void handleProjectArchive(file)}
+        archiveMessage={archiveMessage}
+        key={projectState.projectId}
         showMask={showSamMaskOverlay}
         showBefore={showBeforeComparison}
         storageStatus={storageStatus}
@@ -1637,7 +1508,7 @@ export default function App() {
         onMute={handleToggleMute}
         onTranscript={(text) => setProjectState((prev) => ({ ...prev, transcript: text }))}
         onGenerate={() => void handleRebuildFromTranscript(true)}
-        onGenerateFrom={(script) => void handleRebuildFromTranscript(true, script)}
+        onGenerateFrom={(script) => handleRebuildFromTranscript(true, script)}
         onCommand={(text) => handleExecuteVoiceCommand(text)}
         onSelect={(id) => handleSelectShot(id)}
         onPlay={handleTogglePlayAnimatic}
@@ -1665,8 +1536,11 @@ export default function App() {
         voiceNotice={voiceNotice}
         inspector={
           <ShotInspectorPanel
+            key={`${projectState.projectId}:${activeShot?.id ?? "empty"}`}
             onUseLocalImage={handleUseLocalImage}
             onUseLocalVideo={handleUseLocalVideo}
+            onUpdateVideoMasks={handleUpdateVideoMasks}
+            onUpdateNarration={handleUpdateNarration}
             onUpdateDetectedObjects={handleUpdateDetectedObjects}
             onRefreshVideoUrl={handleRefreshVideoUrl}
             onGenerativeEdit={handleGenerativeEdit}
@@ -1693,7 +1567,7 @@ export default function App() {
             rules={projectState.rules}
             activePresetId={activePresetId}
             onSelectPreset={handleSelectPreset}
-            onAddOrUpdateRule={handleAddOrUpdateRule}
+            onAddOrUpdateRule={(object, color) => { void handleAddOrUpdateRule(object, color).catch(() => {}); }}
           />
         }
         shortcuts={
@@ -1703,6 +1577,8 @@ export default function App() {
           />
         }
       />
+      </div>
+      {archiveBusy && <div role="status" className="fixed inset-0 z-50 grid place-items-center bg-black/80 text-white">{archiveMessage}</div>}
       {new URLSearchParams(location.search).has('debug') && <OrcaDiagnosticDrawer />}
     </>
   );

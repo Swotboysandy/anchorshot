@@ -67,6 +67,7 @@ export interface SamCheckEvidence {
 }
 
 export interface StoredMaskTrack {
+  segmentationId?: string;
   maskRef: string;
   concept: string;
   shotNumber: number;

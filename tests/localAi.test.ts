@@ -8,6 +8,9 @@ import path from 'node:path';
 import {createLocalAi} from '../server/localAi.ts';
 
 test('local generation validates requests, serializes GPU work, persists results and handles failure/cancel', async t => {
+  const oldEndpoint = process.env.MODAL_VIDEO_ENDPOINT;
+  process.env.MODAL_VIDEO_ENDPOINT = 'https://must-not-be-called.invalid/generate';
+  t.after(() => { if (oldEndpoint === undefined) delete process.env.MODAL_VIDEO_ENDPOINT; else process.env.MODAL_VIDEO_ENDPOINT = oldEndpoint; });
   const root=mkdtempSync(path.join(tmpdir(),'anchorshot-api-test-'));
   const runtime=path.join(root,'.artifacts/local-ai');
   for (const relative of ['venv/Scripts/python.exe','models/sd15/download-manifest.json','models/animatediff-lightning/download-manifest.json']) {
@@ -44,6 +47,7 @@ test('local generation validates requests, serializes GPU work, persists results
   assert.equal((await fetch(base+`/jobs/${job.id}/assets/job.json`)).status,404);
   const range=await fetch(base+`/jobs/${job.id}/assets/generated-image.png`,{headers:{Range:'bytes=0-3'}});
   assert.equal(range.status,206);assert.equal((await range.arrayBuffer()).byteLength,4);
+  assert.equal((await post(`/jobs/${job.id}/modify`,{objectId:'0',color:'red'})).status,422);
   const bad=await (await post('/jobs',{kind:'video',prompt:'failure'})).json();worker.emit('close',1);
   assert.equal((await (await fetch(base+'/jobs/'+bad.id)).json()).status,'failed');
   const cancelled=await (await post('/jobs',{kind:'video',prompt:'cancel'})).json();

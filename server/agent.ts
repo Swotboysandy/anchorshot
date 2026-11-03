@@ -12,6 +12,48 @@ export interface VoiceAgent {
   turn(messages: AgentMessage[], signal?: AbortSignal): Promise<OpenAI.Chat.ChatCompletionMessage>;
 }
 
+/** Validate browser history before reserving a paid request. Preserve tool/result pairs. */
+export function validateAgentMessages(input: unknown): AgentMessage[] {
+  if (!Array.isArray(input) || !input.length || input.length > 80 || JSON.stringify(input).length > 64000)
+    throw new Error('Send a conversation of at most 80 messages and 64,000 characters.');
+  const pending = new Set<string>();
+  const messages: AgentMessage[] = [];
+  for (const value of input) {
+    if (!value || typeof value !== 'object') throw new Error('Invalid conversation message.');
+    const message = value as Record<string, any>;
+    const { role, content } = message;
+    if (!['user', 'assistant', 'tool'].includes(role) || (content !== null && typeof content !== 'string') || (typeof content === 'string' && content.length > 12000))
+      throw new Error('Conversation messages must contain bounded plain text.');
+    if (role !== 'tool' && pending.size) throw new Error('Complete every tool result before the next message.');
+    if (role === 'user') {
+      if (typeof content !== 'string' || !content.trim()) throw new Error('The director message is empty.');
+      messages.push({ role, content });
+    } else if (role === 'tool') {
+      if (typeof content !== 'string' || !pending.delete(message.tool_call_id)) throw new Error('The tool result has no matching request.');
+      messages.push({ role, content, tool_call_id: message.tool_call_id });
+    } else {
+      let calls: OpenAI.Chat.ChatCompletionMessageToolCall[] | undefined;
+      if (message.tool_calls !== undefined) {
+        if (!Array.isArray(message.tool_calls) || !message.tool_calls.length || message.tool_calls.length > 8) throw new Error('Invalid agent tool calls.');
+        calls = message.tool_calls.map((call: any) => {
+          if (!call || typeof call.id !== 'string' || !call.id || call.id.length > 128 || pending.has(call.id) ||
+              call.type !== 'function' || typeof call.function?.name !== 'string' || !/^[a-z_]{1,64}$/.test(call.function.name) ||
+              typeof call.function.arguments !== 'string' || call.function.arguments.length > 8000)
+            throw new Error('Invalid agent tool call.');
+          const args = JSON.parse(call.function.arguments);
+          if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Tool arguments must be an object.');
+          pending.add(call.id);
+          return { id: call.id, type: 'function', function: { name: call.function.name, arguments: call.function.arguments } };
+        });
+      }
+      if (!calls && (typeof content !== 'string' || !content.trim())) throw new Error('The agent reply is empty.');
+      messages.push({ role, content, ...(calls ? { tool_calls: calls } : {}) });
+    }
+  }
+  if (messages[0].role !== 'user' || pending.size) throw new Error('The conversation must start with the director and include every tool result.');
+  return messages;
+}
+
 export const AGENT_PROMPT = `You are a spoken co-director inside a storyboard studio used by blind and low-vision filmmakers.
 Your words are read aloud, so reply in one or two short plain sentences, with no markdown or lists.
 Never describe visuals you were not told about; use describe_storyboard to read shots and their continuity status.

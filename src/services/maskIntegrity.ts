@@ -31,29 +31,30 @@ export function verifyMaskedPixelDiff(
 }
 
 export function recolorMaskedPixels(
-  before: Uint8ClampedArray, mask: Uint8Array, rgb: readonly number[],
+  before: Uint8ClampedArray, mask: Uint8Array, rgb: readonly number[], options: {allowUnchanged?: boolean} = {},
 ): { pixels: Uint8ClampedArray; verification: MaskVerificationReport } {
   validate(before, before, mask);
   if (rgb.length !== 3 || rgb.some(value => !Number.isInteger(value) || value < 0 || value > 255))
     throw new Error('Invalid target colour.');
   const pixels = before.slice();
+  const neutralTarget = Math.max(...rgb) - Math.min(...rgb) < 40;
   for (let pixel = 0; pixel < mask.length; pixel++) {
     if (!mask[pixel]) continue;
     const i = pixel * 4;
     if (!before[i + 3]) continue;
     const r = before[i], g = before[i + 1], b = before[i + 2];
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    const saturation = max === 0 ? 0 : (max - min) / max;
     const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-    if (saturation > 0.22 && luminance > 0.12 && luminance < 0.92) {
-      const factor = Math.min(1.35, Math.max(0.45, luminance * 1.45));
-      for (let channel = 0; channel < 3; channel++)
-        pixels[i + channel] = Math.min(255, Math.round(rgb[channel] * factor));
-    }
+    // A reviewed selection includes white and neutral material too. Retain alpha,
+    // black detail and relative shading; saturation is not an editability test.
+    if (luminance <= 0.04) continue;
+    const factor = neutralTarget ? 0.7 + luminance * 0.3 : 0.35 + luminance;
+    for (let channel = 0; channel < 3; channel++)
+      pixels[i + channel] = Math.min(255, Math.round(rgb[channel] * factor));
   }
+
   const verification = verifyMaskedPixelDiff(before, pixels, mask);
   if (!verification.passed) throw new Error('Mask verification failed. No correction was applied.');
-  if (!verification.changedInside) throw new Error('No editable pixels changed inside the mask. The shot was not marked corrected.');
+  if (!verification.changedInside && !options.allowUnchanged) throw new Error('No editable pixels changed inside the mask. The shot was not marked corrected.');
   return { pixels, verification };
 }
 
@@ -110,4 +111,13 @@ export function detectMaskedColor(pixels: Uint8ClampedArray, mask: Uint8Array): 
     pixelCount: count,
     confidence: Math.min(0.99, Number((best / count).toFixed(3))),
   };
+}
+
+
+/** Rule synonyms collapse to the colour categories actually measured by this checker. */
+export function normalizeContinuityColor(value: string): string | null {
+  const aliases: Record<string,string> = {blue:'blue',navy:'blue',cobalt:'blue',azure:'blue',cyan:'cyan',teal:'cyan',
+    red:'red',crimson:'red',scarlet:'red',ruby:'red',amber:'amber',gold:'amber',yellow:'amber',orange:'amber',
+    emerald:'emerald',green:'emerald',lime:'emerald',purple:'purple',violet:'purple',magenta:'purple',white:'white',ivory:'white'};
+  return aliases[value.trim().toLowerCase()] ?? null;
 }

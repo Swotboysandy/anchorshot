@@ -21,7 +21,7 @@ const objects: VideoDetectedObject[] = [
 ];
 
 describe('applyVideoFindingsToShots', () => {
-  it('flags the target shot on a mismatch and binds the sam-3.1 mask to the proposed fix', () => {
+  it('flags the target shot without inventing a live mask from a box', () => {
     const findings: ContinuityFinding[] = [
       {
         shotIndex: 1,
@@ -42,9 +42,7 @@ describe('applyVideoFindingsToShots', () => {
 
     expect(result[1].status).toBe('mismatch');
     expect(result[1].discrepancyMessage).toContain('conflicts');
-    expect(result[1].proposedFix?.targetColor).toBe('blue');
-    expect(result[1].proposedFix?.mask?.maskRef).toBe('sam-3.1:cup:0:v1');
-    expect(result[1].proposedFix?.mask?.box.width).toBeGreaterThan(0);
+    expect(result[1].proposedFix).toBeUndefined();
     expect(result[0].status).toBe('consistent');
   });
 

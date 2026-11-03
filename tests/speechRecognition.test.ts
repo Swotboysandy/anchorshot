@@ -45,7 +45,7 @@ describe('Speech Recognition Service & Local Testing Gateway', () => {
 
     if (!speechRecognitionService.isSupported()) {
       expect(started).toBe(false);
-      expect(errorReceived).toContain('not supported');
+      expect(errorReceived).toContain('Transcription is not connected');
       expect(speechRecognitionService.isListening()).toBe(false);
     }
   });

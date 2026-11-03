@@ -75,3 +75,34 @@ test('missing local background fails closed without export',async({page})=>{
   await expect(study.getByRole('alert')).toContainText('Could not load local dream assets');
   await expect(study.getByRole('button',{name:'Export dream WebM'})).toHaveCount(0);
 });
+
+for(const mode of ['hidden-start','already-aborted','constructor','start','progress','hidden-during','capture-gap','early-stop','stop-timeout'])test(`dream export cleans up ${mode} without returning partial video`,async({page})=>{
+ await page.goto('/');
+ const result=await page.evaluate(async(mode)=>{
+  const path='/src/services/dreamTransition.ts';const m=await import(path);const assets=await m.loadDreamAssets();
+  const Native=window.MediaRecorder,originalStart=Native.prototype.start,originalStop=Native.prototype.stop,originalCapture=HTMLCanvasElement.prototype.captureStream,originalNow=performance.now.bind(performance);
+  const tracks:MediaStreamTrack[]=[];let offset=0,hidden=false,bytes=0,message='';const controller=new AbortController();
+  Object.defineProperty(document,'hidden',{configurable:true,get:()=>hidden});
+  HTMLCanvasElement.prototype.captureStream=function(...args:Parameters<typeof originalCapture>){const stream=originalCapture.apply(this,args);tracks.push(...stream.getTracks());return stream;};
+  try{
+   if(mode==='hidden-start')hidden=true;
+   if(mode==='already-aborted')controller.abort();
+   if(mode==='constructor')window.MediaRecorder=class extends Native{constructor(stream:MediaStream,options?:MediaRecorderOptions){super(stream,options);throw new Error('Injected constructor failure');}};
+   if(mode==='start')Native.prototype.start=function(){throw new Error('Injected start failure');};
+   if(mode==='early-stop')Native.prototype.start=function(...args:Parameters<typeof originalStart>){originalStart.apply(this,args);setTimeout(()=>this.stop(),50);};
+   if(mode==='stop-timeout')Native.prototype.stop=function(){};
+   if(mode==='capture-gap')Object.defineProperty(performance,'now',{configurable:true,value:()=>originalNow()+offset});
+   const blob=await m.exportDream(assets,false,controller.signal,()=>{
+    if(mode==='stop-timeout')controller.abort();
+    if(mode==='progress')throw new Error('Injected progress failure');
+    if(mode==='hidden-during'){hidden=true;document.dispatchEvent(new Event('visibilitychange'));}
+    if(mode==='capture-gap')offset=5000;
+   });bytes=blob.size;
+  }catch(error){message=(error as Error).message;}
+  finally{window.MediaRecorder=Native;Native.prototype.start=originalStart;Native.prototype.stop=originalStop;HTMLCanvasElement.prototype.captureStream=originalCapture;delete (document as any).hidden;delete (performance as any).now;}
+  return {message,bytes,tracks:tracks.map(track=>track.readyState)};
+ },mode);
+ expect(result.bytes).toBe(0);expect(result.message).toMatch(/visible|cancelled|Injected|hidden|interrupted|before completion/);
+ expect(result.tracks.every(state=>state==='ended')).toBe(true);
+ if(mode==='hidden-start'||mode==='already-aborted')expect(result.tracks).toHaveLength(0);else expect(result.tracks.length).toBeGreaterThan(0);
+});

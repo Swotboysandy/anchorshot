@@ -9,8 +9,8 @@ export function DashboardLayout({active,children}:{active:boolean;children:React
  return <div className={wide?'dashboard-resizable':'creation-grid studio-dashboard dashboard-flat'}><ResizablePanelGroup orientation="horizontal">
  <ResizablePanel defaultSize="28%" minSize="350px"><div className="dashboard-pane">{panes[0]}</div></ResizablePanel>
  <ResizableHandle withHandle aria-label="Resize direction panel"/>
- <ResizablePanel defaultSize="50%" minSize="400px"><div className="dashboard-pane dashboard-preview-pane">{panes[1]}</div></ResizablePanel>
- <ResizableHandle withHandle aria-label="Resize scene details"/>
- <ResizablePanel defaultSize="22%" minSize="250px"><div className="dashboard-pane">{panes[2]}</div></ResizablePanel>
+ <ResizablePanel defaultSize={panes.length > 2 ? "50%" : "72%"} minSize="400px"><div className="dashboard-pane dashboard-preview-pane">{panes[1]}</div></ResizablePanel>
+ {panes.length > 2 && <><ResizableHandle withHandle aria-label="Resize scene details"/>
+ <ResizablePanel defaultSize="22%" minSize="250px"><div className="dashboard-pane">{panes[2]}</div></ResizablePanel></>}
  </ResizablePanelGroup></div>;
 }

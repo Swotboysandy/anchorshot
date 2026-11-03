@@ -1,5 +1,5 @@
-"""Extract candidate object masks and bounding boxes from generated video frames."""
-import argparse, json, sys
+"""Suggest unverified salient regions in one frame. This is not SAM or tracking."""
+import argparse, hashlib, json, sys
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -66,16 +66,19 @@ def detect_objects_in_frame(frame_path: Path, prompt: str = ""):
         raster_bytes = mask_binary.tobytes()
         raster_b64 = base64.b64encode(raster_bytes).decode("ascii")
         
-        confidence = round(0.85 + (0.12 / (idx + 1)), 3)
-        mask_ref = f"sam-3.1:{concept}:{idx}:v1"
+        confidence = 0.0  # No calibrated object recognition or tracking score is measured.
+        mask_ref = f"local-saliency:{idx}:v1"
         objects.append({
             "id": f"obj-{idx}",
             "maskRef": mask_ref,
             "objectId": str(idx),
-            "label": f"{concept.replace('-', ' ').title()} #{idx+1}",
+            "label": f"Region {idx+1} (unverified)",
             "concept": concept,
-            "source": "sam",
-            "provenance": "local-sam-3.1",
+            "source": "local-saliency",
+            "sourceHash": hashlib.sha256(frame_path.read_bytes()).hexdigest(),
+            "frameIndex": 0,
+            "requiresReview": True,
+            "provenance": "unverified-proposal",
             "confidence": confidence,
             "width": width,
             "height": height,

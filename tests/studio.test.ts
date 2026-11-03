@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import * as canvasEngine from '../src/services/canvasEngine';
+import { describe, expect, it, vi } from 'vitest';
 import { brand } from '../src/brand';
 import {
   getTargetObjectBox,
@@ -98,12 +99,87 @@ describe('Anchorshot Voice Studio — Local 4-Role Pipeline Verification', () =>
         },
         revisions: [],
       },
-      '1'
+      '0'
     );
 
-    expect(resolved.status).toBe('consistent');
-    expect(resolved.discrepancyMessage).toBeUndefined();
-    expect(resolved.proposedFix?.mask?.objectId).toBe('1');
-    expect(resolved.proposedFix?.mask?.maskRef).toBe('sam-3.1:courier-jacket:1:v12');
+    expect(resolved.status).toBe('uncertain');
+    expect(resolved.proposedFix?.mask?.candidateCount).toBe(1);
+    expect(resolved.proposedFix?.mask?.objectId).toBe('0');
+    expect(resolved.proposedFix?.mask?.maskRef).toBe('sam-3.1:courier-jacket:0:v12');
   });
+});
+
+
+it('audits cup and umbrella independently and keeps the worst result for the shot', async () => {
+  const shot = {id:'s',shotNumber:1,promptDescription:'Cup and umbrella',currentImageUrl:'frame',originalImageUrl:'frame',spokenDescription:'',status:'uncertain',durationSeconds:2,revisions:[]} as const;
+  const rules = ['cup','umbrella'].map(targetObject => ({ id:targetObject, targetObject, property:'color', expectedValue:'blue', revision:1, scope:'all_shots' as const }));
+  const audit = vi.spyOn(metaModelClient, 'auditShotContinuity').mockImplementation(async (value,rule) => ({...value,status:rule.targetObject==='cup'?'consistent':'mismatch',spokenDescription:rule.targetObject,
+    proposedFix:rule.targetObject==='umbrella'?{action:'recolor',targetObject:'umbrella',targetColor:'blue'}:undefined}));
+  try {
+    const [result] = await metaModelClient.auditAllShots([{...shot,revisions:[]}],rules);
+    expect(audit).toHaveBeenCalledTimes(2);
+    expect(result.status).toBe('mismatch');
+    expect(result.proposedFix?.targetObject).toBe('umbrella');
+    expect(result.continuityChecks?.map(check => [check.targetObject,check.status])).toEqual([['cup','consistent'],['umbrella','mismatch']]);
+  } finally {audit.mockRestore();}
+});
+
+it('refuses an object id that has no candidate mask', async () => {
+  await expect(metaModelClient.disambiguateMaskSelection({id:'s',shotNumber:1,durationSeconds:2,promptDescription:'',spokenDescription:'',currentImageUrl:'frame',originalImageUrl:'frame',status:'uncertain',revisions:[]},'unseen-object')).rejects.toThrow('no selectable mask');
+});
+
+
+it('rejects a sample mask and a stale live mask for a generated image', async () => {
+  const shot = {id:'s',shotNumber:1,durationSeconds:2,promptDescription:'',spokenDescription:'',currentImageUrl:'/api/muse/frames/new.png',originalImageUrl:'/api/muse/frames/new.png',status:'uncertain',revisions:[],
+    proposedFix:{action:'recolor',targetObject:'cup',targetColor:'blue',mask:{id:'m',objectId:'0',maskRef:'m',box:{x:0,y:0,width:10,height:10},confidence:1,maskBase64:'mask',provenance:'offline-fixture'}}} as import('../src/types/framelock').StoryboardShot;
+  await expect(metaModelClient.applyContinuityFix(shot)).rejects.toThrow('real object mask');
+  shot.proposedFix!.mask!.provenance='live-sam-3.1';
+  shot.proposedFix!.mask!.sourceImageUrl='/api/muse/frames/old.png';
+  await expect(metaModelClient.applyContinuityFix(shot)).rejects.toThrow('another frame');
+});
+
+
+it('retains a saved raster locally after the mask server restarts without submitting an old reference',async()=>{
+ const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify({maskSessionId:'new-server',sessionToken:'new-token'}),{headers:{'Content-Type':'application/json'}}));
+ vi.stubGlobal('fetch',fetcher);
+ const shot={id:'s',shotNumber:1,durationSeconds:2,promptDescription:'Cup',spokenDescription:'Cup',currentImageUrl:'/api/muse/frames/frame.png',originalImageUrl:'/api/muse/frames/frame.png',status:'uncertain',revisions:[],
+ proposedFix:{action:'recolor',targetObject:'cup',targetColor:'blue',mask:{id:'m',objectId:'0',maskRef:'sam:old',serverSessionId:'old-server',segmentationId:'old-result',sourceHash:'a'.repeat(64),sourceImageUrl:'/api/muse/frames/frame.png',box:{x:0,y:0,width:10,height:10},confidence:.9,maskBase64:'saved-raster',provenance:'live-sam-3.1'}}} as import('../src/types/framelock').StoryboardShot;
+ try{
+  const selected=await metaModelClient.disambiguateMaskSelection(shot,'0');
+  expect(fetcher).toHaveBeenCalledTimes(1);expect(fetcher).toHaveBeenCalledWith('/api/health',{signal:expect.any(AbortSignal)});
+  expect(selected.proposedFix?.mask).toMatchObject({maskBase64:'saved-raster',serverDetached:true,candidateCount:1});
+  expect(selected.status).toBe('uncertain');
+  expect(shot.proposedFix?.mask?.serverDetached).toBeUndefined();
+ }finally{vi.unstubAllGlobals();}
+});
+
+
+it.each(['MASK_SOURCE_CHANGED','MASK_RESULT_CHANGED'])('a replaced server track (%s) keeps its original saved raster locally selectable',async(code)=>{
+ const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({maskSessionId:'same-server',sessionToken:'token'})))
+  .mockResolvedValueOnce(new Response(JSON.stringify({code}),{status:409}));
+ vi.stubGlobal('fetch',fetcher);
+ const shot={id:'s',shotNumber:1,durationSeconds:2,promptDescription:'Cup',spokenDescription:'Cup',currentImageUrl:'/api/muse/frames/old.png',originalImageUrl:'/api/muse/frames/old.png',status:'uncertain',revisions:[],proposedFix:{action:'recolor',targetObject:'cup',targetColor:'blue',mask:{id:'m',objectId:'0',maskRef:'ref',serverSessionId:'same-server',segmentationId:'old-result',sourceHash:'a'.repeat(64),sourceImageUrl:'/api/muse/frames/old.png',box:{x:0,y:0,width:10,height:10},confidence:.9,maskBase64:'old-raster',provenance:'live-sam-3.1'}}} as import('../src/types/framelock').StoryboardShot;
+ try{
+  const selected=await metaModelClient.disambiguateMaskSelection(shot,'0');
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(fetcher.mock.calls[1][1].body)).toMatchObject({sourceHash:'a'.repeat(64),shotNumber:1,segmentationId:'old-result'});
+  expect(selected.proposedFix?.mask).toMatchObject({maskBase64:'old-raster',serverDetached:true});
+  expect(selected.status).toBe('uncertain');
+ }finally{vi.unstubAllGlobals();}
+});
+
+
+it('rejects explicitly stale masks on sample and restored still frames before touching pixels',async()=>{
+ const render=vi.spyOn(canvasEngine,'applySamPixelFixWithVerification');
+ const select=vi.spyOn(metaModelClient,'segmentObjectWithSam3');
+ try{
+  for(const provenance of ['offline-fixture','live-sam-3.1'] as const){
+   const shot={id:'s',shotNumber:1,durationSeconds:2,promptDescription:'Cup',spokenDescription:'Cup',currentImageUrl:'data:image/png;base64,new',originalImageUrl:'data:image/png;base64,new',status:'uncertain',mediaSource:'sample',revisions:[],
+    proposedFix:{action:'recolor',targetObject:'cup',targetColor:'blue',mask:{id:'m',objectId:'0',maskRef:'m',box:{x:0,y:0,width:10,height:10},confidence:1,maskBase64:'old-mask',sourceImageUrl:'data:image/png;base64,old',provenance}}} as import('../src/types/framelock').StoryboardShot;
+   const before=structuredClone(shot);
+   await expect(metaModelClient.applyContinuityFix(shot)).rejects.toThrow('another frame');
+   expect(shot).toEqual(before);
+  }
+  expect(render).not.toHaveBeenCalled();expect(select).not.toHaveBeenCalled();
+ }finally{render.mockRestore();select.mockRestore();}
 });

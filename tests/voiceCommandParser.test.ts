@@ -143,11 +143,8 @@ describe('Voice Command Parser (Parse-Then-Switch)', () => {
         color: 'amber',
       });
 
-      expect(parseVoiceCommand('track video car to emerald')).toEqual({
-        kind: 'modify_video',
-        object: 'car',
-        color: 'emerald',
-      });
+      expect(parseVoiceCommand('track video car to emerald').kind).toBe('invalid_command');
+
     });
   });
 
@@ -233,4 +230,27 @@ describe('voice command parser on main', () => {
     expect(parseVoiceCommand(story)).toEqual({ kind: 'rebuild', transcript: story.replace(/\.$/, '') });
     expect(parseVoiceCommand('She describes the storm to her brother').kind).toBe('rebuild');
   });
+});
+
+
+describe('video command ambiguity',()=>{
+ for(const command of ['track video cup','recolor video cup','modify video cup to black','recolor video cup to blue and umbrella to red','recolor video cup to blue in shot 3']){
+  it(`does not mutate or rebuild for ${command}`,()=>{
+   expect(parseVoiceCommand(command).kind).toBe('invalid_command');
+  });
+ }
+ it('does not execute a video command embedded in story narration',()=>{
+  const story='I heard someone say recolor video cup to blue in my dream';
+  expect(parseVoiceCommand(story)).toEqual({kind:'rebuild',transcript:story});
+ });
+});
+
+
+describe('explicit scene numbers never fall back to the active scene',()=>{
+ for(const [text,number] of [['fix shot 10',10],['fix shot nine',9],['repair the twelfth scene',12],['make cup purple in shot 99',99],['fix #123',123]] as const){
+  it(text,()=>expect(parseVoiceCommand(text)).toMatchObject({shotNumber:number}));
+ }
+ for(const text of ['fix shot 0','fix shot -1','fix scene 2.5','fix shot banana','recolor cup in shot 0 to blue']){
+  it(text,()=>expect(parseVoiceCommand(text).kind).toBe('invalid_command'));
+ }
 });

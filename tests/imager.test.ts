@@ -113,3 +113,11 @@ describe('reference images', () => {
     expect(images.generate).toHaveBeenCalledTimes(1);
   });
 });
+
+it('never substitutes unrelated generation for a required reference edit', async () => {
+  const generate = vi.fn();
+  const edit = vi.fn().mockRejectedValue(new Error('unsupported'));
+  const imager = openAiImager({ model: 'test', images: { generate } as never, edit });
+  await expect(imager.generate({ prompt: 'edit this cup', targetObject: 'cup', seed: 0, references: ['data:image/png;base64,AA=='], requireReference: true })).rejects.toThrow('No plain-generation fallback');
+  expect(generate).not.toHaveBeenCalled();
+});

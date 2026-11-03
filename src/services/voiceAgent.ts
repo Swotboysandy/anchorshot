@@ -39,9 +39,9 @@ export async function agentAvailable(): Promise<{ ready: boolean; session: strin
   }
 }
 
-async function post(url: string, session: string, body: object) {
+async function post(url: string, session: string, body: object, signal?: AbortSignal) {
   const res = await fetch(url, {
-    method: 'POST',
+    method: 'POST', signal,
     headers: { 'Content-Type': 'application/json', 'X-Anchorshot-Session': session },
     body: JSON.stringify(body),
   });
@@ -54,13 +54,27 @@ async function post(url: string, session: string, body: object) {
  * One director turn: asks the model, runs the studio tools it requests, and repeats
  * until it answers in words. Appends everything to `messages`.
  */
-export async function runAgentTurn(session: string, messages: Message[], tools: AgentTools): Promise<string> {
+export async function runAgentTurn(session: string, messages: Message[], tools: AgentTools, signal?: AbortSignal): Promise<string> {
+  // Drop complete old turns, never an assistant/tool pair in isolation.
+  while (messages.length > 60 || JSON.stringify(messages).length > 48000) {
+    const nextTurn = messages.findIndex((message, index) => index > 0 && message.role === 'user');
+    if (nextTurn < 0) break;
+    messages.splice(0, nextTurn);
+  }
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const { message } = await post('/api/agent/turn', session, { messages });
-    messages.push(message);
+    signal?.throwIfAborted();
+    const { message } = await post('/api/agent/turn', session, { messages }, signal);
+    signal?.throwIfAborted();
+    if (!message || message.role !== 'assistant' || (message.content != null && typeof message.content !== 'string') ||
+        (message.tool_calls !== undefined && (!Array.isArray(message.tool_calls) || message.tool_calls.length > 8)))
+      throw new Error('The voice agent returned an invalid reply.');
     const calls: Array<{ id: string; function: { name: string; arguments: string } }> = message.tool_calls ?? [];
+    if (calls.some(call => !call || typeof call.id !== 'string' || !call.function || typeof call.function.name !== 'string' || typeof call.function.arguments !== 'string'))
+      throw new Error('The voice agent returned an invalid tool request.');
+    messages.push(message);
     if (!calls.length) return String(message.content ?? '').trim();
     for (const call of calls) {
+      signal?.throwIfAborted();
       let content: string;
       try {
         const run = tools[call.function.name];
@@ -93,19 +107,30 @@ export async function startAgentConversation(
   handlers: AgentHandlers,
 ): Promise<AgentConversation> {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const context = new AudioContext();
-  const analyser = context.createAnalyser();
-  analyser.fftSize = 1024;
-  context.createMediaStreamSource(stream).connect(analyser);
+  let context: AudioContext | undefined;
+  let analyser: AnalyserNode;
+  try {
+    context = new AudioContext();
+    await context.resume();
+    analyser = context.createAnalyser();
+    analyser.fftSize = 1024;
+    context.createMediaStreamSource(stream).connect(analyser);
+  } catch (error) {
+    stream.getTracks().forEach(track => track.stop());
+    await context?.close().catch(() => {});
+    throw error;
+  }
   const samples = new Float32Array(analyser.fftSize);
   const level = () => {
     analyser.getFloatTimeDomainData(samples);
     return Math.sqrt(samples.reduce((sum, v) => sum + v * v, 0) / samples.length);
   };
 
+  const controller = new AbortController();
   let ended = false;
   let speaking = false;
   let recorder: MediaRecorder | null = null;
+  let watch: ReturnType<typeof setInterval> | undefined;
   const messages: Message[] = [];
 
   const say = async (text: string) => {
@@ -117,7 +142,7 @@ export async function startAgentConversation(
   };
 
   const listen = () =>
-    new Promise<Blob | null>((resolve) => {
+    new Promise<Blob | null>((resolve, reject) => {
       const chunks: Blob[] = [];
       const active = new MediaRecorder(stream);
       recorder = active;
@@ -126,14 +151,20 @@ export async function startAgentConversation(
       active.ondataavailable = (event) => {
         if (event.data.size) chunks.push(event.data);
       };
-      active.onstop = () => resolve(heard && !ended ? new Blob(chunks, { type: active.mimeType || 'audio/webm' }) : null);
+      active.onstop = () => {
+        clearInterval(watch);
+        resolve(heard && !ended ? new Blob(chunks, { type: active.mimeType || 'audio/webm' }) : null);
+      };
+      active.onerror = () => {
+        clearInterval(watch);
+        reject(new Error('The microphone recording failed.'));
+      };
       active.start();
       handlers.onStatus('Agent listening.');
       const startedAt = Date.now();
       let noise = 0;
       let loudTicks = 0;
-      let heardAt = 0;
-      const watch = setInterval(() => {
+      watch = setInterval(() => {
         if (ended) {
           clearInterval(watch);
           if (active.state !== 'inactive') active.stop();
@@ -144,7 +175,7 @@ export async function startAgentConversation(
           noise = Math.max(noise, now);
           return;
         }
-        if (heard && Date.now() - heardAt > MAX_TURN_MS) {
+        if (Date.now() - startedAt > MAX_TURN_MS) {
           clearInterval(watch);
           active.stop();
           return;
@@ -153,7 +184,6 @@ export async function startAgentConversation(
           // A click or cough is too brief to count as the director speaking.
           if (++loudTicks >= SPEECH_TICKS && !heard) {
             heard = true;
-            heardAt = Date.now();
           }
           quietSince = 0;
         } else if (!heard) {
@@ -168,6 +198,19 @@ export async function startAgentConversation(
       }, 100);
     });
 
+  const endSession = async () => {
+    if (ended) return;
+    ended = true;
+    controller.abort();
+    clearInterval(watch);
+    speechService.stopSpeaking();
+    if (recorder && recorder.state !== 'inactive') {
+      try { recorder.stop(); } catch { /* cleanup still stops the tracks below */ }
+    }
+    stream.getTracks().forEach(track => track.stop());
+    await context?.close().catch(() => {});
+  };
+
   void (async () => {
     try {
       await say(GREETING);
@@ -178,7 +221,7 @@ export async function startAgentConversation(
         handlers.onStatus('Agent thinking.');
         let transcript = '';
         try {
-          transcript = (await post('/api/muse/transcribe', session, { audio: await toDataUrl(clip) })).transcript;
+          transcript = (await post('/api/muse/transcribe', session, { audio: await toDataUrl(clip) }, controller.signal)).transcript;
         } catch (error) {
           const message = error instanceof Error ? error.message : '';
           // Background noise stays quiet; a real failure is always spoken.
@@ -191,15 +234,16 @@ export async function startAgentConversation(
         messages.push({ role: 'user', content: transcript });
         let reply: string;
         try {
-          reply = await runAgentTurn(session, messages, tools);
+          reply = await runAgentTurn(session, messages, tools, controller.signal);
         } catch (error) {
-          messages.pop();
           reply = `I could not respond. ${error instanceof Error ? error.message : ''}`.trim();
+          if (!ended) messages.push({ role: 'assistant', content: reply });
         }
         if (!ended) await say(reply || 'I have no reply for that.');
       }
     } catch (error) {
       if (!ended) {
+        await endSession();
         handlers.onError(error instanceof Error ? error.message : 'The voice agent stopped.');
         handlers.onEnd();
       }
@@ -207,14 +251,8 @@ export async function startAgentConversation(
   })();
 
   return {
-    endSession: async () => {
-      ended = true;
-      speechService.stopSpeaking();
-      if (recorder && recorder.state === 'recording') recorder.stop();
-      stream.getTracks().forEach((track) => track.stop());
-      await context.close().catch(() => {});
-    },
-    getInputVolume: () => (speaking ? 0 : level()),
-    getOutputVolume: () => (speaking ? 0.5 : 0),
+    endSession,
+    getInputVolume: () => (ended || speaking ? 0 : level()),
+    getOutputVolume: () => (!ended && speaking ? 0.5 : 0),
   };
 }

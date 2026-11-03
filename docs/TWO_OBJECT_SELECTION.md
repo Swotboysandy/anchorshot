@@ -2,7 +2,7 @@
 
 Open the Kitchen to ocean study. Select real cup, load a photo/sample, trace or correct its mask, and Apply cup to dream. Select umbrella, upload a photo or Use umbrella sample, trace or load the authored sample mask, correct it, and Apply umbrella to dream.
 
-Each editor has separate source pixels, mask, undo history for the current editing session and approval revision. Trace, Add brush, Erase brush, Clear and Undo work for both. Cancel retains the last approval. Editing clears the quality report and disables transition exports until the draft is applied or cancelled. Uploads remain in browser memory; reload does not persist them.
+Each editor has separate source pixels, mask, undo history for the current editing session and approval revision. Trace, Add brush, Erase brush, Clear and Undo work for both. Cancel retains the last approval. Editing clears the quality report and disables transition exports until the draft is applied or cancelled. Approved sources and masks now persist locally per project in IndexedDB; refresh and switching are covered by browser tests. Draft undo history is still limited to the current editing session.
 
 Cup and umbrella are fitted to distinct fixed slots: cup centered x250, bottom360, max200x190; umbrella centered x600, bottom380, max250x300 in the 800x450 frame. The masks remain independent and are combined only for rendering. Any overlap is rejected. Restoring the illustrated cup retains the umbrella; removing the umbrella retains the cup. This is stationary pixel protection, not motion tracking, relighting, automatic semantic selection or neural morphing.
 

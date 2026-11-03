@@ -238,13 +238,14 @@ describe('Role 2: SAM 3.1 maskRef, neutral object selection, track storage & amb
       .post('/api/masks/disambiguate')
       .set('X-Anchorshot-Session', health.body.sessionToken)
       .send({
-        maskRef: 'sam-3.1:cup:0:v2',
+        sourceHash:body.sourceHash, segmentationId:checkRes.body.requestId, maskSessionId: health.body.maskSessionId, maskRef: 'sam-3.1:cup:0:v2',
         selectedObjectId: '0',
+        shotNumber:4,
         status: 'consistent',
       });
 
     expect(resolveRes.status).toBe(200);
-    expect(resolveRes.body.track.status).toBe('consistent');
+    expect(resolveRes.body.track.status).toBe('uncertain');
 
     // 4. Verify stale track invalidation when ruleRevision increments
     const nextRevRes = await request(app)
@@ -340,19 +341,70 @@ describe('Role 2: SAM 3.1 maskRef, neutral object selection, track storage & amb
       .send(body);
     expect(rateLimitedRes.status).toBe(429);
 
-    // Cross-shot disambiguation returns 404 when shotNumber mismatches, and re-keys maskRef when shotNumber matches
+    // A wrong shot or an object that was never returned cannot be selected.
     const wrongShot = await request(app)
       .post('/api/masks/disambiguate')
       .set('X-Anchorshot-Session', health.body.sessionToken)
-      .send({ maskRef: 'sam-3.1:cup:0:v2', selectedObjectId: '1', shotNumber: 9 });
+      .send({ sourceHash:body.sourceHash, segmentationId:rev2Check.body.requestId, maskSessionId: health.body.maskSessionId, maskRef: 'sam-3.1:cup:0:v2', selectedObjectId: '1', shotNumber: 9 });
     expect(wrongShot.status).toBe(404);
 
     const rightShot = await request(app)
       .post('/api/masks/disambiguate')
       .set('X-Anchorshot-Session', health.body.sessionToken)
-      .send({ maskRef: 'sam-3.1:cup:0:v2', selectedObjectId: '1', shotNumber: 2 });
-    expect(rightShot.status).toBe(200);
-    expect(rightShot.body.track.maskRef).toBe('sam-3.1:cup:1:v2');
-    expect(rightShot.body.track.objectId).toBe('1');
+      .send({ sourceHash:body.sourceHash, segmentationId:rev2Check.body.requestId, maskSessionId: health.body.maskSessionId, maskRef: 'sam-3.1:cup:0:v2', selectedObjectId: '1', shotNumber: 2 });
+    expect(rightShot.status).toBe(404);
   });
+});
+
+
+it('rejects an old mask session even when a restarted server recreates the same mask reference',async()=>{
+ const first=createApp({settings:()=>({key:'',requestLimit:10})});
+ const second=createApp({settings:()=>({key:'',requestLimit:10})});
+ const h1=(await request(first).get('/api/health')).body,h2=(await request(second).get('/api/health')).body;
+ expect(h1.maskSessionId).not.toBe(h2.maskSessionId);
+ const segment=async(app:ReturnType<typeof createApp>,health:any)=>(await request(app).post('/api/segment/check').set('X-Anchorshot-Session',health.sessionToken).send({...body,shotNumber:1,ruleRevision:1})).body;
+ const old=await segment(first,h1),current=await segment(second,h2);
+ expect(old.maskRef).toBe(current.maskRef);
+ const before=(await request(second).get('/api/masks')).body;
+ const response=await request(second).post('/api/masks/disambiguate').set('X-Anchorshot-Session',h2.sessionToken).send({maskSessionId:old.maskSessionId,maskRef:old.maskRef,selectedObjectId:'0',shotNumber:1});
+ expect(response.status).toBe(409);expect(response.body.code).toBe('MASK_SESSION_EXPIRED');
+ expect((await request(second).get('/api/masks')).body).toEqual(before);
+});
+
+
+it('rejects stale image identity when the same shot and mask reference are reused within one server session',async()=>{
+ const app=createApp({settings:()=>({key:'',requestLimit:10})});
+ const health=(await request(app).get('/api/health')).body;
+ const post=(route:string,value:unknown)=>request(app).post(route).set('X-Anchorshot-Session',health.sessionToken).send(value);
+ const first=await post('/api/segment/check',{...body,shotNumber:1,ruleRevision:1});
+ const bytes=await sharp({create:{width:2,height:2,channels:4,background:'#3355ff'}}).png().toBuffer();
+ const replacement={...body,image:`data:image/png;base64,${bytes.toString('base64')}`,sourceHash:createHash('sha256').update(bytes).digest('hex'),shotNumber:1,ruleRevision:1};
+ const second=await post('/api/segment/check',replacement);
+ expect(second.body.maskRef).toBe(first.body.maskRef);
+ const before=(await request(app).get('/api/masks')).body;
+ const selection={maskSessionId:health.maskSessionId,maskRef:first.body.maskRef,selectedObjectId:'0',shotNumber:1,sourceHash:body.sourceHash};
+ const stale=await post('/api/masks/disambiguate',selection);
+ expect(stale.status).toBe(409);expect(stale.body.code).toBe('MASK_SOURCE_CHANGED');
+ expect((await request(app).get('/api/masks')).body).toEqual(before);
+ expect((await post('/api/masks/disambiguate',{...selection,sourceHash:replacement.sourceHash,shotNumber:undefined})).status).toBe(400);
+ expect((await post('/api/masks/disambiguate',{...selection,sourceHash:replacement.sourceHash,segmentationId:second.body.requestId})).status).toBe(200);
+});
+
+
+it('rejects confirmation from an older segmentation of the identical image and revision',async()=>{
+ const app=createApp({settings:()=>({key:'',requestLimit:10})});
+ const health=(await request(app).get('/api/health')).body;
+ const post=(route:string,value:unknown)=>request(app).post(route).set('X-Anchorshot-Session',health.sessionToken).send(value);
+ const input={...body,shotNumber:1,ruleRevision:1};
+ const first=(await post('/api/segment/check',input)).body;
+ const second=(await post('/api/segment/check',input)).body;
+ expect(first.maskRef).toBe(second.maskRef);expect(first.requestId).not.toBe(second.requestId);
+ const selection={maskSessionId:health.maskSessionId,sourceHash:body.sourceHash,maskRef:first.maskRef,shotNumber:1,selectedObjectId:'0',segmentationId:first.requestId};
+ const before=(await request(app).get('/api/masks')).body;
+ const stale=await post('/api/masks/disambiguate',selection);
+ expect(stale.status).toBe(409);expect(stale.body.code).toBe('MASK_RESULT_CHANGED');
+ expect((await request(app).get('/api/masks')).body).toEqual(before);
+ expect((await post('/api/masks/disambiguate',{...selection,segmentationId:undefined})).status).toBe(409);
+ const current=await post('/api/masks/disambiguate',{...selection,segmentationId:second.requestId});
+ expect(current.status).toBe(200);expect(current.body.track.segmentationId).toBe(second.requestId);
 });

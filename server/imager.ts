@@ -15,6 +15,7 @@ export interface FrameRequest {
   seed: number;
   /** Earlier frames (data URLs) showing the characters, for models that accept references. */
   references?: string[];
+  requireReference?: boolean;
 }
 export interface GeneratedFrame extends CheckedInput {
   model: string;
@@ -23,7 +24,7 @@ export interface GeneratedFrame extends CheckedInput {
 }
 export interface Imager {
   model: string;
-  generate(request: FrameRequest, signal?: AbortSignal): Promise<GeneratedFrame>;
+  generate(request: FrameRequest, signal?: AbortSignal, beforeRetry?: () => void): Promise<GeneratedFrame>;
 }
 
 export class ImagerOutputError extends Error {}
@@ -60,7 +61,7 @@ export function openAiImager(options: {
 }): Imager {
   return {
     model: options.model,
-    async generate({ prompt, targetObject, seed, references }, signal) {
+    async generate({ prompt, targetObject, seed, references, requireReference }, signal, beforeRetry) {
       if (references?.length && options.edit) {
         const edited = await options.edit(prompt, references, signal).catch(() => undefined);
         if (edited) {
@@ -68,6 +69,8 @@ export function openAiImager(options: {
           return { ...frame, model: options.model, provenance: 'live-model', seed };
         }
       }
+      if (requireReference) throw new ImagerOutputError('The image provider could not edit this reference. No plain-generation fallback was applied.');
+      if (references?.length && options.edit) beforeRetry?.();
       const response = await options.images.generate(
         {
           model: options.model,

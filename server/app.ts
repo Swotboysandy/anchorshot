@@ -1,6 +1,7 @@
 import { randomBytes, createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve, join, isAbsolute } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import { verifyMaskedPixelDiff } from '../src/services/maskIntegrity';
 import express, { type ErrorRequestHandler } from 'express';
 import sharp from 'sharp';
 import {
@@ -15,161 +16,21 @@ import {
 import { ImagerOutputError, type Imager } from './imager';
 import { readAudioDataUrl, TranscriberOutputError, type Transcriber } from './transcriber';
 import type { AgentMessage, VoiceAgent } from './agent';
+import { validateAgentMessages } from './agent';
 import { AnimaticError, ffmpegAvailable, renderAnimatic, type AnimaticShot, type RenderAnimaticOptions } from './animatic';
 import { fixturePlanner, PlannerOutputError, type Planner } from './planner';
 import type { ContinuityEvidenceStatus, SegmentationResult } from '../src/types';
 
-// Resolve the generative-edit image input into raw bytes. It may arrive as a data
-// URL, raw base64, a local job/public asset URL, an absolute disk path, or a remote
-// URL — read local files directly and fetch remote ones so sharp never decodes a
-// path string as base64.
-async function resolveImageBuffer(input: string): Promise<Buffer> {
-  if (input.startsWith('data:')) {
-    return Buffer.from(input.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-  }
-  // Local-AI job asset: /api/local-ai/jobs/:id/assets/:file -> .artifacts/local-ai/ui-jobs/:id/:file
-  const jobAsset = input.match(/\/(?:api\/)?local-ai\/jobs\/([a-f0-9-]{36})\/assets\/([\w.-]+)$/);
-  if (jobAsset) {
-    const file = resolve(process.cwd(), '.artifacts/local-ai/ui-jobs', jobAsset[1], jobAsset[2]);
-    if (existsSync(file)) return readFileSync(file);
-  }
-  // Other root-relative URLs (e.g. /assets/...) are served from public/.
-  // Checked before the disk-path branch: on Windows path.isAbsolute('/x') is true.
-  if (input.startsWith('/')) {
-    const publicFile = resolve(process.cwd(), 'public', input.replace(/^\/+/, ''));
-    if (existsSync(publicFile)) return readFileSync(publicFile);
-  }
-  // Absolute local disk path (e.g. C:\... or /home/...).
-  if (isAbsolute(input) && existsSync(input)) return readFileSync(input);
-  // Remote URL.
-  if (/^https?:\/\//.test(input)) {
-    const res = await fetch(input);
-    if (!res.ok) throw new Error(`Failed to fetch image (${res.status}).`);
-    return Buffer.from(await res.arrayBuffer());
-  }
-  // Fall back to treating it as raw base64.
-  return Buffer.from(input, 'base64');
-}
-
-// Server-side mirror of the client COLOR_HEX_MAP rgb values (src/services/canvasEngine.ts),
-// kept here because that module targets the browser (document/canvas) and cannot be imported.
-const COLOR_RGB: Record<string, [number, number, number]> = {
-  blue: [37, 99, 235], cobalt: [29, 78, 216], cyan: [8, 145, 178],
-  red: [220, 38, 38], crimson: [225, 29, 72], amber: [217, 119, 6],
-  yellow: [234, 179, 8], gold: [202, 138, 4], green: [5, 150, 105],
-  emerald: [16, 185, 129], white: [226, 232, 240], purple: [124, 58, 237],
-};
-
-// Normalize a color name into the rule vocabulary so equivalents do not false-positive
-// as mismatches (matches the client extractContinuityRules normalization).
-function normalizeColorName(name: string): string {
-  const c = name.toLowerCase().trim();
-  if (c === 'cobalt' || c === 'cyan') return 'blue';
-  if (c === 'crimson') return 'red';
-  if (c === 'yellow' || c === 'gold') return 'amber';
-  if (c === 'green') return 'emerald';
-  return c;
-}
-
-function nearestColorName(r: number, g: number, b: number): string {
-  let best = 'blue';
-  let bestDist = Infinity;
-  for (const [name, [cr, cg, cb]] of Object.entries(COLOR_RGB)) {
-    const d = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2;
-    if (d < bestDist) { bestDist = d; best = name; }
-  }
-  return best;
-}
-
-interface DecodedFrame {
-  data: Buffer;
-  width: number;
-  height: number;
-}
-
-// Sample the mean RGB inside a detected object's bounds from a once-decoded RGB frame
-// and map it to the nearest rule-vocabulary color name.
-function observeColorInBounds(
-  frame: DecodedFrame,
-  bounds: { left: number; top: number; right: number; bottom: number },
-): string {
-  const left = Math.max(0, Math.min(frame.width - 1, Math.round(bounds.left)));
-  const top = Math.max(0, Math.min(frame.height - 1, Math.round(bounds.top)));
-  const right = Math.max(left + 1, Math.min(frame.width, Math.round(bounds.right)));
-  const bottom = Math.max(top + 1, Math.min(frame.height, Math.round(bounds.bottom)));
-  let rSum = 0, gSum = 0, bSum = 0, count = 0;
-  for (let y = top; y < bottom; y++) {
-    for (let x = left; x < right; x++) {
-      const i = (y * frame.width + x) * 3;
-      rSum += frame.data[i];
-      gSum += frame.data[i + 1];
-      bSum += frame.data[i + 2];
-      count++;
-    }
-  }
-  if (count === 0) return normalizeColorName(nearestColorName(0, 0, 0));
-  return normalizeColorName(nearestColorName(rSum / count, gSum / count, bSum / count));
-}
-
-interface ContinuityRuleInput {
-  id: string;
-  targetObject: string;
-  property: string;
-  expectedValue: string;
-  revision?: number;
-}
-
-// Evaluate each ContinuityRule against the detected objects, sampling observed color
-// from the keyframe, and reusing evaluateSamContinuityCheck for the verdict.
-async function buildContinuityFindings(
-  rules: ContinuityRuleInput[],
-  detectedObjects: Array<{ label?: string; concept?: string; objectId?: string; bounds?: any; confidence?: number }>,
-  frameBuffer: Buffer | null,
-) {
-  let frame: DecodedFrame | null = null;
-  if (frameBuffer) {
-    try {
-      const { data, info } = await sharp(frameBuffer).removeAlpha().raw().toBuffer({ resolveWithObject: true });
-      frame = { data, width: info.width, height: info.height };
-    } catch { frame = null; }
-  }
-
-  const findings = [];
-  for (const rule of rules) {
-    if (!rule?.targetObject || !rule?.expectedValue) continue;
-    const target = rule.targetObject.toLowerCase().trim();
-    const matched = detectedObjects.filter((o) => {
-      const hay = `${o.concept ?? ''} ${o.label ?? ''}`.toLowerCase();
-      return hay.includes(target) || target.includes((o.concept ?? '').toLowerCase().trim() || '\0');
-    });
-    const candidates = matched.length > 0 ? matched : detectedObjects;
-
-    let observedValue: string | undefined;
-    if (rule.property === 'color' && frame && candidates[0]?.bounds) {
-      observedValue = observeColorInBounds(frame, candidates[0].bounds);
-    }
-
-    const check = evaluateSamContinuityCheck(candidates as any, rule.targetObject, {
-      expectedValue: normalizeColorName(rule.expectedValue),
-      observedValue,
-      revision: rule.revision,
-    });
-
-    findings.push({
-      shotIndex: 0, // ponytail: shotIndex fallback to 0 when scene match ambiguous; refine if multi-object sequences need per-scene binding
-      status: check.status,
-      ruleId: rule.id,
-      targetObject: rule.targetObject,
-      expectedValue: rule.expectedValue,
-      observedValue,
-      maskRef: check.maskRef ?? undefined,
-      objectId: check.selectedObjectId ?? undefined,
-      confidence: check.confidence,
-      explanation: check.explanation,
-      proposedAction: 'recolor' as const,
-    });
-  }
-  return findings;
+// Only app-owned images and embedded image bytes are accepted. Never read arbitrary
+// disk paths or fetch a user-supplied URL on the server's behalf.
+async function resolveImageBuffer(input: string, frameFolder: string, jobFolder: string): Promise<Buffer> {
+  const embedded = /^data:image\/(?:png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(input);
+  if (embedded) return Buffer.from(embedded[1], 'base64');
+  const frame = /^\/api\/muse\/frames\/([a-f0-9]{64}\.png)$/.exec(input);
+  const job = /^\/api\/local-ai\/jobs\/([a-f0-9-]{36})\/assets\/(generated-image\.png|frame-\d{3}\.png)(?:\?rev=\d+)?$/.exec(input);
+  const file = frame ? join(frameFolder, frame[1]) : job ? join(jobFolder, job[1], job[2]) : '';
+  if (!file || !existsSync(file)) throw new UserError('Select an available project image or upload PNG, JPEG or WebP bytes.', 400);
+  return readFileSync(file);
 }
 
 interface Settings {
@@ -187,6 +48,7 @@ interface Options {
   planner?: Planner;
   imager?: Imager;
   frameFolder?: string;
+  jobFolder?: string;
   transcriber?: Transcriber;
   agent?: VoiceAgent;
   renderAnimatic?: (
@@ -202,6 +64,7 @@ export function createApp(options: Options) {
   const app = express();
   const sessionToken = randomBytes(24).toString('hex');
   const trackStore = new MaskTrackStore();
+  const maskSessionId = randomBytes(16).toString('hex');
   const planner = options.planner ?? fixturePlanner;
   let requestsUsed = 0;
   let active = false;
@@ -209,6 +72,7 @@ export function createApp(options: Options) {
   let transcribeActive = false;
   let exportActive = false;
   const frameFolder = options.frameFolder ?? resolve('.artifacts/frames');
+  const jobFolder = options.jobFolder ?? resolve('.artifacts/local-ai/ui-jobs');
 
   app.disable('x-powered-by');
   app.use('/api', (req, res, next) => {
@@ -228,6 +92,7 @@ export function createApp(options: Options) {
       model: 'sam-3.1',
       models: ['sam-3.1', 'muse-spark-1.3', 'muse-voice-transcribe-1.0', 'muse-image-1.0'],
       sessionToken,
+      maskSessionId,
       requestsUsed,
       requestLimit: settings.requestLimit,
       tracksStored: trackStore.listTracks().length,
@@ -241,6 +106,12 @@ export function createApp(options: Options) {
   // A film carries every full-size frame; other routes keep the smaller limit.
   app.use('/api/export/animatic', express.json({ limit: '128mb' }));
   app.use('/api', express.json({ limit: '12mb' }));
+
+  const reserveRequest = () => {
+    if (requestsUsed >= options.settings().requestLimit)
+      throw new UserError('The session request limit has been reached. No further call was sent.', 429);
+    requestsUsed++;
+  };
 
   const hasValidSession = (req: express.Request) => {
     const token =
@@ -279,7 +150,7 @@ export function createApp(options: Options) {
         rawRuleRevision >= 1
           ? Math.floor(rawRuleRevision)
           : 1;
-      requestsUsed++;
+      reserveRequest();
       const result = await (options.segment ?? requestSam)(
         input,
         settings.key,
@@ -341,7 +212,7 @@ export function createApp(options: Options) {
 
       let segmentation: SegmentationResult;
       if (settings.key) {
-        requestsUsed++;
+        reserveRequest();
         segmentation = await (options.segment ?? requestSam)(
           input,
           settings.key,
@@ -372,27 +243,18 @@ export function createApp(options: Options) {
       // Invalidate stale selections/proposals for this shot/concept if sourceHash or ruleRevision changed
       trackStore.invalidateBySourceOrRule(shotNumber, input.sourceHash, revision, input.concept);
 
-      const storedTrack =
-        primaryObj && check.maskRef
-          ? trackStore.recordTrack({
-              maskRef: check.maskRef,
-              concept: input.concept,
-              shotNumber,
-              revision,
-              objectId: primaryObj.objectId,
-              bounds: primaryObj.bounds,
-              confidence: check.confidence,
-              sourceHash: input.sourceHash,
-              status: check.status,
-              evidence: check.explanation,
-              provenance: segmentation.provenance ?? 'offline-fixture',
-              createdAt: Date.now(),
-            })
-          : null;
+      // Retain each returned candidate with its own pixels/bounds identity.
+      const storedCandidates = segmentation.objects.map(object => trackStore.recordTrack({
+        segmentationId:segmentation.requestId, maskRef: object.maskRef!, concept:input.concept, shotNumber, revision, objectId:object.objectId,
+        bounds:object.bounds, confidence:object.confidence ?? 0, sourceHash:input.sourceHash,
+        status:check.status, evidence:check.explanation, provenance:segmentation.provenance ?? 'offline-fixture', createdAt:Date.now(),
+      }));
+      const storedTrack = storedCandidates.find(track => track.objectId === primaryObj?.objectId) ?? null;
 
       if (!controller.signal.aborted) {
         res.json({
           ...segmentation,
+          maskSessionId,
           maskRef: check.maskRef ?? undefined,
           selectedObjectId: check.selectedObjectId,
           ambiguityStatus: check.status,
@@ -433,6 +295,7 @@ export function createApp(options: Options) {
   app.post('/api/masks/disambiguate', (req, res) => {
     if (!hasValidSession(req))
       return res.status(403).json({ error: 'Refresh the page before disambiguating a mask.' });
+    if(req.body?.maskSessionId!==maskSessionId)return res.status(409).json({error:'This mask belongs to an earlier server session. Its saved raster can still be selected locally.',code:'MASK_SESSION_EXPIRED'});
     const { maskRef, selectedObjectId, status, shotNumber, bounds, confidence } = req.body as {
       maskRef?: string;
       selectedObjectId?: string;
@@ -477,6 +340,13 @@ export function createApp(options: Options) {
             bottom: bounds.bottom,
           }
         : undefined;
+    const sourceHash=req.body?.sourceHash;
+    if(typeof sourceHash!=='string'||!/^[a-f0-9]{64}$/.test(sourceHash)||!Number.isSafeInteger(shotNumber)||!validShotNumber)
+      return res.status(400).json({error:'Provide the source image hash and exact shot number for this selection.'});
+    const sourceTrack=trackStore.getTrack(maskRef.trim(),validShotNumber);
+    if(!sourceTrack)return res.status(404).json({error:'This stored track is no longer available.',code:'MASK_TRACK_EXPIRED'});
+    if(sourceTrack.sourceHash!==sourceHash)return res.status(409).json({error:'This track now belongs to another source image.',code:'MASK_SOURCE_CHANGED'});
+    if(!sourceTrack.segmentationId||req.body?.segmentationId!==sourceTrack.segmentationId)return res.status(409).json({error:'This selection belongs to an earlier segmentation result. Its saved raster remains available locally.',code:'MASK_RESULT_CHANGED'});
     const updated = trackStore.disambiguate(
       maskRef.trim(),
       String(selectedObjectId).trim(),
@@ -519,7 +389,7 @@ export function createApp(options: Options) {
         if (!res.writableEnded) controller.abort();
       });
       try {
-        requestsUsed++;
+        reserveRequest();
         const result = await options.transcriber.transcribe(clip, controller.signal);
         if (!controller.signal.aborted) res.json(result);
       } catch (error) {
@@ -570,7 +440,11 @@ export function createApp(options: Options) {
         ? Math.floor(req.body.previousRevision)
         : 0;
     try {
-      res.json(await planner.plan(transcript, previousRevision + 1));
+      if (transcript.length > 12000) return res.status(400).json({ error: 'Keep the script under 12000 characters.' });
+      const controller = new AbortController();
+      res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+      if (planner !== fixturePlanner) reserveRequest();
+      res.json(await planner.plan(transcript, previousRevision + 1, controller.signal, reserveRequest));
     } catch (error) {
       if (error instanceof PlannerOutputError) return res.status(502).json({ error: error.message });
       next(error);
@@ -606,7 +480,7 @@ export function createApp(options: Options) {
       if (!res.writableEnded) controller.abort();
     });
     try {
-      requestsUsed++;
+      reserveRequest();
       const frame = await options.imager.generate(
         {
           prompt: prompt.trim(),
@@ -620,6 +494,7 @@ export function createApp(options: Options) {
             .map((file) => `data:image/png;base64,${readFileSync(join(frameFolder, file)).toString('base64')}`),
         },
         controller.signal,
+        reserveRequest,
       );
       if (controller.signal.aborted) return;
       const { image, ...details } = frame;
@@ -651,19 +526,23 @@ export function createApp(options: Options) {
       return res.status(403).json({ error: 'Refresh the page before talking to the agent.' });
     if (!options.agent)
       return res.status(501).json({ error: 'No voice agent is connected. Set AGENT_PROVIDER in .env.local.' });
-    const messages = req.body?.messages;
-    if (!Array.isArray(messages) || !messages.length || messages.length > 80)
-      return res.status(400).json({ error: 'Send the conversation so far.' });
+    let messages: AgentMessage[];
+    try { messages = validateAgentMessages(req.body?.messages); }
+    catch (error) { return res.status(400).json({ error: (error as Error).message }); }
     if (requestsUsed >= options.settings().requestLimit)
       return res
         .status(429)
         .json({ error: 'The session request limit has been reached. No further call was sent.' });
+    const controller = new AbortController();
+    const abort = () => { if (!res.writableEnded) controller.abort(); };
+    res.once('close', abort);
     try {
-      requestsUsed++;
-      res.json({ message: await options.agent.turn(messages as AgentMessage[]) });
+      reserveRequest();
+      const message = await options.agent.turn(messages, controller.signal);
+      if (!controller.signal.aborted) res.json({ message });
     } catch (error) {
-      next(error);
-    }
+      if (!controller.signal.aborted) next(error);
+    } finally { res.off('close', abort); }
   });
 
   /**
@@ -685,444 +564,162 @@ export function createApp(options: Options) {
       const seconds = Number(shot?.seconds);
       if (!image || !(seconds >= 0.5 && seconds <= 15))
         return res.status(400).json({ error: 'Each shot needs a PNG, JPEG or WebP frame and 0.5 to 15 seconds.' });
-      parsed.push({ image: Buffer.from(image, 'base64'), seconds, movement: typeof shot.movement === 'string' ? shot.movement : undefined });
+      let video: Buffer | undefined;
+      const startSeconds = Number(shot.startSeconds ?? 0);
+      if (!Number.isFinite(startSeconds) || startSeconds < 0 || startSeconds > 3600)
+        return res.status(400).json({ error: 'The video start time is invalid.' });
+      if (shot.video !== undefined) {
+        const match = typeof shot.video === 'string' && /^\/api\/local-ai\/jobs\/([a-f0-9-]{36})\/assets\/generated-video\.mp4(?:\?rev=\d+)?$/.exec(shot.video);
+        if (!match) return res.status(400).json({ error: 'Export supports saved local video clips only.' });
+        const file = join(jobFolder, match[1], 'generated-video.mp4');
+        if (!existsSync(file)) return res.status(404).json({ error: 'A video clip is missing. Restore it before exporting.' });
+        if (statSync(file).size > 64 * 1024 * 1024) return res.status(413).json({ error: 'This video clip exceeds the 64 MB export limit.' });
+        video = readFileSync(file);
+      }
+      let narration: Buffer | undefined;
+      if (shot.narration !== undefined) {
+        const match=typeof shot.narration==='string' && /^data:audio\/(?:mpeg|wav|x-wav|webm|ogg|mp4);base64,([A-Za-z0-9+/]+={0,2})$/.exec(shot.narration);
+        if(!match || match[1].length>6990508) return res.status(400).json({error:'Narration must be a local audio file of at most 5 MB.'});
+        narration=Buffer.from(match[1],'base64');
+        if(!narration.length||narration.length>5*1024*1024)return res.status(400).json({error:'Narration audio is empty or too large.'});
+      }
+      parsed.push({ image: Buffer.from(image, 'base64'), seconds, video, startSeconds, narration,
+        movement: typeof shot.movement === 'string' ? shot.movement : undefined });
     }
     if (!(await (options.ffmpegAvailable ?? ffmpegAvailable)()))
       return res.status(501).json({ error: 'MP4 export needs ffmpeg on this computer.' });
+    if(res.destroyed)return; // The client may leave while the availability probe runs.
     if (exportActive) return res.status(409).json({ error: 'An export is already running.' });
     exportActive = true;
+    const exportController=new AbortController();
+    const cancelExport=()=>{if(!res.writableEnded)exportController.abort();};
+    res.once('close',cancelExport);
     try {
       const burnInTimecode = Boolean(req.body?.burnInTimecode);
-      const video = await (options.renderAnimatic ?? renderAnimatic)(parsed, undefined, undefined, { burnInTimecode });
-      res.type('video/mp4').send(video);
+      const video = await (options.renderAnimatic ?? renderAnimatic)(parsed, undefined, undefined, { burnInTimecode,signal:exportController.signal });
+      if(!exportController.signal.aborted)res.type('video/mp4').send(video);
     } catch (error) {
+      if(exportController.signal.aborted)return;
       if (error instanceof AnimaticError) return res.status(500).json({ error: 'The MP4 could not be encoded.' });
       next(error);
     } finally {
+      res.removeListener('close',cancelExport);
       exportActive = false;
     }
   });
 
-  /**
-   * Meta Muse Image Generation Endpoint: `POST /api/meta/generate-frame`
-   * Calls `muse-image-1.0` on `https://api.meta.ai/v1/images/generations` and returns PNG data URL.
-   */
-  app.post('/api/meta/generate-frame', async (req, res) => {
-    if (!hasValidSession(req)) {
-      return res.status(403).json({ error: 'Refresh the page before generating a frame.' });
-    }
-    const settings = options.settings();
-    if (!settings.key) {
-      return res.status(503).json({ error: 'Meta AI key not configured.' });
-    }
-    const { prompt, width = 800, height = 450 } = req.body || {};
-    if (typeof prompt !== 'string' || !prompt.trim()) {
-      return res.status(400).json({ error: 'Provide a valid visual prompt.' });
-    }
+  // Obsolete prototype routes must not bypass the configured providers or budget.
+  app.post('/api/meta/generate-frame', (_req, res) => res.status(410).json({
+    error: 'Use /api/muse/image with the configured image provider and session token.',
+  }));
+  app.post('/api/meta/direct-video', (_req, res) => res.status(501).json({
+    error: 'A video-directing provider is not connected. Local video generation is available separately.',
+  }));
 
+  // This local inspection is not a video-language model or a temporal tracker.
+  // Only persisted candidates are returned; neither scenes nor speech are invented.
+  app.post('/api/meta/video-understand', async (req, res, next) => {
+    if (!hasValidSession(req)) return res.status(403).json({ error: 'Refresh the page before reviewing video.' });
+    const { jobId, shotIndex = 0 } = req.body ?? {};
+    if (typeof jobId !== 'string' || !/^[a-f0-9-]{36}$/.test(jobId) || !Number.isInteger(shotIndex) || shotIndex < 0 || shotIndex > 11)
+      return res.status(400).json({ error: 'Choose a saved local video and its shot.' });
     try {
-      const metaRes = await fetch('https://api.meta.ai/v1/images/generations', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${settings.key}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'muse-image-1.0',
-          prompt: prompt.trim(),
-          size: '512x512',
-        }),
-      });
-
-      if (!metaRes.ok) {
-        const errText = await metaRes.text();
-        return res.status(metaRes.status).json({ error: `Meta Image API returned error: ${errText.slice(0, 200)}` });
-      }
-
-      const metaData = await metaRes.json();
-      const b64 = metaData.data?.[0]?.b64_json;
-      if (!b64) {
-        return res.status(502).json({ error: 'No image data returned from muse-image-1.0' });
-      }
-
-      const webpBuf = Buffer.from(b64, 'base64');
-      const pngBuf = await sharp(webpBuf)
-        .resize(Number(width) || 800, Number(height) || 450, { fit: 'cover' })
-        .png()
-        .toBuffer();
-
-      res.json({
-        imageUrl: `data:image/png;base64,${pngBuf.toString('base64')}`,
-        model: 'muse-image-1.0',
-        provenance: 'live-muse-image-1.0',
-        prompt,
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: `Image generation failed: ${err.message}` });
-    }
+      const folder = join(jobFolder, jobId);
+      const jobFile = join(folder, 'job.json');
+      if (!existsSync(jobFile)) return res.status(404).json({ error: 'This video job is unavailable.' });
+      const job = JSON.parse(readFileSync(jobFile, 'utf8'));
+      if (job.kind !== 'video' || job.status !== 'completed') return res.status(409).json({ error: 'Wait for this video to finish.' });
+      const objectFile = join(folder, 'objects.json');
+      const savedObjects = existsSync(objectFile) ? JSON.parse(readFileSync(objectFile, 'utf8')) : [];
+      // Older saliency files claimed SAM provenance and fabricated confidence. Do not trust it.
+      const detectedObjects = (Array.isArray(savedObjects) ? savedObjects : []).map(object => ({
+        ...object, source: 'local-saliency', provenance: 'unverified-proposal', confidence: 0,
+        maskRef: `proposal:${jobId}:${object.objectId}`, requiresReview: true,
+      }));
+      const rules = (Array.isArray(req.body?.rules) ? req.body.rules : []).slice(0, 32);
+      const findings = rules.filter(rule => typeof rule?.targetObject === 'string' && typeof rule?.expectedValue === 'string').map(rule => ({
+        shotIndex, status: 'uncertain', ruleId: rule.id, targetObject: rule.targetObject,
+        expectedValue: rule.expectedValue, confidence: 0,
+        explanation: `Video continuity for ${rule.targetObject} is unverified. Region proposals are not tracked object masks.`,
+        proposedAction: 'recolor',
+      }));
+      res.json({ model: null, provenance: 'local-unverified', summary: 'Local video loaded. Object identity, movement and continuity need review.',
+        audioTranscription: null, findings, detectedObjects, scenes: [] });
+    } catch (error) { next(error); }
   });
 
-  /**
-   * Meta Muse Wonder Video Director Endpoint: `POST /api/meta/direct-video`
-   * Calls `muse-wonder-1.0` on `https://api.meta.ai/v1/responses` for motion directing.
-   */
-  app.post('/api/meta/direct-video', async (req, res) => {
-    if (!hasValidSession(req)) {
-      return res.status(403).json({ error: 'Refresh the page before directing video.' });
-    }
-    const settings = options.settings();
-    if (!settings.key) {
-      return res.status(503).json({ error: 'Meta AI key not configured.' });
-    }
-    const { prompt } = req.body || {};
-    if (typeof prompt !== 'string' || !prompt.trim()) {
-      return res.status(400).json({ error: 'Provide a valid scene prompt.' });
-    }
-
+  // Generate a replacement region, then measure the actual pixel diff. A colour
+  // tint is not a generative edit, and a bounding box is not an object mask.
+  app.post('/api/meta/edit-frame', async (req, res, next) => {
+    if (!hasValidSession(req)) return res.status(403).json({ error: 'Refresh the page before editing.' });
+    const { imageBase64, maskBase64, prompt } = req.body ?? {};
+    if (typeof imageBase64 !== 'string' || typeof prompt !== 'string' || !prompt.trim() || prompt.length > 2000)
+      return res.status(400).json({ error: 'Choose a project image and an edit of 1 to 2000 characters.' });
+    if (typeof maskBase64 !== 'string' || !maskBase64.startsWith('data:image/png;base64,'))
+      return res.status(400).json({ error: 'Select and confirm an object mask before editing. No full-frame fallback is applied.' });
+    if (!options.imager) return res.status(501).json({ error: 'No image model is connected. Offline mask recolouring is available separately.' });
+    if (imageActive) return res.status(409).json({ error: 'A frame is already generating.' });
+    imageActive = true;
+    const controller = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     try {
-      const metaRes = await fetch('https://api.meta.ai/v1/responses', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${settings.key}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'muse-wonder-1.0',
-          input: `Direct a 2-second cinematic motion video scene: ${prompt.trim()}`,
-        }),
-      });
-
-      if (!metaRes.ok) {
-        const errText = await metaRes.text();
-        return res.status(metaRes.status).json({ error: `Meta Wonder API returned error: ${errText.slice(0, 200)}` });
-      }
-
-      const metaData = await metaRes.json();
-      const textOutput =
-        metaData.output?.[1]?.content?.[0]?.text ||
-        metaData.output?.[0]?.content?.[0]?.text ||
-        'Motion directed.';
-
+      const rawImage = await resolveImageBuffer(imageBase64, frameFolder, jobFolder);
+      const base = await sharp(rawImage, { limitInputPixels: 1600 * 1600 }).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      const mask = await sharp(Buffer.from(maskBase64.split(',')[1], 'base64'), { limitInputPixels: 1600 * 1600 })
+        .ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      if (mask.info.width !== base.info.width || mask.info.height !== base.info.height)
+        throw new UserError('The mask dimensions do not match this frame. Select the object again.', 400);
+      const binary = new Uint8Array(base.info.width * base.info.height);
+      const transparent = binary.some((_, i) => mask.data[i * 4 + 3] < 255);
+      for (let i = 0; i < binary.length; i++) binary[i] = transparent ? (mask.data[i * 4 + 3] > 0 ? 1 : 0) : (mask.data[i * 4] > 128 ? 1 : 0);
+      if (!binary.some(Boolean)) throw new UserError('The selected mask is empty.', 400);
+      const image = await sharp(rawImage).png().toBuffer();
+      reserveRequest();
+      const generated = await options.imager.generate({
+        prompt: prompt.trim(), targetObject: 'selected object', seed: 0, requireReference: true,
+        references: [`data:image/png;base64,${image.toString('base64')}`],
+      }, controller.signal, reserveRequest);
+      if (controller.signal.aborted) return;
+      const edit = await sharp(Buffer.from(generated.image.split(',')[1], 'base64'))
+        .resize(base.info.width, base.info.height).ensureAlpha().raw().toBuffer();
+      const output = Buffer.from(base.data);
+      for (let i = 0; i < binary.length; i++) if (binary[i]) edit.copy(output, i * 4, i * 4, i * 4 + 4);
+      const report = verifyMaskedPixelDiff(new Uint8ClampedArray(base.data), new Uint8ClampedArray(output), binary);
+      if (!report.changedInside) throw new UserError('The generated edit did not change the selected pixels. No correction was applied.', 422);
+      const png = await sharp(output, { raw: { width: base.info.width, height: base.info.height, channels: 4 } }).png().toBuffer();
       res.json({
-        directorPlan: textOutput,
-        model: 'muse-wonder-1.0',
-        provenance: 'live-muse-wonder-1.0',
+        editedImageUrl: `data:image/png;base64,${png.toString('base64')}`,
+        ...report, totalPixels: binary.length, outsideDrift: report.changedOutside, outsideDriftPercent: '0.00',
+        verified: report.passed, model: generated.model, provenance: generated.provenance, promptApplied: prompt,
+        // Pixel preservation does not establish semantic continuity or prompt adherence.
+        continuityStatus: 'uncertain',
       });
-    } catch (err: any) {
-      res.status(500).json({ error: `Video director failed: ${err.message}` });
-    }
+    } catch (error) { next(error); }
+    finally { imageActive = false; }
   });
 
-  // 1. Meta muse-spark-1.3 Video & Audio Understanding
-  app.post('/api/meta/video-understand', async (req, res) => {
+  app.post('/api/video/ingest-shots', async (req, res, next) => {
+    if (!hasValidSession(req)) return res.status(403).json({ error: 'Refresh the page before importing video.' });
+    const jobId = req.body?.jobId;
+    if (typeof jobId !== 'string' || !/^[a-f0-9-]{36}$/.test(jobId))
+      return res.status(400).json({ error: 'Choose a saved local video job.' });
     try {
-      const { videoUrl, prompt, jobId } = req.body || {};
-      const settings = options.settings();
-
-      // Strict jobId validation closes the filesystem path-traversal vector; the global
-      // /api loopback + same-origin guard is the access boundary for this local prototype,
-      // matching the unauthenticated Phase-3 sibling handlers (edit-frame, ingest-shots).
-      if (jobId !== undefined && (typeof jobId !== 'string' || !/^[a-f0-9-]{36}$/.test(jobId)))
-        return res.status(400).json({ error: 'Invalid jobId.' });
-
-      const rules: ContinuityRuleInput[] = (Array.isArray(req.body?.rules) ? req.body.rules : []).slice(0, 32);
-
-      let detectedObjects: any[] = [];
-      let frameBuffer: Buffer | null = null;
-      if (jobId) {
-        const jobDir = resolve(process.cwd(), '.artifacts/local-ai/ui-jobs', jobId);
-        const objPath = resolve(jobDir, 'objects.json');
-        if (existsSync(objPath)) {
-          try {
-            detectedObjects = JSON.parse(readFileSync(objPath, 'utf8'));
-          } catch {}
-        }
-        const framePath = resolve(jobDir, 'frame-000.png');
-        if (existsSync(framePath)) {
-          try { frameBuffer = readFileSync(framePath); } catch {}
-        }
-      }
-
-      const findings =
-        rules.length > 0 && detectedObjects.length > 0
-          ? await buildContinuityFindings(rules, detectedObjects, frameBuffer)
-          : [];
-
-      if (settings.key) {
-        try {
-          const metaRes = await fetch('https://api.meta.ai/v1/responses', {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${settings.key}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              model: 'muse-spark-1.3',
-              input: [
-                {
-                  type: 'message',
-                  role: 'user',
-                  content: [
-                    {
-                      type: 'input_text',
-                      text: `Perform deep cinematic video and audio analysis on this sequence. Identify major foreground subjects, camera angles, lighting conditions, and continuity hazards: ${prompt || ''}`,
-                    },
-                    ...(videoUrl ? [{ type: 'input_video', video_url: videoUrl }] : []),
-                  ],
-                },
-              ],
-            }),
-          });
-
-          if (metaRes.ok) {
-            const metaData = await metaRes.json();
-            const textAnalysis =
-              metaData.output?.[1]?.content?.[0]?.text ||
-              metaData.output?.[0]?.content?.[0]?.text ||
-              '';
-
-            return res.json({
-              model: 'muse-spark-1.3',
-              provenance: 'live-muse-spark-1.3',
-              summary: textAnalysis || 'Video analyzed with muse-spark-1.3.',
-              audioTranscription: prompt || 'Video sequence audio transcription complete.',
-              findings,
-              detectedObjects: detectedObjects.length > 0 ? detectedObjects : [
-                { objectId: '0', label: 'wedding car', confidence: 0.96, bounds: { left: 100, top: 120, right: 400, bottom: 350 }, maskRef: 'sam-3.1:car:0:v1' },
-                { objectId: '1', label: 'church altar', confidence: 0.93, bounds: { left: 160, top: 80, right: 380, bottom: 300 }, maskRef: 'sam-3.1:altar:1:v1' },
-                { objectId: '2', label: 'bridal dress', confidence: 0.89, bounds: { left: 200, top: 140, right: 320, bottom: 360 }, maskRef: 'sam-3.1:dress:2:v1' },
-              ],
-              scenes: [
-                { shotIndex: 0, timestamp: 0.0, label: 'Shot 1: The Breakdown', description: 'Vehicle stops with engine steam on quiet country lane.' },
-                { shotIndex: 1, timestamp: 0.5, label: 'Shot 2: Roadside Decision', description: 'Checking watch and deciding to sprint toward the chapel.' },
-                { shotIndex: 2, timestamp: 1.0, label: 'Shot 3: The Sprint', description: 'Hurrying along the sunlit path toward church bells.' },
-                { shotIndex: 3, timestamp: 1.5, label: 'Shot 4: Altar Arrival', description: 'Arriving breathless at the altar just in time.' },
-              ],
-            });
-          }
-        } catch {}
-      }
-
-      res.json({
-        model: 'muse-spark-1.3',
-        provenance: 'hybrid-spark-local',
-        summary: `Video understanding for: ${prompt || 'A Last-Minute Wedding sequence'}. Identified subject continuity and pacing.`,
-        audioTranscription: prompt || 'A Last-Minute Wedding: car breaks down, sprint to altar.',
-        findings,
-        detectedObjects: detectedObjects.length > 0 ? detectedObjects : [
-          { objectId: '0', label: 'wedding car', confidence: 0.95, bounds: { left: 100, top: 120, right: 400, bottom: 350 }, maskRef: 'sam-3.1:car:0:v1' },
-          { objectId: '1', label: 'church altar', confidence: 0.91, bounds: { left: 160, top: 80, right: 380, bottom: 300 }, maskRef: 'sam-3.1:altar:1:v1' },
-          { objectId: '2', label: 'bridal dress', confidence: 0.88, bounds: { left: 200, top: 140, right: 320, bottom: 360 }, maskRef: 'sam-3.1:dress:2:v1' },
-        ],
-        scenes: [
-          { shotIndex: 0, timestamp: 0.0, label: 'Shot 1: The Breakdown', description: 'Vehicle stops with engine steam on quiet country lane.' },
-          { shotIndex: 1, timestamp: 0.5, label: 'Shot 2: Roadside Decision', description: 'Checking watch and deciding to sprint toward the chapel.' },
-          { shotIndex: 2, timestamp: 1.0, label: 'Shot 3: The Sprint', description: 'Hurrying along the sunlit path toward church bells.' },
-          { shotIndex: 3, timestamp: 1.5, label: 'Shot 4: Altar Arrival', description: 'Arriving breathless at the altar just in time.' },
-        ],
+      const folder = join(jobFolder, jobId);
+      if (!existsSync(join(folder, 'job.json'))) return res.status(404).json({ error: 'Video job not found.' });
+      const job = JSON.parse(readFileSync(join(folder, 'job.json'), 'utf8'));
+      const indices = [0, 4, 8, 12];
+      if (job.status !== 'completed' || job.kind !== 'video' || !indices.every(i => existsSync(join(folder, `frame-${String(i).padStart(3, '0')}.png`))))
+        return res.status(409).json({ error: 'This video does not have the required local keyframes.' });
+      const shots = indices.map((frame, index) => {
+        const imageUrl = `/api/local-ai/jobs/${jobId}/assets/frame-${String(frame).padStart(3, '0')}.png`;
+        return { id: `video-${jobId}-${index}`, shotNumber: index + 1, durationSeconds: 0.5, timestamp: frame / 8,
+          promptDescription: job.prompt, spokenDescription: `Video keyframe ${index + 1}. Continuity unreviewed.`,
+          currentImageUrl: imageUrl, originalImageUrl: imageUrl,
+          videoUrl: `/api/local-ai/jobs/${jobId}/assets/generated-video.mp4`, generatedJobId: jobId, status: 'uncertain',
+          revisions: [{ revisionId: `video-${jobId}-${index}-initial`, timestamp: Date.now(), imageUrl, actionApplied: 'Imported local keyframe; unreviewed' }] };
       });
-    } catch (err: any) {
-      res.status(500).json({ error: `Video understanding failed: ${err.message}` });
-    }
-  });
-
-  // 2. Meta muse-image-1.0 Generative Frame Edit with Sharp 0-Drift Pixel Compositing
-  app.post('/api/meta/edit-frame', async (req, res) => {
-    try {
-      const { imageBase64, maskBase64, prompt, bounds } = req.body || {};
-      if (!imageBase64 || !prompt) {
-        return res.status(400).json({ error: 'imageBase64 and prompt are required.' });
-      }
-
-      const settings = options.settings();
-      const rawImageBuffer = await resolveImageBuffer(String(imageBase64));
-      const imageMeta = await sharp(rawImageBuffer).metadata();
-      const width = imageMeta.width || 512;
-      const height = imageMeta.height || 512;
-
-      let editedBuffer: Buffer | null = null;
-      let provenance = 'local-generative-composite';
-
-      if (settings.key) {
-        try {
-          const metaRes = await fetch('https://api.meta.ai/v1/images/edits', {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${settings.key}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              model: 'muse-image-1.0',
-              prompt: prompt.trim(),
-              images: [{ image_url: `data:image/png;base64,${rawImageBuffer.toString('base64')}` }],
-              n: 1,
-            }),
-          });
-
-          if (metaRes.ok) {
-            const data = await metaRes.json();
-            const urlOrB64 = data.data?.[0]?.b64_json || data.data?.[0]?.url;
-            if (urlOrB64) {
-              if (urlOrB64.startsWith('http')) {
-                const imgFetch = await fetch(urlOrB64);
-                editedBuffer = Buffer.from(await imgFetch.arrayBuffer());
-              } else {
-                editedBuffer = Buffer.from(urlOrB64, 'base64');
-              }
-              provenance = 'live-muse-image-1.0';
-            }
-          }
-        } catch {}
-      }
-
-      if (!editedBuffer) {
-        const tint = prompt.toLowerCase().includes('white') ? { r: 240, g: 240, b: 240 }
-                   : prompt.toLowerCase().includes('gold') || prompt.toLowerCase().includes('amber') ? { r: 245, g: 158, b: 11 }
-                   : prompt.toLowerCase().includes('emerald') || prompt.toLowerCase().includes('green') ? { r: 16, g: 185, b: 129 }
-                   : prompt.toLowerCase().includes('blue') ? { r: 37, g: 99, b: 235 }
-                   : { r: 220, g: 38, b: 38 };
-
-        editedBuffer = await sharp(rawImageBuffer)
-          .tint(tint)
-          .modulate({ brightness: 1.15, saturation: 1.3 })
-          .toBuffer();
-      }
-
-      // Bit-Exact 0-Drift Pixel Compositing:
-      // Direct raw buffer slice ensures 100% bit-exact retention of outside-mask pixels (0 drift).
-      const { data: basePixels, info: baseInfo } = await sharp(rawImageBuffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-      const { data: editPixels } = await sharp(editedBuffer).resize(baseInfo.width, baseInfo.height).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-      
-      const widthPx = baseInfo.width;
-      const heightPx = baseInfo.height;
-      const channels = baseInfo.channels; // 4 (RGBA)
-      let changedInside = 0;
-
-      if (maskBase64) {
-        const maskRaw = Buffer.from(maskBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-        const { data: maskPixels, info: maskInfo } = await sharp(maskRaw)
-          .resize(widthPx, heightPx)
-          .toColourspace('b-w')
-          .raw()
-          .toBuffer({ resolveWithObject: true });
-
-        const totalPixels = widthPx * heightPx;
-        for (let i = 0; i < totalPixels; i++) {
-          const maskVal = maskPixels[i * maskInfo.channels];
-          if (maskVal > 128) {
-            changedInside++;
-            const offset = i * channels;
-            basePixels[offset] = editPixels[offset];
-            basePixels[offset + 1] = editPixels[offset + 1];
-            basePixels[offset + 2] = editPixels[offset + 2];
-            basePixels[offset + 3] = editPixels[offset + 3];
-          }
-        }
-      } else if (bounds) {
-        const { left, top, right, bottom } = bounds;
-        const x1 = Math.max(0, Math.min(widthPx, left));
-        const y1 = Math.max(0, Math.min(heightPx, top));
-        const x2 = Math.max(0, Math.min(widthPx, right));
-        const y2 = Math.max(0, Math.min(heightPx, bottom));
-
-        for (let y = y1; y < y2; y++) {
-          for (let x = x1; x < x2; x++) {
-            changedInside++;
-            const offset = (y * widthPx + x) * channels;
-            basePixels[offset] = editPixels[offset];
-            basePixels[offset + 1] = editPixels[offset + 1];
-            basePixels[offset + 2] = editPixels[offset + 2];
-            basePixels[offset + 3] = editPixels[offset + 3];
-          }
-        }
-      } else {
-        // Fallback: full frame replacement
-        editPixels.copy(basePixels);
-        changedInside = widthPx * heightPx;
-      }
-
-      const finalBuffer = await sharp(basePixels, {
-        raw: {
-          width: widthPx,
-          height: heightPx,
-          channels,
-        },
-      }).png().toBuffer();
-
-      res.json({
-        editedImageUrl: `data:image/png;base64,${finalBuffer.toString('base64')}`,
-        outsideDrift: 0,
-        outsideDriftPercent: '0.00',
-        changedInside,
-        verified: true,
-        model: 'muse-image-1.0',
-        provenance,
-        promptApplied: prompt,
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: `Generative edit failed: ${err.message}` });
-    }
-  });
-
-  // 3. Ingest Video Keyframes into Discrete Storyboard Shots
-  app.post('/api/video/ingest-shots', async (req, res) => {
-    try {
-      const { videoUrl, jobId } = req.body || {};
-      let targetJobId = jobId;
-
-      if (!targetJobId && videoUrl) {
-        const match = videoUrl.match(/\/jobs\/([a-f0-9-]+)\//);
-        if (match) targetJobId = match[1];
-      }
-
-      const shotsList = [];
-      const frameIndices = [0, 4, 8, 12];
-      const titles = [
-        'Shot 1: The Breakdown',
-        'Shot 2: Roadside Decision',
-        'Shot 3: The Sprint',
-        'Shot 4: Altar Arrival',
-      ];
-      const prompts = [
-        'Car breaks down on country road with engine steam.',
-        'Checking the time under pressure; deciding to sprint.',
-        'Running past fields and trees toward the church.',
-        'Breathless arrival at the wedding altar right on time.',
-      ];
-
-      for (let i = 0; i < frameIndices.length; i++) {
-        const frameNum = String(frameIndices[i]).padStart(3, '0');
-        const frameUrl = targetJobId
-          ? `/api/local-ai/jobs/${targetJobId}/assets/frame-${frameNum}.png`
-          : `/api/frame-${frameNum}.png`;
-
-        shotsList.push({
-          id: `video-shot-${i + 1}`,
-          shotNumber: i + 1,
-          name: titles[i],
-          promptDescription: prompts[i],
-          durationSeconds: 0.5,
-          timestamp: i * 0.5,
-          currentImageUrl: frameUrl,
-          originalImageUrl: frameUrl,
-          videoUrl: videoUrl || (targetJobId ? `/api/local-ai/jobs/${targetJobId}/assets/generated-video.mp4` : undefined),
-          generatedJobId: targetJobId,
-          status: 'consistent',
-          revisions: [
-            {
-              revisionId: `shot-${i + 1}-init`,
-              timestamp: Date.now(),
-              imageUrl: frameUrl,
-              actionApplied: `Ingested from video keyframe ${frameNum} (time: ${i * 0.5}s)`,
-            },
-          ],
-        });
-      }
-
-      res.json({ shots: shotsList });
-    } catch (err: any) {
-      res.status(500).json({ error: `Ingest shots failed: ${err.message}` });
-    }
+      res.json({ shots });
+    } catch (error) { next(error); }
   });
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API endpoint.' }));

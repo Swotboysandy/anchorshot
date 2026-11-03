@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import {runVision} from './videoTracks';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -12,6 +12,8 @@ import sharp from 'sharp';
  */
 export interface AnimaticShot {
   image: Buffer;
+  video?: Buffer;
+  startSeconds?: number;
   seconds: number;
   /** Planned camera move, drawn as a slow move across the still. */
   movement?: string;
@@ -19,6 +21,7 @@ export interface AnimaticShot {
 }
 
 export interface RenderAnimaticOptions {
+  signal?: AbortSignal;
   burnInTimecode?: boolean;
 }
 
@@ -57,39 +60,23 @@ export function createTimecodeOverlaySvg(
       <g filter="url(#bgShadow)">
         <rect x="28" y="${HEIGHT - 72}" width="400" height="48" rx="6" fill="#0A0D12" fill-opacity="0.88" stroke="#323A46" stroke-width="1.5"/>
         <text x="44" y="${HEIGHT - 44}" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="16" font-weight="700" fill="#38BDF8" letter-spacing="1.5">TC ${tcStr}</text>
-        <text x="44" y="${HEIGHT - 30}" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" fill="#94A3B8" letter-spacing="0.5">${shotLabel} &bull; ${durLabel} &bull; 30 FPS</text>
+        <text x="44" y="${HEIGHT - 30}" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" fill="#94A3B8" letter-spacing="0.5">${shotLabel} &#8226; ${durLabel} &#8226; 30 FPS</text>
       </g>
     </svg>
   `);
 }
 
-function run(command: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true });
-    let errors = '';
-    child.stderr.on('data', (chunk) => (errors = (errors + chunk).slice(-4000)));
-    child.on('error', reject);
-    child.on('close', (code) => (code === 0 ? resolve(errors) : reject(new AnimaticError(errors.trim() || `${command} exited with ${code}`))));
-  });
-}
-
-async function mediaSeconds(file: string, ffprobe: string): Promise<number> {
-  const out = await new Promise<string>((resolve, reject) => {
-    const child = spawn(ffprobe, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file], { windowsHide: true });
-    let text = '';
-    child.stdout.on('data', (chunk) => (text += chunk));
-    child.on('error', reject);
-    child.on('close', (code) => (code === 0 ? resolve(text) : reject(new AnimaticError('Narration audio could not be read.'))));
-  });
+async function mediaSeconds(file: string, ffprobe: string, signal?: AbortSignal): Promise<number> {
+  const out=(await runVision(ffprobe,['-v','error','-show_entries','format=duration','-of','csv=p=0',file],signal)).toString();
   const seconds = Number.parseFloat(out);
-  if (!(seconds > 0)) throw new AnimaticError('Narration audio has no duration.');
+  if (!(seconds > 0) || seconds > 60) throw new AnimaticError('Narration must have a duration of at most 60 seconds.');
   return seconds;
 }
 
 /** True when ffmpeg can be started; export is unavailable otherwise. */
 export async function ffmpegAvailable(ffmpeg = 'ffmpeg'): Promise<boolean> {
   try {
-    await run(ffmpeg, ['-hide_banner', '-version']);
+    await runVision(ffmpeg, ['-hide_banner', '-version'],undefined,65536,undefined,10000);
     return true;
   } catch {
     return false;
@@ -120,22 +107,22 @@ export async function renderAnimatic(
   ffprobe = 'ffprobe',
   options?: RenderAnimaticOptions,
 ): Promise<Buffer> {
+  options?.signal?.throwIfAborted();
   if (!shots.length) throw new AnimaticError('There are no shots to export.');
   const folder = mkdtempSync(path.join(tmpdir(), 'anchorshot-animatic-'));
   try {
     const args = ['-hide_banner', '-v', 'error', '-y'];
     const filters: string[] = [];
     let cumulativeSeconds = 0;
+    let inputIndex = 0;
     for (const [i, shot] of shots.entries()) {
+      options?.signal?.throwIfAborted();
       const frame = path.join(folder, `shot-${i}.png`);
       let pipeline = sharp(shot.image).resize(WIDTH, HEIGHT, {
         fit: 'contain',
         background: '#000000',
       });
-      if (options?.burnInTimecode) {
-        const overlaySvg = createTimecodeOverlaySvg(i, shots.length, cumulativeSeconds, shot.seconds);
-        pipeline = pipeline.composite([{ input: overlaySvg }]);
-      }
+
       // Normalise every source (PNG, JPEG, WebP) before ffmpeg sees it.
       await pipeline.png().toFile(frame);
       let seconds = shot.seconds;
@@ -144,17 +131,36 @@ export async function renderAnimatic(
         audio = path.join(folder, `shot-${i}.mp3`);
         writeFileSync(audio, shot.narration);
         // Hold the frame until its narration finishes, plus a short breath.
-        seconds = Math.max(seconds, (await mediaSeconds(audio, ffprobe)) + NARRATION_TAIL);
+        seconds = Math.max(seconds, (await mediaSeconds(audio, ffprobe, options?.signal)) + NARRATION_TAIL);
+      }
+      const v = inputIndex++;
+      let sourceHasAudio=false;
+      if (shot.video) {
+        const clip = path.join(folder, `clip-${i}.mp4`);
+        writeFileSync(clip, shot.video);
+        if(!audio){
+          const streams=JSON.parse((await runVision(ffprobe,['-v','error','-select_streams','a:0','-show_entries','stream=index','-of','json',clip],options?.signal)).toString());
+          sourceHasAudio=Array.isArray(streams.streams)&&streams.streams.length>0;
+        }
+        args.push('-stream_loop', '-1', '-ss', String(shot.startSeconds ?? 0), '-t', String(seconds), '-i', clip);
+      } else args.push('-framerate', '30', '-loop', '1', '-t', String(seconds), '-i', frame);
+      // An attached narration replaces source audio; otherwise preserve the clip's soundtrack.
+      const a = sourceHasAudio ? v : inputIndex++;
+      if (audio) args.push('-i', audio);
+      else if(!sourceHasAudio) args.push('-f', 'lavfi', '-t', String(seconds), '-i', 'anullsrc=r=44100:cl=stereo');
+      const videoLabel = options?.burnInTimecode ? `base${i}` : `v${i}`;
+      filters.push(
+        `[${v}:v]trim=duration=${seconds},setpts=PTS-STARTPTS,scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30${shot.video ? '' : cameraMove(shot.movement, seconds)},format=yuv420p[${videoLabel}]`,
+        `[${a}:a]aresample=44100,aformat=channel_layouts=stereo,apad,atrim=0:${seconds},asetpts=PTS-STARTPTS[a${i}]`,
+      );
+      if (options?.burnInTimecode) {
+        const overlay = path.join(folder, `timecode-${i}.png`);
+        await sharp(createTimecodeOverlaySvg(i, shots.length, cumulativeSeconds, seconds)).png().toFile(overlay);
+        const overlayIndex = inputIndex++;
+        args.push('-framerate', '30', '-loop', '1', '-t', String(seconds), '-i', overlay);
+        filters.push(`[${videoLabel}][${overlayIndex}:v]overlay=0:0:shortest=1[v${i}]`);
       }
       cumulativeSeconds += seconds;
-      args.push('-loop', '1', '-t', String(seconds), '-i', frame);
-      if (audio) args.push('-i', audio);
-      else args.push('-f', 'lavfi', '-t', String(seconds), '-i', 'anullsrc=r=44100:cl=stereo');
-      const v = i * 2;
-      filters.push(
-        `[${v}:v]scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30${cameraMove(shot.movement, seconds)},format=yuv420p[v${i}]`,
-        `[${v + 1}:a]aresample=44100,aformat=channel_layouts=stereo,apad,atrim=0:${seconds},asetpts=PTS-STARTPTS[a${i}]`,
-      );
     }
     const pairs = shots.map((_, i) => `[v${i}][a${i}]`).join('');
     filters.push(`${pairs}concat=n=${shots.length}:v=1:a=1[v][a]`);
@@ -166,7 +172,8 @@ export async function renderAnimatic(
       '-c:a', 'aac', '-b:a', '160k',
       '-movflags', '+faststart', output,
     );
-    await run(ffmpeg, args);
+    await runVision(ffmpeg, args, options?.signal,65536,undefined,300000);
+    options?.signal?.throwIfAborted();
     return readFileSync(output);
   } finally {
     rmSync(folder, { recursive: true, force: true });

@@ -1,10 +1,14 @@
-import { describe, expect, it, vi } from 'vitest';
-import { detectMaskedColor } from '../src/services/maskIntegrity';
+import {validateProjectLibrary} from '../src/services/projectStorage';
+import {restoreShotTake} from '../src/lib/shotEdits';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { detectMaskedColor, normalizeContinuityColor } from '../src/services/maskIntegrity';
 import { MetaModelClient } from '../src/services/metaModels';
 import * as canvasEngine from '../src/services/canvasEngine';
 import type { StoryboardShot } from '../src/types/framelock';
 
-describe('Real SAM detection & color auditing on frames', () => {
+afterEach(() => vi.restoreAllMocks());
+
+describe('Mask colour classification and frame audit states', () => {
   it('classifies object pigments accurately inside binary SAM masks', () => {
     // 20x20 test canvas
     const width = 20;
@@ -86,7 +90,7 @@ describe('Real SAM detection & color auditing on frames', () => {
     // A frame that cannot be measured is never reported as verified.
     const unmeasured = await client.auditShotContinuity(consistentShot, rule);
     expect(unmeasured.status).toBe('uncertain');
-    expect(unmeasured.spokenDescription).not.toMatch(/Continuity verified/);
+    expect(unmeasured.spokenDescription).not.toMatch(/Color check passed|Continuity verified/);
 
     vi.spyOn(canvasEngine, 'sampleImageColorInMask').mockResolvedValueOnce({
       colorName: 'blue',
@@ -97,7 +101,8 @@ describe('Real SAM detection & color auditing on frames', () => {
     const auditedConsistent = await client.auditShotContinuity(consistentShot, rule);
     expect(auditedConsistent.status).toBe('consistent');
     expect(auditedConsistent.discrepancyMessage).toBeUndefined();
-    expect(auditedConsistent.spokenDescription).toMatch(/Continuity verified/);
+    expect(auditedConsistent.spokenDescription).toMatch(/Color check passed: the selected cup pixels match blue/);
+    expect(auditedConsistent.spokenDescription).not.toMatch(/Offline sample/);
 
     // Mismatch scenario: real SAM sample returns red cup
     vi.spyOn(canvasEngine, 'sampleImageColorInMask').mockResolvedValueOnce({
@@ -127,7 +132,7 @@ describe('Real SAM detection & color auditing on frames', () => {
     expect(auditedMismatch.proposedFix?.targetObject).toBe('cup');
   });
 
-  it('reports a prop the plan left out as not applicable, not unverified', async () => {
+  it('does not treat a planned omission as verified absence in generated pixels', async () => {
     const shot: StoryboardShot = {
       id: 'shot-4', shotNumber: 4, durationSeconds: 4, promptDescription: 'The clockmaker smiles', spokenDescription: '',
       currentImageUrl: '/api/muse/frames/x.png', originalImageUrl: '/api/muse/frames/x.png', status: 'uncertain', revisions: [],
@@ -135,8 +140,60 @@ describe('Real SAM detection & color auditing on frames', () => {
     const rule = { id: 'r', scope: 'all_shots' as const, targetObject: 'jacket', property: 'color', expectedValue: 'emerald', revision: 1 };
     const client = new MetaModelClient();
     const absent = await client.auditShotContinuity({ ...shot, absentProps: ['jacket'] }, rule);
-    expect(absent.status).toBe('consistent');
-    expect(absent.spokenDescription).toMatch(/jacket is not in this shot/);
+    expect(absent.status).toBe('uncertain');
+    expect(absent.spokenDescription).toMatch(/absence has not been verified/);
     expect((await client.auditShotContinuity(shot, rule)).status).toBe('uncertain');
   });
+});
+
+
+it.each([['green','emerald'],['cobalt','blue'],['yellow','amber'],['crimson','red'],['cyan','cyan']])('uses the measured category for %s', (input, expected) => {
+  expect(normalizeContinuityColor(input)).toBe(expected);
+});
+
+it('does not claim colour success from containment alone', async () => {
+  const client = new MetaModelClient();
+  vi.spyOn(canvasEngine,'applySamPixelFixWithVerification').mockResolvedValue({imageUrl:'edited',pixelVerification:{changedInsideMask:2,changedOutsideMask:0,outsideDriftPercent:0}} as any);
+  vi.spyOn(canvasEngine,'sampleImageColorInMask').mockResolvedValue({colorName:'red',rgb:[220,35,35],confidence:0.9,pixelCount:10});
+  const shot={id:'s',shotNumber:1,durationSeconds:2,promptDescription:'cup',spokenDescription:'',currentImageUrl:'original',originalImageUrl:'original',status:'mismatch',revisions:[],
+    proposedFix:{action:'recolor',targetObject:'cup',targetColor:'blue',mask:{id:'m',objectId:'0',maskRef:'m',box:{x:0,y:0,width:10,height:10},confidence:1,maskBase64:'mask',provenance:'offline-fixture'}}} as StoryboardShot;
+  const result=await client.applyContinuityFix(shot);
+  expect(result.status).toBe('uncertain');
+  expect(result.spokenDescription).toContain('Continuity needs review');
+});
+
+
+it('frame correction detaches video metadata while the original video take remains restorable',async()=>{
+ vi.spyOn(canvasEngine,'applySamPixelFixWithVerification').mockResolvedValue({imageUrl:'data:image/png;base64,edited',pixelVerification:{changedInsideMask:2,changedOutsideMask:0,outsideDriftPercent:0}} as any);
+ vi.spyOn(canvasEngine,'sampleImageColorInMask').mockResolvedValue({colorName:'blue',rgb:[0,0,255],confidence:.9,pixelCount:16});
+ const plan={sourceJobId:'job',fingerprint:'source',tracks:[{objectId:'cup',color:'blue',frames:[0,1].map(frameIndex=>({frameIndex,sourceHash:'source',maskBase64:Buffer.alloc(16,1).toString('base64'),revision:1,reviewed:true,absent:false,method:'manual'}))}]} as any;
+ const frame='/api/local-ai/jobs/job/assets/frame-000.png',video='/api/local-ai/jobs/job/assets/generated-video.mp4';
+ const shot={id:'s',shotNumber:1,durationSeconds:2,promptDescription:'cup',spokenDescription:'',currentImageUrl:frame,originalImageUrl:frame,status:'uncertain',videoUrl:video,generatedJobId:'job',videoMaskPlan:plan,timestamp:1,detectedObjects:[{objectId:'0'}],
+  revisions:[{revisionId:'original-video',timestamp:1,imageUrl:frame,videoUrl:video,generatedJobId:'job',videoMaskPlan:plan,sourceTime:1,mediaSource:'generated',actionApplied:'video'}],
+  proposedFix:{action:'recolor',targetObject:'cup',targetColor:'blue',mask:{id:'m',objectId:'0',maskRef:'m',box:{x:0,y:0,width:10,height:10},confidence:1,maskBase64:'mask',sourceImageUrl:frame,provenance:'live-sam-3.1'}}} as StoryboardShot;
+ const original=structuredClone(shot);
+ const result=await new MetaModelClient().applyContinuityFix(shot);
+ for(const field of ['videoUrl','generatedJobId','videoMaskPlan','detectedObjects','timestamp'] as const)expect(result[field]).toBeUndefined();
+ expect(result.revisions.at(-1)?.mediaSource).toBe('generated');
+ expect(result.revisions[0]).toEqual(original.revisions[0]);expect(shot).toEqual(original);
+ const restored=restoreShotTake(result,'original-video');
+ expect(restored).toMatchObject({videoUrl:video,generatedJobId:'job',videoMaskPlan:plan,timestamp:1});
+ const still=restoreShotTake(restored,result.revisions.at(-1)!.revisionId);
+ expect(still.mediaSource).toBe('generated');expect(still.videoUrl).toBeUndefined();expect(still.videoMaskPlan).toBeUndefined();
+ for(const state of [shot,result,restored,still])expect(()=>validateProjectLibrary(JSON.parse(JSON.stringify({active:'project',projects:[{projectId:'project',title:'Video study',transcript:'Cup',statusAnnouncement:'',activeShotId:'s',shots:[state],rules:[]}]})))).not.toThrow();
+});
+
+
+it('a measured manual override cannot silently replace the expected continuity color',async()=>{
+ vi.spyOn(canvasEngine,'applySamPixelFixWithVerification').mockResolvedValue({imageUrl:'edited',pixelVerification:{changedInsideMask:2,changedOutsideMask:0,outsideDriftPercent:0}} as any);
+ const measurement=vi.spyOn(canvasEngine,'sampleImageColorInMask').mockResolvedValue({colorName:'purple',rgb:[130,40,200],confidence:.9,pixelCount:16});
+ const shot={id:'s',shotNumber:1,durationSeconds:2,promptDescription:'cup',spokenDescription:'',currentImageUrl:'original',originalImageUrl:'original',status:'mismatch',revisions:[],
+  proposedFix:{action:'recolor',targetObject:'cup',targetColor:'blue',mask:{id:'m',objectId:'0',maskRef:'m',box:{x:0,y:0,width:10,height:10},confidence:1,maskBase64:'mask',sourceImageUrl:'original',provenance:'offline-fixture'}}} as StoryboardShot;
+ const client=new MetaModelClient();
+ const purple=await client.applyContinuityFix(shot,'purple');
+ expect(purple.status).toBe('mismatch');expect(purple.proposedFix?.targetColor).toBe('blue');
+ expect(purple.spokenDescription).toContain('rule requires blue');
+ const repeated=await client.applyContinuityFix(purple,'purple');expect(repeated.status).toBe('mismatch');
+ measurement.mockResolvedValue({colorName:'blue',rgb:[0,0,255],confidence:.9,pixelCount:16});
+ const repaired=await client.applyContinuityFix(repeated,'cobalt');expect(repaired.status).toBe('consistent');
 });

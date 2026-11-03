@@ -1,7 +1,12 @@
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+import {createHash} from 'node:crypto';
 import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests/browser',
+  // Keep large transient traces off the source/model drive. Separate checkouts stay isolated.
+  outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || path.join(tmpdir(), `anchorshot-playwright-${createHash('sha256').update(process.cwd()).digest('hex').slice(0,12)}`),
   timeout: 45_000,
   fullyParallel: false,
   workers: 1,
@@ -24,6 +29,8 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 60_000,
     env: {
+      // A regression run must not reload its pages when reports or artifacts change.
+      DISABLE_HMR: 'true',
       META_API_KEY: '',
       PLANNER_PROVIDER: '',
       IMAGE_PROVIDER: '',

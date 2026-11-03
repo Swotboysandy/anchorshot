@@ -1,3 +1,4 @@
+import {TimelineNarration} from './TimelineNarration';
 import {DashboardLayout} from './DashboardLayout';
 import { Tabs as BeTabs, TabsList as BeTabsList, TabsTrigger as BeTabsTrigger, TabsContent as BeTabsContent } from './ui/beui-tabs';
 import { CreationComposer } from './CreationComposer';
@@ -32,13 +33,16 @@ import { DreamTransitionPanel } from './DreamTransitionPanel';
 import { SceneTransition } from './SceneTransition';
 import { transitionAt } from '../services/sceneTransitions';
 import type { StoryboardShot } from '../types/framelock';
-import { isLocalImage } from '../services/localGeneration';
+import { isLocalImage, isGeneratedImage } from '../services/localGeneration';
 
 const hasVerifiedRepair = (shot: StoryboardShot) =>
   !isLocalImage(shot.currentImageUrl) && Boolean(shot.pixelVerification?.passed) &&
   shot.currentImageUrl !== shot.originalImageUrl;
 import './cleanStudio.css';
 type Props = {
+  onBackupProject?:()=>void;
+  onRestoreProject?:(file:File)=>void;
+  archiveMessage?:string;
   storageStatus:string;
   projectId:string; projectTitle:string; projects:{id:string;title:string}[];
   onNewProject:()=>void; onOpenProject:(id:string)=>void; onRenameProject:(title:string)=>void;
@@ -54,11 +58,12 @@ type Props = {
   muted: boolean;
   progressPercent?: number;
   onTranscript: (s: string) => void;
-  onGenerateFrom: (script: string) => void;
+  onGenerateFrom: (script: string) => Promise<string>;
   onGenerate: () => void;
   onCommand: (s: string) => void;
   onSelect: (id: string) => void;
   onPlay: () => void;
+  onPlaybackError?: (message:string)=>void;
   onSeek: (t: number) => void;
   onNarrate: () => void;
   onMute: () => void;
@@ -87,6 +92,9 @@ type Props = {
   voiceNotice: string | null;
 };
 export function CleanStudio(p: Props) {
+  const archiveInput=useRef<HTMLInputElement>(null);
+  const [videoError,setVideoError]=useState('');
+  const playbackError=useRef(p.onPlaybackError);playbackError.current=p.onPlaybackError;
   const [workspace, setWorkspace] = useState('create'),
     [inputMode, setInputMode] = useState('describe'),
     [focusDirection, setFocusDirection] = useState(false),
@@ -147,17 +155,23 @@ export function CleanStudio(p: Props) {
     [isWipeDragging]
   );
 
-  // Synchronize master animatic playback state with HTML video element
+  // Reject stale completions when the scene changes or the user pauses.
+  useEffect(()=>{setVideoError('');},[shot?.videoUrl]);
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !shot?.videoUrl) return;
-
-    if (p.playing) {
-      video.play().catch(() => {});
-    } else {
-      video.pause();
-    }
-  }, [p.playing, shot?.videoUrl]);
+    const video=videoRef.current;
+    if(!video||!shot?.videoUrl)return;
+    let active=true;
+    if(p.playing && workspace==='create') {
+      setVideoError('');
+      void video.play().catch(()=>{
+        if(!active||videoRef.current!==video)return;
+        video.pause();
+        const message='Video playback could not start. Press Play to retry or restore the source video.';
+        setVideoError(message);playbackError.current?.(message);
+      });
+    }else video.pause();
+    return()=>{active=false;video.pause();};
+  },[p.playing,shot?.videoUrl,workspace]);
 
   // Synchronize master timeline seek position with video element
   useEffect(() => {
@@ -173,7 +187,7 @@ export function CleanStudio(p: Props) {
 
     const shotOffset = p.time - shotStartSeconds;
     if (shotOffset >= 0 && video.duration && !isNaN(video.duration)) {
-      const targetTime = shotOffset % video.duration;
+      const targetTime = ((shot.timestamp ?? 0) + shotOffset) % video.duration;
       if (Math.abs(video.currentTime - targetTime) > 0.3) {
         video.currentTime = targetTime;
       }
@@ -186,10 +200,16 @@ export function CleanStudio(p: Props) {
 
   // Real studio actions the voice agent may call; each returns what happened so the agent can say it.
   const spokenDirection = useRef('');
+  useEffect(() => {
+    // This bridge exists only until the spoken script reaches React state.
+    // Retaining it afterward would override a later manual script edit.
+    if (spokenDirection.current === p.transcript) spokenDirection.current = '';
+  }, [p.transcript]);
   const latestStatus = useRef(p.status);
   latestStatus.current = p.status;
   // Results are shown briefly as well as announced, so a finished action is visible.
   const [notice, setNotice] = useState('');
+  const saveFailed = !['Saved locally', 'Saving locally...', 'Loading local projects...', 'Switching projects...'].includes(p.storageStatus);
   const firstStatus = useRef(true);
   useEffect(() => {
     if (firstStatus.current) {
@@ -208,14 +228,13 @@ export function CleanStudio(p: Props) {
       spokenDirection.current = text.trim();
       return 'Direction saved to the script.';
     },
-    generate_storyboard: () => {
+    generate_storyboard: async () => {
       if (p.processing) return 'A storyboard is already being generated.';
       // The script state may not have rendered yet when both tools run in one turn.
       const script = spokenDirection.current || p.transcript;
       spokenDirection.current = '';
       if (!script.trim()) return 'The script is empty, so nothing was generated. Ask the director for a scene.';
-      p.onGenerateFrom(script);
-      return 'Storyboard generation started. It can take a few minutes.';
+      return await p.onGenerateFrom(script);
     },
     run_command: async ({ command }) => {
       if (typeof command !== 'string' || !command.trim()) return 'No command was given.';
@@ -237,6 +256,7 @@ export function CleanStudio(p: Props) {
   };
   return (
     <div className={hasStory ? "clean-studio dark editor-shell" : "clean-studio dark"}>
+      {shot?.narrationDataUrl && <TimelineNarration key={`${p.projectId}:${shot.id}:${shot.narrationDataUrl}`} src={shot.narrationDataUrl} offset={p.time-p.shots.slice(0,p.shots.findIndex(s=>s.id===shot.id)).reduce((sum,s)=>sum+s.durationSeconds,0)} playing={p.playing&&workspace==='create'} muted={p.muted} onPlaybackError={p.onPlaybackError}/>}
       <a className="clean-skip" href="#clean-main">
         Skip to workspace
       </a>
@@ -254,11 +274,17 @@ export function CleanStudio(p: Props) {
           {hasStory && <><ChevronRight size={12}/><button onClick={()=>selectWorkspace('create')}>Workspace</button><ChevronRight size={12}/><span aria-current="page">{workspace}</span></>}
         </nav>
         <div className="header-actions">
+          {p.onRestoreProject && <details className="project-files"><summary>Files</summary><form onSubmit={event=>event.preventDefault()}>
+            <Button type="button" variant="outline" size="sm" disabled={p.processing||p.exporting||!hasStory} onClick={p.onBackupProject}>Back up project</Button>
+            <Button type="button" variant="outline" size="sm" disabled={p.processing||p.exporting} onClick={()=>archiveInput.current?.click()}>Restore backup</Button>
+            <input ref={archiveInput} type="file" accept=".json,application/json" aria-label="Restore project backup" hidden onChange={event=>{const file=event.currentTarget.files?.[0];event.currentTarget.value='';if(file)p.onRestoreProject?.(file);}}/>
+          </form></details>}
+
           <Button variant="outline" size="sm" disabled={p.processing||p.exporting} onClick={p.onNewProject}>New project</Button>
           {hasStory && <details className="project-rename"><summary>Rename</summary><form onSubmit={event=>{event.preventDefault();const title=String(new FormData(event.currentTarget).get('title')||'').trim();if(title)p.onRenameProject(title);event.currentTarget.closest('details')?.removeAttribute('open');}}><input name="title" aria-label="Project name" defaultValue={p.projectTitle} key={p.projectTitle} maxLength={80} required/><Button size="sm" type="submit">Save name</Button></form></details>}
 
           <span className="local-label">
-            <i /> {p.storageStatus}
+            <i /> {saveFailed ? 'Not saved locally' : p.storageStatus}
           </span>
           <StudioTour />
           <Button
@@ -271,13 +297,15 @@ export function CleanStudio(p: Props) {
           </Button>
         </div>
       </header>
+      {p.archiveMessage && <p role="status" className="px-6 py-2 text-sm text-white">{p.archiveMessage}</p>}
       {(p.processing || p.exporting) && (
         <div className="studio-activity">
           <p>{p.exporting && !p.processing ? 'Exporting film...' : p.status}</p>
           <Progress value={p.progressPercent} aria-label="Work in progress" />
         </div>
       )}
-      {notice && !p.processing && !p.exporting && <p className="studio-notice" aria-hidden="true">{notice}</p>}
+      {saveFailed ? <p className="studio-notice" role="alert">{p.storageStatus}</p>
+        : notice && !p.processing && !p.exporting && <p className="studio-notice" aria-hidden="true">{notice}</p>}
       <Tabs value={workspace} onValueChange={selectWorkspace}>
         <div className="workspace-nav">
           <TabsList aria-label="Workspace">
@@ -324,7 +352,7 @@ export function CleanStudio(p: Props) {
                 </Button>
               )}
               <Button variant="outline" size="sm" onClick={p.onExportJson} disabled={p.processing}>
-                Export JSON
+                Continuity report
               </Button>
               {p.onToggleBurnInTimecode && (
                 <label className="flex items-center gap-1.5 text-xs font-mono text-[#94A3B8] cursor-pointer select-none">
@@ -451,8 +479,9 @@ export function CleanStudio(p: Props) {
                     <span className="eyebrow">PREVIEW</span>
                     <h2>Scene {shot?.shotNumber ?? 1}</h2>
                   </div>
-                  {!p.shots.some((s) => s.revisions[0]?.actionApplied.startsWith('Generated by')) && <span className="sample-badge">Sample storyboard</span>}
+                  <span className="sample-badge">{shot && (isGeneratedImage(shot.currentImageUrl) || shot.mediaSource === 'generated') ? 'Generated scene' : shot?.mediaSource === 'sample' ? 'Sample scene' : 'Scene media'}</span>
                 </div>
+                {videoError && <p role="alert" className="text-sm">{videoError}</p>}
                 <div className="preview-frame">
                   {shot?.videoUrl ? (
                     <div className="relative w-full h-full flex items-center justify-center bg-black rounded overflow-hidden">
@@ -460,15 +489,14 @@ export function CleanStudio(p: Props) {
                         ref={videoRef}
                         key={shot.videoUrl}
                         src={shot.videoUrl}
-                        muted
+                        muted={p.muted || Boolean(shot.narrationDataUrl)}
+                        loop
                         playsInline
+                        onError={()=>{const message='This video could not be loaded. Restore its source file and retry.';setVideoError(message);playbackError.current?.(message);}}
                         className="w-full h-full object-contain cursor-pointer"
                         onClick={p.onPlay}
                         aria-label={`Video preview of shot ${shot.shotNumber}: ${shot.promptDescription}`}
                       />
-                      <div className="absolute top-2 right-2 px-2 py-0.5 bg-[#10B981] text-black text-[10px] font-bold rounded flex items-center gap-1 shadow">
-                        <span>AI VIDEO PREVIEW</span>
-                      </div>
                     </div>
                   ) : shot ? (
                     p.showBefore && hasVerifiedRepair(shot) ? (
@@ -633,7 +661,7 @@ export function CleanStudio(p: Props) {
                             className="h-7 px-2 text-xs font-mono"
                             title="Trim duration by -0.5s ([)"
                             aria-label={`Decrease duration of shot ${p.activeShot.shotNumber}`}
-                            disabled={p.playing || p.activeShot.durationSeconds <= 0.5}
+                            disabled={p.playing || p.activeShot.durationSeconds <= (p.activeShot.narrationDurationSeconds ? Math.ceil((p.activeShot.narrationDurationSeconds+.4)*10)/10 : 0.5)}
                             onClick={() => p.onNudgeDuration!(p.activeShot!.id, -0.5)}
                           >
                             -0.5s
@@ -671,19 +699,7 @@ export function CleanStudio(p: Props) {
                       key={s.id}
                       variant="outline"
                       className={shot?.id === s.id ? 'shot-thumb selected' : 'shot-thumb'}
-                      onClick={() => {
-                        p.onSelect(s.id);
-                        if (typeof s.timestamp === 'number') {
-                          p.onSeek(s.timestamp);
-                        } else {
-                          let offset = 0;
-                          for (const prev of p.shots) {
-                            if (prev.id === s.id) break;
-                            offset += prev.durationSeconds;
-                          }
-                          p.onSeek(offset);
-                        }
-                      }}
+                      onClick={() => p.onSelect(s.id)}
                       aria-label={`Select shot ${s.shotNumber}`}
                       aria-pressed={shot?.id === s.id}
                     >
@@ -749,6 +765,7 @@ export function CleanStudio(p: Props) {
       </div>
       {p.shortcuts}
       <VoiceOverlay
+        key={p.projectId}
         open={voiceOpen}
         onOpenChange={setVoiceOpen}
         agentTools={agentTools}

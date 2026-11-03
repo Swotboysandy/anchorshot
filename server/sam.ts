@@ -372,21 +372,17 @@ export class MaskTrackStore {
     }
     if (!existing || !targetKey) return null;
 
-    const newMaskRef = maskRef.replace(/:[^:]+:v(\d+)$/, `:${trimmedObjectId}:v$1`);
-    const updated: StoredMaskTrack = {
-      ...existing,
-      maskRef: newMaskRef,
-      objectId: trimmedObjectId,
-      bounds: options?.bounds ?? existing.bounds,
-      confidence:
-        typeof options?.confidence === 'number' && Number.isFinite(options.confidence)
-          ? Math.max(0, Math.min(1, options.confidence))
-          : existing.confidence,
-      status: resolvedStatus,
-      evidence: `Director disambiguated object "${trimmedObjectId}" for ${newMaskRef}; status locked as ${resolvedStatus}.`,
+    // An object ID cannot be invented by renaming the primary mask. Select only
+    // a candidate returned for the same image, shot, concept and revision.
+    const selected = existing.objectId === trimmedObjectId ? existing : this.listTracks(existing.concept, existing.shotNumber).find(track =>
+      track.objectId === trimmedObjectId && track.revision === existing!.revision && track.sourceHash === existing!.sourceHash && track.segmentationId === existing!.segmentationId);
+    if (!selected) return null;
+    const updated: StoredMaskTrack = { ...selected,
+      // Selecting an instance does not measure its colour or verify continuity.
+      status: selected.status,
+      evidence: `Director selected object "${trimmedObjectId}" for ${selected.maskRef}. Continuity remains ${selected.status}.`,
     };
-    this.tracks.delete(targetKey);
-    this.tracks.set(MaskTrackStore.trackKey(newMaskRef, existing.shotNumber), updated);
+    this.tracks.set(MaskTrackStore.trackKey(selected.maskRef, selected.shotNumber), updated);
     return updated;
   }
 

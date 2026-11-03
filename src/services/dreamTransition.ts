@@ -120,6 +120,9 @@ export async function verifyDream(a: DreamAssets, reduced = false, signal?: Abor
     passed:drift===0, scope:'Uncompressed compositor frames; lossy WebM encoding is not pixel-exact.', paidApiCalls:0};
 }
 export async function exportDream(a: DreamAssets, reduced: boolean, signal: AbortSignal, progress:(t:number)=>void): Promise<Blob> {
+  if(signal.aborted)throw new DOMException('Export cancelled','AbortError');
+  if(document.hidden)throw new Error('Keep this tab visible for dream export.');
+  validateAssets(a);
   if (typeof MediaRecorder === 'undefined') throw new Error('Video export is unavailable in this browser. Save a PNG frame instead.');
   const canvas = makeCanvas(), ctx = canvas.getContext('2d')!;
   const frame = ctx.createImageData(DREAM.width,DREAM.height);
@@ -127,32 +130,51 @@ export async function exportDream(a: DreamAssets, reduced: boolean, signal: Abor
   if (!mimeType || !canvas.captureStream) throw new Error('WebM export is unavailable in this browser.');
   renderDreamFrame(a,frame.data,0,reduced); ctx.putImageData(frame,0,0);
   const stream = canvas.captureStream(DREAM.fps);
-  const recorder = new MediaRecorder(stream,{mimeType,videoBitsPerSecond:8_000_000});
+  let recorder:MediaRecorder;
+  try {recorder=new MediaRecorder(stream,{mimeType,videoBitsPerSecond:8_000_000});}
+  catch(error){stream.getTracks().forEach(track=>track.stop());throw error;}
   const chunks:Blob[]=[];
   return new Promise((resolve,reject)=>{
-    let timer:ReturnType<typeof setTimeout>;
-    let failure: Error | undefined;
-    const finish = () => { clearTimeout(timer); if(recorder.state!=='inactive') recorder.stop(); };
-    const abort = () => {failure=new DOMException('Export cancelled','AbortError'); finish();};
-    const visibility = () => {if(document.hidden){failure=new Error('Export stopped because the tab was hidden. Keep this tab visible and retry.');finish();}};
-    recorder.ondataavailable = e => {if(e.data.size) chunks.push(e.data);};
-    recorder.onerror = () => {failure=new Error('Video recorder failed.');finish();};
-    recorder.onstop = () => {
-      stream.getTracks().forEach(t=>t.stop()); signal.removeEventListener('abort',abort);
-      document.removeEventListener('visibilitychange',visibility);
-      failure ? reject(failure) : resolve(new Blob(chunks,{type:mimeType}));
+    let timer:ReturnType<typeof setTimeout>|undefined,stopTimer:ReturnType<typeof setTimeout>|undefined;
+    let failure:Error|undefined,finishing=false,settled=false;
+    const settle=()=>{
+      if(settled)return;settled=true;clearTimeout(timer);clearTimeout(stopTimer);
+      signal.removeEventListener('abort',abort);document.removeEventListener('visibilitychange',visibility);
+      recorder.ondataavailable=null;recorder.onerror=null;recorder.onstop=null;
+      stream.getTracks().forEach(track=>track.stop());
+      if(failure)reject(failure);
+      else if(!chunks.length)reject(new Error('Dream export produced no video. Retry with this tab visible.'));
+      else resolve(new Blob(chunks,{type:mimeType}));
     };
-    signal.addEventListener('abort',abort,{once:true}); document.addEventListener('visibilitychange',visibility);
-    recorder.start();
-    if(signal.aborted) {abort();return;}
-    const start=performance.now();
+    const finish=(error?:Error)=>{
+      failure ||= error;if(finishing||settled)return;finishing=true;clearTimeout(timer);
+      if(recorder.state==='inactive'){settle();return;}
+      stopTimer=setTimeout(()=>{failure ||= new Error('Dream recorder did not finish. No partial video was saved.');settle();},5000);
+      try{recorder.stop();}catch(error){failure ||= error instanceof Error?error:new Error('Dream recorder could not stop.');settle();}
+    };
+    const abort=()=>finish(new DOMException('Export cancelled','AbortError'));
+    const visibility=()=>{if(document.hidden)finish(new Error('Export stopped because the tab was hidden. Keep this tab visible and retry.'));};
+    recorder.ondataavailable=e=>{if(!settled&&e.data.size)chunks.push(e.data);};
+    recorder.onerror=()=>finish(new Error('Video recorder failed.'));
+    recorder.onstop=()=>{if(!finishing)failure ||= new Error('Dream recorder stopped before completion. No partial video was saved.');settle();};
+    signal.addEventListener('abort',abort,{once:true});document.addEventListener('visibilitychange',visibility);
+    try{recorder.start();}catch(error){finish(error instanceof Error?error:new Error('Dream recorder could not start.'));return;}
+    if(signal.aborted){abort();return;}if(document.hidden){visibility();return;}
+    const start=performance.now();let previous=start;
     const tick=()=>{
-      const t=Math.min(DREAM.duration,(performance.now()-start)/1000);
-      renderDreamFrame(a,frame.data,t,reduced);ctx.putImageData(frame,0,0);progress(t);
-      if(t>=DREAM.duration) {timer=setTimeout(finish,1000/DREAM.fps);return;}
-      const elapsed=performance.now()-start;
-      const nextFrame=Math.floor(elapsed*DREAM.fps/1000)+1;
-      timer=setTimeout(tick,Math.max(0,nextFrame*1000/DREAM.fps-elapsed));
-    }; tick();
+      if(finishing||settled)return;
+      try{
+        if(document.hidden){visibility();return;}
+        const now=performance.now();
+        if(now-previous>2000){finish(new Error('Dream capture was interrupted for over two seconds. No partial video was saved. Retry with this tab active.'));return;}
+        previous=now;
+        const t=Math.min(DREAM.duration,(now-start)/1000);
+        renderDreamFrame(a,frame.data,t,reduced);ctx.putImageData(frame,0,0);progress(t);
+        if(finishing||settled)return;
+        if(t>=DREAM.duration){timer=setTimeout(()=>finish(),1000/DREAM.fps);return;}
+        const elapsed=performance.now()-start,nextFrame=Math.floor(elapsed*DREAM.fps/1000)+1;
+        timer=setTimeout(tick,Math.max(0,nextFrame*1000/DREAM.fps-elapsed));
+      }catch(error){finish(error instanceof Error?error:new Error('Dream frame rendering failed.'));}
+    };tick();
   });
 }

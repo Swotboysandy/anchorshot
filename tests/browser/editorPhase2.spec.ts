@@ -27,6 +27,7 @@ test('phase 2 video editor controls: takes stack, split-screen wipe, and BITC ex
 
   // Apply SAM 3.1 fix via [Y] shortcut
   await page.keyboard.press('y');
+  await expect(page.locator('.clean-studio')).toContainText('0 outside-mask pixel drift');
 
   // Toggle Before/After Split Wipe via [B] shortcut in the preview frame
   await page.keyboard.press('b');

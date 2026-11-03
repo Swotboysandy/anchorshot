@@ -7,8 +7,6 @@ import { Conversation, ConversationContent } from './ui/conversation';
 import { Message, MessageContent } from './ui/message';
 import { agentAvailable, startAgentConversation, type AgentConversation, type AgentTools } from '../services/voiceAgent';
 import { speechRecognitionService } from '../services/speechRecognitionService';
-import { speechService } from '../services/speechService';
-import { parseVoiceCommand } from '../services/voiceCommandParser';
 
 const COLORS = ['#b7b7b7', '#ffffff', '#252525'] as const;
 type Props = {
@@ -40,9 +38,7 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
     conversation.current = null;
     agentActivity.set(0);
     setAgentStatus('');
-    if (speechRecognitionService.isListening()) {
-      speechRecognitionService.stopListening();
-    }
+    speechRecognitionService.cancelListening();
     resources.current?.stream.getTracks().forEach((track) => track.stop());
     void resources.current?.context.close().catch(() => {});
     resources.current = null;
@@ -59,6 +55,7 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
   useEffect(
     () => () => {
       generation.current++;
+      speechRecognitionService.cancelListening();
       cancelAnimationFrame(frame.current);
       void conversation.current?.endSession().catch(() => {});
       resources.current?.stream.getTracks().forEach((track) => track.stop());
@@ -96,6 +93,7 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
     setPending(true);
     setError('');
     const agent = agentTools ? await agentAvailable() : { ready: false, session: '' };
+    if (request !== generation.current) return;
     if (agent.ready) {
       try {
         await startAgent(request, agent.session);
@@ -131,48 +129,6 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
       resources.current = { stream, context };
       setAnalyser(meter);
 
-      if (speechRecognitionService.isSupported()) {
-        speechRecognitionService.startListening({
-          continuous: true,
-          interimResults: false,
-          onResult: async (text, isFinal) => {
-            if (request !== generation.current || !isFinal) return;
-            const userText = text.trim();
-            if (!userText) return;
-            setCaptions((list) =>
-              [...list, { id: ++captionId.current, from: 'user' as const, text: userText }].slice(-30)
-            );
-            const intent = parseVoiceCommand(userText);
-            if (intent.kind === 'narrate' && agentTools?.describe_storyboard) {
-              const reply = await Promise.resolve(agentTools.describe_storyboard({}));
-              if (request === generation.current && reply) {
-                setCaptions((list) =>
-                  [...list, { id: ++captionId.current, from: 'assistant' as const, text: reply }].slice(-30)
-                );
-                speechService.speak(reply, true);
-              }
-            } else if (intent.kind === 'playback' && agentTools?.run_command) {
-              const reply = await Promise.resolve(agentTools.run_command({ command: intent.action }));
-              if (request === generation.current && reply) {
-                setCaptions((list) =>
-                  [...list, { id: ++captionId.current, from: 'assistant' as const, text: reply }].slice(-30)
-                );
-                speechService.speak(reply, true);
-              }
-            } else if (agentTools?.set_direction) {
-              const reply = await Promise.resolve(agentTools.set_direction({ text: userText }));
-              if (request === generation.current && reply) {
-                setCaptions((list) =>
-                  [...list, { id: ++captionId.current, from: 'assistant' as const, text: reply }].slice(-30)
-                );
-                speechService.speak(reply, true);
-              }
-            }
-          },
-          onError: () => {},
-          onStateChange: () => {},
-        });
-      }
     } catch (reason) {
       stream?.getTracks().forEach((track) => track.stop());
       void context?.close().catch(() => {});
@@ -229,7 +185,7 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
         </motion.div>
       </motion.button>
       <span id="voice-orb-status" className={open || error ? 'voice-orb-status' : 'sr-only'} role="status">
-        {error || (renderError ? 'Orb unavailable' : pending ? 'Waiting for microphone permission' : agentStatus ? agentStatus : analyser ? 'Microphone on. Voice agent not connected, so speech only goes into the script.' : 'Microphone off')}
+        {error || (renderError ? 'Orb unavailable' : pending ? 'Waiting for microphone permission' : agentStatus ? agentStatus : analyser ? 'Microphone on. Local sound visualization only; transcription is not connected.' : 'Microphone off')}
       </span>
     </div>
   );

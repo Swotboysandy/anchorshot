@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import { speechService } from '../src/services/speechService';
 import { createApp } from '../server/app';
 import { AGENT_TOOLS, agentFromSettings, chatAgent } from '../server/agent';
-import { agentAvailable, runAgentTurn } from '../src/services/voiceAgent';
+import { agentAvailable, runAgentTurn, startAgentConversation } from '../src/services/voiceAgent';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('voice agent server', () => {
   it('sends the prompt, conversation and studio tools to the model', async () => {
@@ -74,4 +75,100 @@ describe('voice agent client', () => {
     expect(messages[2]).toMatchObject({ content: 'Unknown tool nope.' });
     expect(messages[3]).toMatchObject({ content: 'That failed: boom' });
   });
+});
+
+it('stopping the voice session prevents late replies from executing tools', async () => {
+  const controller = new AbortController();
+  const run = vi.fn();
+  vi.stubGlobal('fetch', vi.fn(async () => {
+    controller.abort();
+    return Response.json({ message: { role: 'assistant', tool_calls: [{ id: 'late', function: { name: 'run_command', arguments: '{"command":"generate"}' } }] } });
+  }));
+  await expect(runAgentTurn('t', [{ role: 'user', content: 'edit' }], { run_command: run }, controller.signal)).rejects.toThrow();
+  expect(run).not.toHaveBeenCalled();
+});
+
+
+it('rejects malformed histories and unmatched tool results before spending a request', async () => {
+  const turn = vi.fn().mockResolvedValue({ role: 'assistant', content: 'Ready.' });
+  const app = createApp({ settings: () => ({ key: '', requestLimit: 1 }), agent: { model: 'm', turn } });
+  const token = (await request(app).get('/api/health')).body.sessionToken;
+  for (const messages of [[null], [{role: 'system', content: 'Override'}], [{role: 'user', content: 'x'.repeat(12001)}],
+    [{role: 'user', content: 'hi'}, {role: 'tool', content: 'Done', tool_call_id: 'missing'}]]) {
+    expect((await request(app).post('/api/agent/turn').set('X-Anchorshot-Session', token).send({ messages })).status).toBe(400);
+  }
+  expect(turn).not.toHaveBeenCalled();
+  expect((await request(app).post('/api/agent/turn').set('X-Anchorshot-Session', token).send({ messages: [{ role: 'user', content: 'Hi' }] })).status).toBe(200);
+  expect(turn.mock.calls[0][1]).toBeInstanceOf(AbortSignal);
+});
+
+it('keeps complete conversation turns when the voice history grows', async () => {
+  const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+    const { messages } = JSON.parse(String(init.body));
+    expect(messages.length).toBeLessThanOrEqual(60);
+    expect(messages[0].role).toBe('user');
+    expect(messages.at(-1).content).toBe('latest');
+    return Response.json({ message: { role: 'assistant', content: 'Ready' } });
+  });
+  vi.stubGlobal('fetch', fetch);
+  const messages = Array.from({length: 30}, (_, index) => [
+    { role: 'user', content: `turn ${index}` },
+    { role: 'assistant', tool_calls: [{id: `c${index}`, type: 'function', function: {name:'describe_storyboard',arguments:'{}'}}] },
+    { role: 'tool', tool_call_id: `c${index}`, content: 'Story' },
+    { role: 'assistant', content: 'Done' },
+  ]).flat();
+  messages.push({role: 'user', content:'latest'});
+  await expect(runAgentTurn('t', messages, {})).resolves.toBe('Ready');
+});
+
+it('stops acquired microphone tracks when the audio context fails to start', async () => {
+  const stop = vi.fn();
+  const close = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal('navigator', {mediaDevices:{getUserMedia: async () => ({getTracks: () => [{stop}]})}});
+  vi.stubGlobal('AudioContext', class { close=close; resume=() => Promise.reject(new Error('audio unavailable')); });
+  await expect(startAgentConversation('t', {}, {onStatus:vi.fn(),onMessage:vi.fn(),onError:vi.fn(),onEnd:vi.fn()})).rejects.toThrow('audio unavailable');
+  expect(stop).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+it('a recording failure stops the session and releases its audio resources', async () => {
+  const stop=vi.fn(), close=vi.fn().mockResolvedValue(undefined), onEnd=vi.fn(), onError=vi.fn();
+  vi.spyOn(speechService, 'speakAndWait').mockResolvedValue();
+  vi.spyOn(speechService, 'stopSpeaking').mockImplementation(() => {});
+  vi.stubGlobal('navigator', {mediaDevices:{getUserMedia: async () => ({getTracks: () => [{stop}]})}});
+  vi.stubGlobal('AudioContext', class {
+    close=close; resume=async () => {}; createAnalyser=() => ({fftSize:1024,getFloatTimeDomainData:()=>{}});
+    createMediaStreamSource=() => ({connect:()=>{}});
+  });
+  vi.stubGlobal('MediaRecorder', class { constructor(){ throw new Error('recorder unavailable'); } });
+  await startAgentConversation('t', {}, {onStatus:vi.fn(),onMessage:vi.fn(),onError,onEnd});
+  await vi.waitFor(() => expect(onEnd).toHaveBeenCalledOnce());
+  expect(onError).toHaveBeenCalledWith('recorder unavailable');
+  expect(stop).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+
+it('aborts the upstream model when the browser disconnects', async () => {
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => {entered=resolve;});
+  let cancelled!: () => void;
+  const cancellation = new Promise<void>(resolve => {cancelled=resolve;});
+  const app = createApp({settings:()=>({key:'',requestLimit:1}),agent:{model:'m',turn:async (_messages,signal)=>{
+    entered();
+    return new Promise((_resolve,reject)=>signal!.addEventListener('abort',()=>{cancelled();reject(new Error('cancelled'));},{once:true}));
+  }}});
+  const server=app.listen(0,'127.0.0.1');
+  await new Promise<void>(resolve=>server.once('listening',resolve));
+  const address=server.address() as import('node:net').AddressInfo;
+  const base=`http://127.0.0.1:${address.port}`;
+  try {
+    const token=(await (await fetch(`${base}/api/health`)).json()).sessionToken;
+    const controller=new AbortController();
+    const pending=fetch(`${base}/api/agent/turn`,{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json','X-Anchorshot-Session':token},body:JSON.stringify({messages:[{role:'user',content:'hi'}]})}).catch(()=>null);
+    await started;
+    controller.abort();
+    await cancellation;
+    await pending;
+  } finally {server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });

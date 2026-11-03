@@ -1,3 +1,4 @@
+import {cameraFrame} from '../lib/cameraFrame';
 import { recolorMaskedPixels, detectMaskedColor, type MaskVerificationReport, type DetectedMaskColor } from './maskIntegrity';
 import { BoundingBox, PixelVerificationReport, SamMask, StoryboardShot } from '../types/framelock';
 
@@ -39,8 +40,14 @@ export function resolveColorPalette(colorName: string) {
  * Computes deterministic bounding box (in normalized 0..100 percentages of 800x450 canvas)
  * for the primary continuity object based on camera framing.
  */
+/** Only these objects have authored sample drawings; other concepts need real media. */
+export function supportsOfflineSampleObject(targetObject: string): boolean {
+  return ['cup','mug','umbrella','jacket','coat','car','vehicle','automobile','altar','church'].includes(targetObject.trim().toLowerCase());
+}
+
 export function getTargetObjectBox(cameraAngle: SceneRenderSpec['cameraAngle'], targetObject: string): BoundingBox {
   const obj = targetObject.toLowerCase();
+  if (!supportsOfflineSampleObject(targetObject)) return {x:0,y:0,width:0,height:0};
   if (obj.includes('car') || obj.includes('vehicle') || obj.includes('automobile')) {
     if (cameraAngle === 'closeup') return { x: 18, y: 38, width: 64, height: 44 };
     if (cameraAngle === 'medium') return { x: 25, y: 45, width: 50, height: 38 };
@@ -218,7 +225,7 @@ export function renderMuseStoryboardFrame(spec: SceneRenderSpec): {
   ctx.restore();
 
   // 5. Render Target Continuity Object inside its exact BoundingBox
-  const box = getTargetObjectBox(spec.cameraAngle, spec.targetObject);
+  const box = spec.targetObject.trim() ? getTargetObjectBox(spec.cameraAngle, spec.targetObject) : {x:0,y:0,width:0,height:0};
   const pxBox = {
     x: (box.x / 100) * width,
     y: (box.y / 100) * height,
@@ -226,7 +233,7 @@ export function renderMuseStoryboardFrame(spec: SceneRenderSpec): {
     h: (box.height / 100) * height,
   };
 
-  drawTargetObjectInBox(ctx, pxBox, spec.targetObject, spec.objectColorName);
+  if (supportsOfflineSampleObject(spec.targetObject)) drawTargetObjectInBox(ctx, pxBox, spec.targetObject, spec.objectColorName);
 
   // 6. Cinematic Storyboard Frame HUD Stamp (Top-Left Slate & Camera Framing Guides)
   ctx.save();
@@ -794,6 +801,7 @@ export async function exportStoryboardAnimaticVideo(
     return null;
   }
 
+  if(shots.some(shot=>shot.videoUrl||shot.narrationDataUrl))throw new Error('Moving clips and narration require MP4 export; a silent still fallback would lose content.');
   const width = 800;
   const height = 450;
   const canvas = document.createElement('canvas');
@@ -804,24 +812,19 @@ export async function exportStoryboardAnimaticVideo(
     return null;
   }
 
-  const loadedImages: HTMLImageElement[] = await Promise.all(
-    shots.map(
-      (shot) =>
-        new Promise<HTMLImageElement>((resolve) => {
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          img.onload = () => resolve(img);
-          img.onerror = () => resolve(img);
-          img.src = shot.currentImageUrl;
-        })
-    )
-  );
+  if (!shots.length || shots.some(shot => !Number.isFinite(shot.durationSeconds) || shot.durationSeconds < 0.5))
+    throw new Error('Choose valid shots before exporting.');
+  const loadedImages = await Promise.all(shots.map(shot => decodeFrame(shot.currentImageUrl)));
 
+  const {fixWebmDuration} = await import('@fix-webm-duration/fix');
+  if(document.hidden)throw new Error('Keep this tab visible for browser export, or use local MP4 export.');
   const stream = canvas.captureStream(30);
   const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
     ? 'video/webm;codecs=vp9'
     : 'video/webm';
-  const recorder = new MediaRecorder(stream, { mimeType });
+  let recorder:MediaRecorder;
+  try {recorder=new MediaRecorder(stream,{mimeType});}
+  catch(error){stream.getTracks().forEach(track=>track.stop());throw error;}
   const chunks: Blob[] = [];
 
   recorder.ondataavailable = (e) => {
@@ -830,35 +833,48 @@ export async function exportStoryboardAnimaticVideo(
     }
   };
 
-  return new Promise((resolve) => {
-    // 45s watchdog timer to prevent indefinite hangs if MediaRecorder stalls
+  return new Promise((resolve, reject) => {
+    let settled = false, completed = false;
+    const recordingStarted = performance.now();
+    let lastCapture=recordingStarted;
+    let drawCurrent = () => {};
+    let nextShotTimer: ReturnType<typeof setTimeout>;
+    let captureTimer: ReturnType<typeof setInterval>;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdogTimer);
+      clearTimeout(nextShotTimer);
+      clearInterval(captureTimer);
+      document.removeEventListener('visibilitychange',onVisibilityChange);
+      recorder.ondataavailable=null;recorder.onstop=null;recorder.onerror=null;
+      if(recorder.state!=='inactive'){try{recorder.stop();}catch(stopError){error ||= stopError instanceof Error?stopError:new Error('Recorder could not stop.');}}
+      stream.getTracks().forEach(track => track.stop());
+      if (error) reject(error);
+      else if (!chunks.length) resolve(null);
+      else fixWebmDuration(new Blob(chunks, {type:mimeType}), performance.now()-recordingStarted, {logger:false}).then(resolve,reject);
+    };
+    const onVisibilityChange = () => {
+      if(!document.hidden)return;
+      finish(new Error('Browser export stopped because this tab was hidden. No partial film was downloaded. Keep the tab visible and retry.'));
+    };
+    document.addEventListener('visibilitychange',onVisibilityChange);
     const watchdogTimer = setTimeout(() => {
-      try {
-        if (recorder.state !== 'inactive') recorder.stop();
-      } catch {}
-      const blob = chunks.length > 0 ? new Blob(chunks, { type: mimeType }) : null;
-      resolve(blob);
-    }, 45000);
-
+      finish(new Error('Browser export timed out. No partial film was downloaded.'));
+    }, (shots.reduce((seconds, shot) => seconds + shot.durationSeconds, 0) + 10) * 1000);
     recorder.onerror = () => {
-      clearTimeout(watchdogTimer);
-      try {
-        if (recorder.state !== 'inactive') recorder.stop();
-      } catch {}
-      resolve(null);
+      finish(new Error('The browser could not record this film.'));
     };
-
-    recorder.onstop = () => {
-      clearTimeout(watchdogTimer);
-      const blob = new Blob(chunks, { type: mimeType });
-      resolve(blob);
-    };
-
-    recorder.start();
+    recorder.onstop = () => finish(completed?undefined:new Error('Browser recorder stopped before completion. No partial film was downloaded.'));
+    try { recorder.start(); } catch (error) { finish(error as Error); return; }
 
     let shotIdx = 0;
     const renderNextShot = () => {
+      if (settled) return;
+      try {
+      if(performance.now()-lastCapture>2000)throw new Error('Browser capture was interrupted for over two seconds. No partial film was downloaded.');
       if (shotIdx >= shots.length) {
+        completed=true;
         recorder.stop();
         return;
       }
@@ -866,42 +882,35 @@ export async function exportStoryboardAnimaticVideo(
       const shot = shots[shotIdx];
       const img = loadedImages[shotIdx];
 
-      ctx.fillStyle = '#121417';
-      ctx.fillRect(0, 0, width, height);
-      if (img && img.width > 0) {
-        ctx.drawImage(img, 0, 0, width, height);
-      }
-
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
-      ctx.fillRect(0, height - 68, width, 68);
-      ctx.strokeStyle = '#38BDF8';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(0, height - 68);
-      ctx.lineTo(width, height - 68);
-      ctx.stroke();
-
-      ctx.fillStyle = '#38BDF8';
-      ctx.font = '700 12px "JetBrains Mono", monospace';
-      ctx.fillText(
-        `ANCHORSHOT · ${projectTitle.toUpperCase()} · SHOT 0${shot.shotNumber} (${shot.status.toUpperCase()})`,
-        20,
-        height - 42
-      );
-
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = '500 13px "Inter", sans-serif';
-      const caption =
-        shot.promptDescription.length > 86
-          ? `${shot.promptDescription.slice(0, 86)}...`
-          : shot.promptDescription;
-      ctx.fillText(caption, 20, height - 18);
+      const base=document.createElement('canvas');base.width=width;base.height=height;
+      const baseContext=base.getContext('2d')!;
+      baseContext.fillStyle='#000000';baseContext.fillRect(0,0,width,height);
+      const scale=Math.min(width/img.width,height/img.height);
+      const drawWidth=img.width*scale,drawHeight=img.height*scale;
+      baseContext.drawImage(img,(width-drawWidth)/2,(height-drawHeight)/2,drawWidth,drawHeight);
+      const shotStarted=performance.now();
+      drawCurrent=()=>{
+        const now=performance.now();
+        if(now-lastCapture>2000)throw new Error('Browser capture was interrupted for over two seconds. No partial film was downloaded.');
+        lastCapture=now;
+        const crop=cameraFrame(shot.movement,(performance.now()-shotStarted)/1000,shot.durationSeconds,width,height);
+        ctx.drawImage(base,crop.x,crop.y,crop.width,crop.height,0,0,width,height);
+      };
+      drawCurrent();
 
       const shotDurationMs = Math.max(500, Math.round((shot.durationSeconds || 3.5) * 1000));
       shotIdx++;
-      setTimeout(renderNextShot, shotDurationMs);
+      nextShotTimer = setTimeout(renderNextShot, shotDurationMs);
+      }catch(error){finish(error instanceof Error?error:new Error('Browser frame rendering failed.'));}
     };
 
     renderNextShot();
+    if(settled)return;
+    // A static canvas otherwise records only its changed frames, truncating holds.
+    captureTimer = setInterval(() => {
+      if (!settled && recorder.state === 'recording') {
+        try{drawCurrent();}catch(error){finish(error instanceof Error?error:new Error('Browser frame rendering failed.'));}
+      }
+    }, 1000 / 30);
   });
 }

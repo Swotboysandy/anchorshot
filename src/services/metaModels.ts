@@ -1,3 +1,4 @@
+import { normalizeContinuityColor } from './maskIntegrity';
 import {
   BoundingBox,
   ContinuityFinding,
@@ -23,12 +24,13 @@ import {
   applySamPixelFixWithVerification,
   generateSam3MaskData,
   getTargetObjectBox,
+  supportsOfflineSampleObject,
   renderMuseStoryboardFrame,
   sampleImageColorInMask,
   SceneRenderSpec,
 } from './canvasEngine';
 import { toDataUrl } from './animaticExport';
-import { isGeneratedImage } from './localGeneration';
+import { isGeneratedImage, isGeneratedShot } from './localGeneration';
 import { expandMask } from '../lib/correction';
 import { buildShotPrompt, castInShot, normalizeCast, normalizeShot, propInShot, type CastMember, type ShotSize, type ShotSpec } from '../lib/shotLanguage';
 
@@ -61,7 +63,7 @@ export const DIRECTOR_PRESETS: DirectorPresetScenario[] = [
     genre: 'Neo-Noir Thriller',
     description: '4-shot sequence with an intentional prop color continuity error in Shot 2 (Red vs Blue ceramic coffee cup).',
     transcript:
-      ' Continuity Rule across all shots: the ceramic coffee cup on the diner counter must be cobalt blue. Shot 1: Wide establishing shot of Detective Miller seated at the rain-streaked midnight diner counter with the blue ceramic cup in front of him. Shot 2: Medium shot as Miller leans toward the counter; a ceramic cup sits beside his notebook. Shot 3: Extreme close-up on Miller’s hand reaching for the blue ceramic coffee cup as neon light reflects off the rim. Shot 4: Over-the-shoulder shot looking past Miller toward the rain-soaked window, the blue cup resting on the counter.',
+      ' Continuity Rule across all shots: the ceramic coffee cup on the diner counter must be cobalt blue. Shot 1: Wide establishing shot of Detective Miller seated at the rain-streaked midnight diner counter with the blue ceramic cup in front of him. Shot 2: Medium shot as Miller leans toward the counter; a ceramic cup sits beside his notebook. Shot 3: Extreme close-up on Millerâ€™s hand reaching for the blue ceramic coffee cup as neon light reflects off the rim. Shot 4: Over-the-shoulder shot looking past Miller toward the rain-soaked window, the blue cup resting on the counter.',
   },
   {
     id: 'harbor-beacon',
@@ -69,7 +71,7 @@ export const DIRECTOR_PRESETS: DirectorPresetScenario[] = [
     genre: 'Mystery Drama',
     description: '4-shot sequence auditing rain umbrella continuity (Amber vs Crimson umbrella mismatch in Shot 3).',
     transcript:
-      'Continuity Rule for all shots: the detective’s storm umbrella must be bright amber. Shot 1: Wide shot on the fog pier at dusk with the detective holding the amber umbrella near the railing. Shot 2: Medium profile shot as the detective checks his watch under the amber umbrella. Shot 3: Close-up on the umbrella canopy under the pier streetlamp as rain intensifies. Shot 4: Over-the-shoulder shot watching a ferry approach through the fog with the amber umbrella in frame.',
+      'Continuity Rule for all shots: the detectiveâ€™s storm umbrella must be bright amber. Shot 1: Wide shot on the fog pier at dusk with the detective holding the amber umbrella near the railing. Shot 2: Medium profile shot as the detective checks his watch under the amber umbrella. Shot 3: Close-up on the umbrella canopy under the pier streetlamp as rain intensifies. Shot 4: Over-the-shoulder shot watching a ferry approach through the fog with the amber umbrella in frame.',
   },
   {
     id: 'courier-protocol',
@@ -77,7 +79,7 @@ export const DIRECTOR_PRESETS: DirectorPresetScenario[] = [
     genre: 'Cyber-Noir',
     description: '4-shot sequence verifying wardrobe color lock on the courier jacket across camera angles.',
     transcript:
-      'Continuity Rule across all shots: the courier jacket must remain emerald green. Shot 1: Wide shot inside the terminal café with the courier wearing the emerald jacket. Shot 2: Medium shot at the booth table showing the courier jacket sleeve and collar. Shot 3: Close-up on the courier jacket pocket as a keycard is slipped inside. Shot 4: Over-the-shoulder view of the exit doors with the emerald jacket in foreground.',
+      'Continuity Rule across all shots: the courier jacket must remain emerald green. Shot 1: Wide shot inside the terminal cafÃ© with the courier wearing the emerald jacket. Shot 2: Medium shot at the booth table showing the courier jacket sleeve and collar. Shot 3: Close-up on the courier jacket pocket as a keycard is slipped inside. Shot 4: Over-the-shoulder view of the exit doors with the emerald jacket in foreground.',
   },
 ];
 
@@ -195,7 +197,7 @@ export class MetaModelClient {
     await new Promise((r) => setTimeout(r, 320));
     const transcript =
       fallbackCommandText?.trim() ||
-      'Continuity Rule across all shots: the ceramic coffee cup must be blue. Shot 2 has a red cup discrepancy—segment the cup and recolor it to cobalt blue.';
+      'Continuity Rule across all shots: the ceramic coffee cup must be blue. Shot 2 has a red cup discrepancyâ€”segment the cup and recolor it to cobalt blue.';
 
     this.recordCall(
       'muse-voice-transcribe-1.0',
@@ -211,7 +213,7 @@ export class MetaModelClient {
   }
 
   /**
-   * 2A. `muse-spark-1.3` — Continuity Rule Extraction (Structured JSON Output)
+   * 2A. `muse-spark-1.3` â€” Continuity Rule Extraction (Structured JSON Output)
    */
   public async extractContinuityRules(transcript: string): Promise<ContinuityRule[]> {
     const live = await this.planWithServer(transcript);
@@ -221,7 +223,7 @@ export class MetaModelClient {
 
     let detectedObject = '';
     for (const obj of KNOWN_OBJECTS) {
-      if (lower.includes(obj)) {
+      if (new RegExp(`\\b${obj}(?:s|es)?\\b`).test(lower)) {
         detectedObject =
           obj === 'mug' ? 'cup' :
           obj === 'coat' ? 'jacket' :
@@ -242,7 +244,7 @@ export class MetaModelClient {
     // Look for "must be <color>" or "remain <color>" or first mentioned color in rule sentence
     const ruleSentence = transcript.split('.')[0]?.toLowerCase() || lower;
     for (const col of KNOWN_COLORS) {
-      if (ruleSentence.includes(col)) {
+      if (new RegExp(`\\b${col}\\b`).test(ruleSentence)) {
         detectedColor =
           col === 'cobalt'
             ? 'blue'
@@ -287,21 +289,23 @@ export class MetaModelClient {
 
   /**
    * Uses the server's connected planner (for example Meta muse-spark through Baseten).
-   * Returns null when only the offline fixture is available or the call fails, so the
-   * local keyword planner still answers.
+   * Returns null only when no live planner is configured. Connected-provider failures
+   * are surfaced instead of being disguised as sample generation.
    */
   private async planWithServer(transcript: string): Promise<{ rules: ContinuityRule[]; shots?: PlannedShot[]; cast?: CastMember[] } | null> {
     if (typeof fetch !== 'function') return null;
+    let live = false;
     try {
       const health = await (await fetch('/api/health')).json();
       if (health?.plannerLive !== true) return null;
+      live = true;
       const res = await fetch('/api/muse/spark', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Anchorshot-Session': String(health.sessionToken ?? '') },
         body: JSON.stringify({ transcript, previousRevision: 0 }),
       });
       const plan = await res.json();
-      if (!res.ok || !Array.isArray(plan.rules)) return null;
+      if (!res.ok || !Array.isArray(plan.rules)) throw new Error(plan.error || 'The planner returned an invalid plan.');
       const rules: ContinuityRule[] = plan.rules;
       const anchor = rules[0]?.targetObject;
       this.recordCall(
@@ -329,7 +333,8 @@ export class MetaModelClient {
         shots,
         cast: normalizeCast(plan.cast),
       };
-    } catch {
+    } catch (error) {
+      if (live) throw error;
       return null;
     }
   }
@@ -355,17 +360,10 @@ export class MetaModelClient {
     const plannedShots = plan?.shots;
     const shotCount = plannedShots?.length ?? 4;
 
-    const primaryRule = rules[0] || {
-      id: 'rule-cup-color',
-      scope: 'all_shots',
-      targetObject: 'cup',
-      property: 'color',
-      expectedValue: 'blue',
-      revision: 1,
-    };
-
-    const targetObject = primaryRule.targetObject;
-    const expectedColor = primaryRule.expectedValue;
+    const primaryRule = rules[0];
+    const targetObject = primaryRule?.targetObject ?? '';
+    const expectedColor = primaryRule?.expectedValue ?? '';
+    const sampleObjectSupported = supportsOfflineSampleObject(targetObject);
     const mismatchedColor =
       expectedColor === 'white'
         ? 'red'
@@ -430,7 +428,7 @@ export class MetaModelClient {
       const cameraAngle = planned ? canvasFraming(planned.size) : cameraSequence[i % cameraSequence.length];
       const framing = planned ? describeFraming(planned) : `${cameraAngle.replace('_', ' ')} framing`;
       const durationSeconds = planned?.seconds ?? (shotNumber === 1 ? 4.0 : 3.5);
-      const hasDiscrepancy = injectIntentionalDiscrepancy && rules.length > 0 && shotNumber === mismatchShotNumber;
+      const hasDiscrepancy = injectIntentionalDiscrepancy && sampleObjectSupported && rules.length > 0 && shotNumber === mismatchShotNumber;
       const isUncertainOcclusion =
         injectIntentionalDiscrepancy && targetObject === 'jacket' && shotNumber === 4;
       const actualRenderedColor = hasDiscrepancy ? mismatchedColor : expectedColor;
@@ -463,40 +461,6 @@ export class MetaModelClient {
         seed: shotNumber * 17,
       });
 
-      // If live Meta API is available, generate real AI frame with muse-image-1.0!
-      if (typeof window !== 'undefined' && shotNumber === mismatchShotNumber) {
-        try {
-          const healthRes = await fetch('/api/health');
-          if (healthRes.ok) {
-            const health = await healthRes.json();
-            if (health.configured && health.sessionToken) {
-              const frameRes = await fetch('/api/meta/generate-frame', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-Framelock-Session': health.sessionToken,
-                  'X-Anchorshot-Session': health.sessionToken,
-                },
-                body: JSON.stringify({ prompt: basePrompt }),
-              });
-              if (frameRes.ok) {
-                const frameData = await frameRes.json();
-                if (frameData.imageUrl) {
-                  imageUrl = frameData.imageUrl;
-                  this.recordCall(
-                    'muse-image-1.0',
-                    `generateFrame(Shot ${shotNumber}) [LIVE META API]`,
-                    `Rendered real 800x450 image via Meta muse-image-1.0 for "${basePrompt.slice(0, 50)}..."`
-                  );
-                }
-              }
-            }
-          }
-        } catch {
-          // Gracefully fallback to canvas image
-        }
-      }
-
       this.recordCall(
         'muse-image-1.0',
         `generateFrame(Shot ${shotNumber})`,
@@ -510,22 +474,26 @@ export class MetaModelClient {
           targetObject,
           box,
           isUncertainOcclusion ? 0.724 : 0.986,
-          primaryRule.revision,
+          (primaryRule?.revision ?? 0),
           imageUrl
         );
       }
 
-      const shotStatus = hasDiscrepancy
+      const shotStatus = !sampleObjectSupported ? 'uncertain' : hasDiscrepancy
         ? 'mismatch'
         : isUncertainOcclusion
         ? 'uncertain'
         : 'consistent';
 
-      const spokenDescription = hasDiscrepancy
+      const spokenDescription = primaryRule && !sampleObjectSupported
+        ? `Shot ${shotNumber}, ${framing}, duration ${durationSeconds} seconds. ${basePrompt}. Generic offline preview: ${targetObject} is not rendered. Its continuity is not checked.`
+        : !primaryRule
+        ? `Shot ${shotNumber}, ${framing}, duration ${durationSeconds} seconds. ${basePrompt}. Generic offline preview; no continuity object selected and continuity is not checked.`
+        : hasDiscrepancy
         ? `Shot ${shotNumber}, ${framing}, duration ${durationSeconds} seconds. ${basePrompt}. Continuity Alert: ${targetObject} rendered in ${actualRenderedColor} instead of expected ${expectedColor}. Press Y to apply SAM 3.1 mask recolor to ${expectedColor}.`
         : isUncertainOcclusion
-        ? `Shot ${shotNumber}, ${framing}, duration ${durationSeconds} seconds. ${basePrompt}. Continuity Uncertain: partial foreground occlusion on ${targetObject} (72.4% confidence). Press Y to confirm SAM 3.1 mask and lock ${expectedColor}.`
-        : `Shot ${shotNumber}, ${framing}, duration ${durationSeconds} seconds. ${basePrompt}. Continuity verified: ${targetObject} color is ${expectedColor}.`;
+        ? `Shot ${shotNumber}, ${framing}, duration ${durationSeconds} seconds. ${basePrompt}. Offline sample has an ambiguous ${targetObject}. Mask accuracy is not measured. Review the selection before correcting its color.`
+        : `Shot ${shotNumber}, ${framing}, duration ${durationSeconds} seconds. ${basePrompt}. Offline sample: ${targetObject} is drawn in ${expectedColor}.`;
 
       shots.push({
         id: `shot-${shotNumber}`,
@@ -536,11 +504,12 @@ export class MetaModelClient {
         spokenDescription,
         currentImageUrl: imageUrl,
         originalImageUrl: imageUrl,
+        mediaSource: 'sample',
         status: shotStatus,
         discrepancyMessage: hasDiscrepancy
-          ? `Visual audit detected a ${actualRenderedColor} ${targetObject} in Shot ${shotNumber}, violating rule "${targetObject}.color = ${expectedColor}" (rev ${primaryRule.revision}).`
+          ? `Visual audit detected a ${actualRenderedColor} ${targetObject} in Shot ${shotNumber}, violating rule "${targetObject}.color = ${expectedColor}" (rev ${(primaryRule?.revision ?? 0)}).`
           : isUncertainOcclusion
-          ? `SAM 3.1 flagged partial occlusion ambiguity (72.4% IoU) on ${targetObject} in Shot ${shotNumber}. Confirm mask selection (${samMask?.maskRef}) to verify continuity.`
+          ? `Offline sample includes an ambiguous ${targetObject} in Shot ${shotNumber}. Review its selection; mask accuracy is not measured.`
           : undefined,
         proposedFix:
           hasDiscrepancy || isUncertainOcclusion
@@ -557,7 +526,7 @@ export class MetaModelClient {
                           ...samMask,
                           id: `${samMask.id}-alt`,
                           objectId: '1',
-                          maskRef: `sam-3.1:${targetObject.toLowerCase().replace(/\s+/g, '-')}:1:v${primaryRule.revision}`,
+                          maskRef: `sam-3.1:${targetObject.toLowerCase().replace(/\s+/g, '-')}:1:v${(primaryRule?.revision ?? 0)}`,
                           confidence: 0.682,
                         },
                       ]
@@ -571,8 +540,9 @@ export class MetaModelClient {
             revisionId: `rev-${shotNumber}-initial`,
             timestamp: Date.now() - (shotCount - i) * 15000,
             imageUrl,
-            actionApplied: `Initial generation via muse-image-1.0 (${actualRenderedColor} ${targetObject})`,
-            ruleRevision: primaryRule.revision,
+            mediaSource: 'sample',
+            actionApplied: primaryRule && !sampleObjectSupported ? `Generic offline preview; ${targetObject} not rendered` : primaryRule ? `Offline sample (${actualRenderedColor} ${targetObject})` : 'Generic offline preview; no continuity object selected',
+            ruleRevision: (primaryRule?.revision ?? 0),
             maskRef: samMask?.maskRef,
           },
         ],
@@ -651,12 +621,14 @@ export class MetaModelClient {
         spokenDescription: `Shot ${shotNumber}, ${describeFraming(shot)}, duration ${durationSeconds} seconds. ${subject}. Generated image; continuity unreviewed.`,
         currentImageUrl: frame.url,
         originalImageUrl: frame.url,
+        mediaSource: 'generated',
         status: 'uncertain',
         revisions: [
           {
             revisionId: `rev-${shotNumber}-initial`,
             timestamp: Date.now(),
             imageUrl: frame.url,
+            mediaSource: 'generated',
             actionApplied: `Generated by ${model}; unreviewed`,
             ruleRevision: anchor?.revision ?? 1,
           },
@@ -694,6 +666,7 @@ export class MetaModelClient {
         if (healthRes.ok) {
           const health = await healthRes.json();
           if (health.configured && health.sessionToken) {
+            this.sessionToken = health.sessionToken;
             // Generated frames are served by URL; SAM needs the bytes inline.
             const frameData = await toDataUrl(imageUrl);
             const base64Data = frameData.split(',')[1] || '';
@@ -717,63 +690,42 @@ export class MetaModelClient {
                 concept: targetObject,
                 sourceHash,
                 shotNumber,
+                ruleRevision: revision,
               }),
             });
 
-            if (liveRes.ok) {
-              const liveData = await liveRes.json();
-              if (liveData && liveData.objects?.[0]) {
-                // SAM lists every match, bystanders included, in no useful order: take its most confident.
-                const liveObj = liveData.objects.reduce((best: any, o: any) =>
-                  (o.confidence ?? 0) > (best.confidence ?? 0) ? o : best
-                );
-                // Use SAM's real pixels, so colour checks do not average in the background.
-                const maskCanvas = document.createElement('canvas');
-                maskCanvas.width = liveObj.width;
-                maskCanvas.height = liveObj.height;
-                const mCtx = maskCanvas.getContext('2d');
-                if (mCtx) {
-                  const expanded = expandMask(liveObj);
-                  const overlay = mCtx.createImageData(liveObj.width, liveObj.height);
-                  expanded.forEach((on: number, pixel: number) => {
-                    if (on) overlay.data.set([56, 189, 248, 255], pixel * 4);
-                  });
-                  mCtx.putImageData(overlay, 0, 0);
-                }
-                const maskPngDataUrl = maskCanvas.toDataURL('image/png');
-
-                const liveMask: SamMask = {
-                  id: `mask-${targetObject}-${shotNumber}`,
-                  maskRef: liveData.maskRef || `sam-3.1:${targetObject}:0:v${revision}`,
-                  objectId: '0',
-                  box: {
-                    x: Math.round((liveObj.bounds.left / liveObj.width) * 100),
-                    y: Math.round((liveObj.bounds.top / liveObj.height) * 100),
-                    width: Math.round(((liveObj.bounds.right - liveObj.bounds.left) / liveObj.width) * 100),
-                    height: Math.round(((liveObj.bounds.bottom - liveObj.bounds.top) / liveObj.height) * 100),
-                  },
-                  confidence: liveObj.confidence || 0.95,
-                  candidateCount: liveData.objects.length,
-                  maskBase64: maskPngDataUrl,
-                  provenance: 'live-sam-3.1',
-                };
-
-                this.recordCall(
-                  'sam-3.1',
-                  `segmentObject("${targetObject}", Shot ${shotNumber}) [LIVE META API]`,
-                  `Live Meta SAM 3.1 returned maskRef ${liveMask.maskRef} [confidence: ${(liveMask.confidence * 100).toFixed(1)}%, req: ${liveData.requestId}]`
-                );
-                return liveMask;
-              }
-            }
+            const liveData = await liveRes.json();
+            if (!liveRes.ok) throw new Error(liveData.error || `Segmentation failed (${liveRes.status}).`);
+            if (liveData.provenance !== 'live-sam-3.1' || !liveData.objects?.length) throw new Error(`No verified ${targetObject} mask was returned for this frame.`);
+            const candidates: SamMask[] = liveData.objects.map((object: any) => {
+              const canvas = document.createElement('canvas');
+              canvas.width = object.width; canvas.height = object.height;
+              const context = canvas.getContext('2d');
+              if (!context) throw new Error('Canvas is unavailable for the object mask.');
+              const overlay = context.createImageData(object.width, object.height);
+              expandMask(object).forEach((on: number, pixel: number) => { if (on) overlay.data.set([56,189,248,255],pixel*4); });
+              context.putImageData(overlay,0,0);
+              return {id:object.id, objectId:object.objectId, maskRef:object.maskRef,
+                sourceImageUrl:imageUrl, sourceHash, serverSessionId:liveData.maskSessionId, segmentationId:liveData.requestId, candidateCount:liveData.objects.length, provenance:'live-sam-3.1',
+                confidence:object.confidence ?? 0, providerConfidence:object.confidence, maskBase64:canvas.toDataURL('image/png'),
+                box:{x:object.bounds.left/object.width*100,y:object.bounds.top/object.height*100,
+                  width:(object.bounds.right-object.bounds.left)/object.width*100,height:(object.bounds.bottom-object.bounds.top)/object.height*100}};
+            });
+            const primary = candidates.find(mask => mask.objectId === liveData.selectedObjectId) ?? candidates[0];
+            this.recordCall('sam-3.1',`segmentObject("${targetObject}", Shot ${shotNumber}) [LIVE META API]`,
+              `Returned ${candidates.length} source-bound masks; selected ${primary.objectId}.`);
+            return {...primary,candidates};
           }
         }
-      } catch {
-        // Fall back gracefully to local fixture if network or live call unavailable
+      } catch (error) {
+        // A configured provider failure is not permission to substitute a sample mask.
+        throw new Error(error instanceof Error ? error.message : 'Object segmentation failed.');
       }
     }
 
     await new Promise((r) => setTimeout(r, 180));
+    if (!supportsOfflineSampleObject(targetObject)) throw new Error(`No offline sample mask exists for ${targetObject}. Select the object from real media instead.`);
+
     const generatedMask = generateSam3MaskData(
       `${targetObject}-shot-${shotNumber}`,
       box,
@@ -782,6 +734,7 @@ export class MetaModelClient {
     );
     const mask: SamMask = {
       ...generatedMask,
+      sourceImageUrl: imageUrl,
       provenance: generatedMask.provenance ?? 'offline-fixture',
     };
 
@@ -795,31 +748,43 @@ export class MetaModelClient {
   }
 
   /**
-   * Locks a director-selected SAM 3.1 candidate. An `uncertain` shot becomes
-   * `consistent`, and the active mask records the chosen object id and mask reference.
+   * Selects a known candidate without turning selection into a continuity verdict.
    */
   public async disambiguateMaskSelection(
     shot: StoryboardShot,
-    selectedObjectId: string
+    selectedObjectId: string,
+    signal?: AbortSignal
   ): Promise<StoryboardShot> {
+    const requestSignal=signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000);
+    requestSignal.throwIfAborted();
     const candidates = shot.proposedFix?.candidates ?? [];
     const selectedCandidate = candidates.find(
       (candidate) => candidate.objectId === selectedObjectId
     );
     const currentMask = selectedCandidate ?? shot.proposedFix?.mask;
-    const revision = currentMask?.maskRef.match(/:v(\d+)$/)?.[1] ?? '1';
-    const normalizedConcept = (shot.proposedFix?.targetObject ?? 'cup')
-      .toLowerCase()
-      .trim()
-      .replace(/\s+/g, '-');
-    let resolvedMaskRef = selectedCandidate
-      ? selectedCandidate.maskRef
-      : `sam-3.1:${normalizedConcept}:${selectedObjectId}:v${revision}`;
-    const nextStatus = shot.status === 'uncertain' ? 'consistent' : shot.status;
+    let resolvedMaskRef = currentMask?.maskRef ?? '';
+    if (!currentMask || (!selectedCandidate && currentMask.objectId !== selectedObjectId))
+      throw new Error('That object has no selectable mask. Select the object again.');
+    if ((isGeneratedShot(shot) || currentMask.sourceImageUrl) && currentMask.sourceImageUrl !== shot.currentImageUrl)
+      throw new Error('This mask belongs to another frame. Select the object in the current frame again.');
+    // Selecting an instance is not a colour measurement.
+    const nextStatus = shot.status;
 
-    if (typeof fetch === 'function' && this.sessionToken && currentMask?.maskRef) {
+    let detached=Boolean(currentMask.serverDetached);
+    if(currentMask.provenance==='live-sam-3.1'&&!detached){
+      if(!currentMask.serverSessionId||!currentMask.sourceHash||!currentMask.segmentationId)detached=true;
+      else if(typeof fetch==='function'){
+        const healthResponse=await fetch('/api/health',{signal:requestSignal});
+        if(!healthResponse.ok)throw new Error('Mask service could not be checked. Retry the selection.');
+        const health=await healthResponse.json();
+        detached=health.maskSessionId!==currentMask.serverSessionId;
+        if(!detached)this.sessionToken=health.sessionToken;
+      }
+    }
+    if (currentMask.provenance === 'live-sam-3.1' && !detached && typeof fetch === 'function' && this.sessionToken) {
       try {
         const res = await fetch('/api/masks/disambiguate', {
+          signal: requestSignal,
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -827,41 +792,41 @@ export class MetaModelClient {
           },
           body: JSON.stringify({
             maskRef: currentMask.maskRef,
+            maskSessionId: currentMask.serverSessionId,
+            segmentationId: currentMask.segmentationId,
+            sourceHash: currentMask.sourceHash,
             selectedObjectId,
             status: nextStatus,
             shotNumber: shot.shotNumber,
             confidence: currentMask.confidence,
           }),
         });
-        if (!res.ok) {
-          this.recordCall(
-            'sam-3.1',
-            `disambiguateMaskSelection("${selectedObjectId}", Shot ${shot.shotNumber})`,
-            `Server rejected disambiguation lock (${res.status}); shot remains ${shot.status}`
-          );
-          return shot;
-        }
         const data = await res.json();
+        if(!res.ok){
+          if((res.status===409||res.status===404)&&['MASK_SOURCE_CHANGED','MASK_TRACK_EXPIRED','MASK_SESSION_EXPIRED','MASK_RESULT_CHANGED'].includes(data.code))detached=true;
+          else throw new Error(`The selected mask could not be confirmed (${res.status}). Select it again.`);
+        }
         if (typeof data?.track?.maskRef === 'string') {
           resolvedMaskRef = data.track.maskRef;
         }
-      } catch {
-        // Non-blocking when running purely offline without Express backend
-      }
+      } catch (error) { throw error; }
     }
 
+    requestSignal.throwIfAborted();
     const mask = currentMask
       ? {
           ...currentMask,
+          serverDetached: detached,
           objectId: selectedObjectId,
           maskRef: resolvedMaskRef,
+          candidateCount: 1,
         }
       : undefined;
 
     this.recordCall(
       'sam-3.1',
       `disambiguateMaskSelection("${selectedObjectId}", Shot ${shot.shotNumber})`,
-      `Disambiguated Shot ${shot.shotNumber}: objectId=${selectedObjectId}, maskRef=${mask?.maskRef ?? resolvedMaskRef}, status ${shot.status} → ${nextStatus}`
+      `Disambiguated Shot ${shot.shotNumber}: objectId=${selectedObjectId}, maskRef=${mask?.maskRef ?? resolvedMaskRef}, status ${shot.status} â†’ ${nextStatus}`
     );
 
     return {
@@ -888,51 +853,39 @@ export class MetaModelClient {
     rule: ContinuityRule
   ): Promise<StoryboardShot> {
     const targetObject = rule.targetObject;
-    const expectedColor = rule.expectedValue;
+    const expectedColor = normalizeContinuityColor(rule.expectedValue) ?? rule.expectedValue;
 
     // Segment object on the real frame via SAM 3.1
-    let mask = await this.segmentObjectWithSam3(
+    let mask: SamMask;
+    try { mask = await this.segmentObjectWithSam3(
       shot.shotNumber,
       targetObject,
       undefined,
       0.986,
       rule.revision,
       shot.currentImageUrl
-    );
+    ); } catch (error) {
+      return { ...shot, status:'uncertain', proposedFix:undefined,
+        discrepancyMessage:`${targetObject} could not be checked: ${(error as Error).message}`,
+        spokenDescription:`Shot ${shot.shotNumber}. ${targetObject} continuity is unverified. ${(error as Error).message}` };
+    }
 
-    // The plan leaves this prop out of the shot and SAM agrees, so the rule has nothing to check.
+    // Planned absence is not evidence of visual absence when SAM has not verified the frame.
     if (shot.absentProps?.includes(targetObject) && mask.provenance !== 'live-sam-3.1') {
       return {
         ...shot,
-        status: 'consistent',
-        spokenDescription: `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. The ${targetObject} is not in this shot, so its rule does not apply.`,
+        status: 'uncertain',
+        spokenDescription: `Shot ${shot.shotNumber}. The plan leaves out ${targetObject}, but its absence has not been verified in the frame.`,
         discrepancyMessage: undefined,
         proposedFix: undefined,
       };
-    }
-
-    // SAM often misses, doubts or finds a whole crowd for a bare noun ("jacket") but finds "green jacket". The colour only
-    // helps locate the object; the verdict below still comes from the measured pixels.
-    if (isGeneratedImage(shot.currentImageUrl) && (mask.provenance !== 'live-sam-3.1' || mask.confidence < 0.8 || (mask.candidateCount ?? 1) > 1)) {
-      const colourWord = expectedColor === 'emerald' ? 'green' : expectedColor;
-      const retry = await this.segmentObjectWithSam3(
-        shot.shotNumber,
-        `${colourWord} ${targetObject}`,
-        undefined,
-        0.986,
-        rule.revision,
-        shot.currentImageUrl
-      );
-      if (retry.provenance === 'live-sam-3.1' && (mask.provenance !== 'live-sam-3.1' || retry.confidence > mask.confidence)) {
-        mask = retry;
-      }
     }
 
     // Sample actual color inside the detected mask
     let detectedColor: string | null = null;
     try {
       // A sample mask says nothing about where the object is in a model-drawn frame.
-      if (shot.currentImageUrl && (mask.provenance === 'live-sam-3.1' || !isGeneratedImage(shot.currentImageUrl))) {
+      if (shot.currentImageUrl && (mask.provenance === 'live-sam-3.1' || !isGeneratedShot(shot))) {
         const sample = await sampleImageColorInMask(shot.currentImageUrl, mask);
         // No clear majority colour counts as not measured.
         detectedColor = sample.confidence >= 0.5 ? sample.colorName : null;
@@ -944,13 +897,13 @@ export class MetaModelClient {
     const isMatch = detectedColor?.toLowerCase().trim() === expectedColor.toLowerCase().trim();
     // Never report "verified" without a measured colour.
     const unmeasured = detectedColor === null;
-    const isAmbiguous = mask.confidence < 0.8 || unmeasured;
+    const isAmbiguous = mask.confidence < 0.8 || (mask.candidateCount ?? 1) > 1 || unmeasured;
     const status = isAmbiguous ? 'uncertain' : isMatch ? 'consistent' : 'mismatch';
 
     const spokenDescription = status === 'consistent'
-      ? `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity verified: ${targetObject} color is ${expectedColor}.`
+      ? `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Color check passed: the selected ${targetObject} pixels match ${expectedColor}.`
       : isAmbiguous
-      ? `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity uncertain: ${mask.provenance !== 'live-sam-3.1' ? `the ${targetObject} could not be found in this frame` : unmeasured ? 'the colour could not be measured' : `low SAM 3.1 confidence (${(mask.confidence * 100).toFixed(1)}%)`} on ${targetObject}.`
+      ? `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity uncertain: ${mask.provenance !== 'live-sam-3.1' ? `the ${targetObject} could not be found in this frame` : unmeasured ? 'the colour could not be measured' : (mask.candidateCount ?? 1) > 1 ? 'multiple candidate objects need review' : 'the selection evidence is insufficient'} on ${targetObject}.`
       : `Shot ${shot.shotNumber}, duration ${shot.durationSeconds} seconds. ${shot.promptDescription}. Continuity Alert: ${targetObject} rendered in ${detectedColor} instead of expected ${expectedColor}. Press Y to apply SAM 3.1 mask recolor to ${expectedColor}.`;
 
     const discrepancyMessage = status === 'consistent'
@@ -960,7 +913,7 @@ export class MetaModelClient {
         ? `The ${targetObject} could not be found in Shot ${shot.shotNumber}, so continuity is unverified.`
         : `The ${targetObject} colour in Shot ${shot.shotNumber} could not be measured, so continuity is unverified.`
       : isAmbiguous
-      ? `SAM 3.1 flagged ambiguity (${(mask.confidence * 100).toFixed(1)}% IoU) on ${targetObject} in Shot ${shot.shotNumber}. Confirm mask selection (${mask.maskRef}) to verify continuity.`
+      ? `Selection or color evidence is insufficient for ${targetObject} in Shot ${shot.shotNumber}. Review the mask and measured color; selection alone does not verify continuity.`
       : `Visual audit detected a ${detectedColor} ${targetObject} in Shot ${shot.shotNumber}, violating rule "${targetObject}.color = ${expectedColor}" (rev ${rule.revision}).`;
 
     const proposedFix = status !== 'consistent'
@@ -969,13 +922,14 @@ export class MetaModelClient {
           targetObject,
           targetColor: expectedColor,
           mask,
+          candidates: mask.candidates,
         }
       : undefined;
 
     this.recordCall(
       'sam-3.1',
       `auditShotContinuity(Shot ${shot.shotNumber})`,
-      `Audited ${targetObject}: observed="${detectedColor}", expected="${expectedColor}" → status: ${status} (mask: ${mask.maskRef})`
+      `Audited ${targetObject}: observed="${detectedColor}", expected="${expectedColor}" â†’ status: ${status} (mask: ${mask.maskRef})`
     );
 
     return {
@@ -994,12 +948,16 @@ export class MetaModelClient {
     shots: StoryboardShot[],
     rules: ContinuityRule[]
   ): Promise<StoryboardShot[]> {
-    const primaryRule = rules[0];
-    if (!primaryRule) return shots;
-
+    const colorRules = rules.filter(rule => rule.property === 'color');
+    if (!colorRules.length) return shots;
     const audited: StoryboardShot[] = [];
     for (const shot of shots) {
-      audited.push(await this.auditShotContinuity(shot, primaryRule));
+      const checks = [];
+      for (const rule of colorRules) checks.push({ rule, result: await this.auditShotContinuity(shot, rule) });
+      const problem = checks.find(check => check.result.status === 'mismatch') ?? checks.find(check => check.result.status === 'uncertain') ?? checks[0];
+      audited.push({ ...problem.result, continuityChecks: checks.map(({ rule, result }) => ({
+        ruleId: rule.id, targetObject: rule.targetObject, status: result.status, explanation: result.spokenDescription,
+      })) });
     }
     return audited;
   }
@@ -1016,7 +974,9 @@ export class MetaModelClient {
   ): Promise<StoryboardShot> {
     const targetObject = shot.proposedFix?.targetObject;
     if (!targetObject) throw new Error(`Shot ${shot.shotNumber} has no prop selected to recolour.`);
-    const targetColor = overrideColor || shot.proposedFix?.targetColor || 'blue';
+    const requestedColor = overrideColor || shot.proposedFix?.targetColor || 'blue';
+    const targetColor = normalizeContinuityColor(requestedColor);
+    if (!targetColor) throw new Error(`The colour ${requestedColor} is not supported by the local correction palette.`);
 
     let mask = shot.proposedFix?.mask;
     if (!mask) {
@@ -1025,9 +985,18 @@ export class MetaModelClient {
         targetObject,
         undefined,
         0.986,
-        ruleRevision
+        ruleRevision,
+        shot.currentImageUrl
       );
     }
+
+    if (isGeneratedShot(shot) && mask.provenance !== 'live-sam-3.1')
+      throw new Error('A real object mask is required for this generated frame. Sample masks cannot be used.');
+
+    if ((isGeneratedShot(shot) || mask.sourceImageUrl) && mask.sourceImageUrl !== shot.currentImageUrl)
+      throw new Error('This mask belongs to another frame. Select the object in the current frame again.');
+
+    if ((mask.candidateCount ?? 1) > 1) throw new Error('Multiple objects match. Confirm one object before recolouring.');
 
     const { imageUrl: updatedImageUrl, pixelVerification } =
       await applySamPixelFixWithVerification(
@@ -1047,29 +1016,43 @@ export class MetaModelClient {
       revisionId: `rev-${shot.shotNumber}-${shot.revisions.length + 1}`,
       timestamp: Date.now(),
       imageUrl: updatedImageUrl,
-      actionApplied: `SAM 3.1 masked recolor: ${targetObject} → ${targetColor} (${pixelVerification.changedOutsideMask}px outside drift)`,
+      mediaSource: isGeneratedShot(shot) ? 'generated' as const : 'sample' as const,
+      actionApplied: `SAM 3.1 masked recolor: ${targetObject} â†’ ${targetColor} (${pixelVerification.changedOutsideMask}px outside drift)`,
       ruleRevision,
       maskRef: mask.maskRef,
       pixelVerification,
     };
 
-    const updatedSpoken = `Shot ${shot.shotNumber}. ${shot.promptDescription}. Continuity verified: ${targetObject} recolored to ${targetColor} via SAM 3.1 mask ${mask.maskRef} with zero outside-mask pixel drift.`;
+    let colorMeasured = false;
+    try {
+      const measured = await sampleImageColorInMask(updatedImageUrl, {...mask,sourceImageUrl:updatedImageUrl});
+      colorMeasured = measured.confidence >= 0.5 && measured.colorName === targetColor;
+    } catch { /* Containment alone cannot verify the intended appearance. */ }
+    const expectedColor=normalizeContinuityColor(shot.proposedFix?.targetColor ?? '');
+    const contradictsRule=colorMeasured && Boolean(expectedColor) && targetColor!==expectedColor;
+    const measuredStatus = contradictsRule ? 'mismatch' : colorMeasured && targetColor===expectedColor && (shot.continuityChecks?.length ?? 0) <= 1 ? 'consistent' : 'uncertain';
+    const updatedSpoken = `Shot ${shot.shotNumber}. ${targetObject} correction changed ${pixelVerification.changedInsideMask} selected pixels with zero outside-mask pixel drift. ${contradictsRule ? `Measured colour is ${targetColor}, but the rule requires ${expectedColor}.` : measuredStatus === 'consistent' ? `Measured colour is ${targetColor}.` : 'Continuity needs review.'}`;
 
     return {
       ...shot,
       currentImageUrl: updatedImageUrl,
+      mediaSource: isGeneratedShot(shot) ? 'generated' : 'sample',
       // A video rendered before the fix would still show the old colour.
       videoUrl: undefined,
       generatedJobId: undefined,
-      status: 'consistent',
-      discrepancyMessage: undefined,
+      videoMaskPlan: undefined,
+      detectedObjects: undefined,
+      timestamp: undefined,
+      status: measuredStatus,
+      continuityChecks: shot.continuityChecks?.map(check => ({ ...check, status: 'uncertain', explanation: 'Frame edited; recheck this rule.' })),
+      discrepancyMessage: contradictsRule ? `Measured ${targetObject} color is ${targetColor}; the rule still requires ${expectedColor}.` : undefined,
       spokenDescription: updatedSpoken,
       pixelVerification,
       proposedFix: {
         action: 'recolor',
         targetObject,
-        targetColor,
-        mask,
+        targetColor: shot.proposedFix!.targetColor,
+        mask: {...mask, sourceImageUrl:updatedImageUrl, candidates:undefined},
       },
       revisions: [...shot.revisions, newRevision],
     };
@@ -1132,7 +1115,9 @@ export class MetaModelClient {
     videoUrl?: string,
     prompt?: string,
     jobId?: string,
-    rules?: ContinuityRule[]
+    rules?: ContinuityRule[],
+    shotIndex = 0,
+    signal?: AbortSignal
   ): Promise<{
     model: string;
     provenance: string;
@@ -1147,15 +1132,18 @@ export class MetaModelClient {
       description: string;
     }>;
   }> {
+    const requestSignal=signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000);
+    requestSignal.throwIfAborted();
     const res = await fetch('/api/meta/video-understand', {
+      signal: requestSignal,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(this.sessionToken ? { 'X-Framelock-Session': this.sessionToken } : {}),
       },
-      body: JSON.stringify({ videoUrl, prompt, jobId, rules }),
+      body: JSON.stringify({ videoUrl, prompt, jobId, rules, shotIndex }),
     });
-    if (!res.ok) throw new Error('Meta Video Understanding API request failed');
+    if (!res.ok) throw new Error((await res.json()).error || 'Video review failed.');
     const data = await res.json();
     return { findings: [], detectedObjects: [], scenes: [], ...data };
   }
@@ -1167,9 +1155,13 @@ export class MetaModelClient {
     imageBase64: string,
     prompt: string,
     maskBase64?: string,
-    bounds?: { left: number; top: number; right: number; bottom: number }
+    bounds?: { left: number; top: number; right: number; bottom: number },
+    signal?: AbortSignal
   ): Promise<{
     editedImageUrl: string;
+    changedInside: number;
+    selectedPixels: number;
+    totalPixels: number;
     outsideDrift: number;
     outsideDriftPercent: string;
     verified: boolean;
@@ -1177,7 +1169,10 @@ export class MetaModelClient {
     provenance: string;
     promptApplied: string;
   }> {
+    const requestSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000);
+    requestSignal.throwIfAborted();
     const res = await fetch('/api/meta/edit-frame', {
+      signal: requestSignal,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1185,7 +1180,7 @@ export class MetaModelClient {
       },
       body: JSON.stringify({ imageBase64, maskBase64, prompt, bounds }),
     });
-    if (!res.ok) throw new Error('Meta Generative Edit request failed');
+    if (!res.ok) throw new Error((await res.json()).error || 'Generative edit failed.');
     return res.json();
   }
 
@@ -1207,32 +1202,6 @@ export class MetaModelClient {
     if (!res.ok) throw new Error('Video shot ingestion failed');
     return res.json();
   }
-}
-
-function buildSamMaskFromFinding(
-  finding: ContinuityFinding,
-  object?: VideoDetectedObject
-): SamMask {
-  const concept = finding.targetObject.toLowerCase().trim().replace(/\s+/g, '-');
-  const objectId = finding.objectId ?? object?.objectId ?? '0';
-  const box: BoundingBox =
-    object && object.width && object.height
-      ? {
-          x: Math.round((object.bounds.left / object.width) * 100),
-          y: Math.round((object.bounds.top / object.height) * 100),
-          width: Math.round(((object.bounds.right - object.bounds.left) / object.width) * 100),
-          height: Math.round(((object.bounds.bottom - object.bounds.top) / object.height) * 100),
-        }
-      : { x: 0, y: 0, width: 0, height: 0 };
-  return {
-    id: `mask-${concept}-${objectId}`,
-    maskRef: finding.maskRef ?? `sam-3.1:${concept}:${objectId}:v1`,
-    objectId,
-    maskBase64: '',
-    box,
-    confidence: finding.confidence,
-    provenance: 'live-sam-3.1',
-  };
 }
 
 /**
@@ -1258,18 +1227,12 @@ export function applyVideoFindingsToShots(
     });
     const boundObject =
       matched.find((o) => o.objectId === finding.objectId) ?? matched[0] ?? detectedObjects[0];
-    const mask = buildSamMaskFromFinding(finding, boundObject);
     next[idx] = {
-      ...next[idx],
-      status: finding.status,
-      discrepancyMessage: finding.explanation,
+      ...next[idx], status: finding.status, discrepancyMessage: finding.explanation,
       detectedObjects: matched.length > 0 ? (matched as StoryboardShot['detectedObjects']) : next[idx].detectedObjects,
-      proposedFix: {
-        action: 'recolor',
-        targetObject: finding.targetObject,
-        targetColor: finding.expectedValue,
-        mask,
-      },
+      // Video findings are advisory. A real current-frame selection must be made
+      // before any correction can be offered; a bounding box is not a SAM mask.
+      proposedFix: undefined,
     };
   }
   return next;

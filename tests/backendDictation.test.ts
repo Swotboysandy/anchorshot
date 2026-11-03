@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { speechRecognitionService } from '../src/services/speechRecognitionService';
 
 afterEach(() => {
-  speechRecognitionService.stopListening();
+  speechRecognitionService.cancelListening();
   vi.unstubAllGlobals();
 });
 
@@ -73,4 +73,66 @@ describe('dictation through the server transcription model', () => {
     await speechRecognitionService.connectBackend();
     expect(await record()).toEqual({ error: 'scribe_v2 heard no speech. Try recording again.' });
   });
+});
+
+
+it('cancels an in-flight transcription without delivering its late result to another project', async () => {
+  let finish!: (response: Response) => void;
+  const response = new Promise<Response>(resolve => { finish = resolve; });
+  const { fetch, stopTrack } = stubBrowser(() => response as unknown as Response);
+  await speechRecognitionService.connectBackend();
+  const onResult = vi.fn();
+  const onError = vi.fn();
+  speechRecognitionService.startListening({ onResult, onError,
+    onStateChange: listening => listening && speechRecognitionService.stopListening() });
+  await vi.waitFor(() => expect(fetch.mock.calls.some(([url]) => url === '/api/muse/transcribe')).toBe(true));
+  const [, init] = fetch.mock.calls.find(([url]) => url === '/api/muse/transcribe')!;
+  speechRecognitionService.cancelListening();
+  expect((init as RequestInit).signal?.aborted).toBe(true);
+  finish(Response.json({ transcript: 'Late direction from the previous project' }));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(onResult).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
+  expect(stopTrack).toHaveBeenCalled();
+});
+
+it('releases a microphone permission result that arrives after cancellation', async () => {
+  stubBrowser(() => Response.json({ transcript: 'unused' }));
+  let allow!: (stream: unknown) => void;
+  const stop = vi.fn();
+  vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: () => new Promise(resolve => { allow = resolve; }) } });
+  await speechRecognitionService.connectBackend();
+  const result = vi.fn();
+  speechRecognitionService.startListening({ onResult: result });
+  speechRecognitionService.cancelListening();
+  allow({ getTracks: () => [{ stop }] });
+  await vi.waitFor(() => expect(stop).toHaveBeenCalled());
+  expect(result).not.toHaveBeenCalled();
+  expect(speechRecognitionService.isListening()).toBe(false);
+});
+
+
+it('never starts a browser cloud recognizer when no transcription provider is connected', async () => {
+  const nativeRecognizer = vi.fn(() => { throw new Error('Browser cloud recognition must not run'); });
+  const mic = vi.fn();
+  const fetch = vi.fn(async () => Response.json({ transcribeModel: null, sessionToken: 'offline' }));
+  vi.stubGlobal('window', { SpeechRecognition: nativeRecognizer, webkitSpeechRecognition: nativeRecognizer });
+  vi.stubGlobal('MediaRecorder', FakeRecorder);
+  vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: mic } });
+  vi.stubGlobal('fetch', fetch);
+  await speechRecognitionService.connectBackend();
+  const onError = vi.fn();
+  expect(speechRecognitionService.isSupported()).toBe(false);
+  expect(speechRecognitionService.startListening({ onError })).toBe(false);
+  expect(onError).toHaveBeenCalledWith(expect.stringContaining('Transcription is not connected'));
+  expect(nativeRecognizer).not.toHaveBeenCalled();
+  expect(mic).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it('does not trust provider data returned by an unsuccessful health response', async () => {
+  stubBrowser(() => Response.json({ transcript: 'unused' }));
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ transcribeModel: 'unavailable' }, { status: 503 })));
+  expect(await speechRecognitionService.connectBackend()).toBeNull();
+  expect(speechRecognitionService.isSupported()).toBe(false);
 });

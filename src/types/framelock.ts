@@ -1,3 +1,4 @@
+import type {VideoTrackPlan} from './videoTracks';
 import type { MaskVerificationReport } from '../services/maskIntegrity';
 
 export type RuleStatus = 'consistent' | 'mismatch' | 'uncertain';
@@ -19,6 +20,13 @@ export interface BoundingBox {
 }
 
 export interface SamMask {
+  /** Restored raster retained locally; its previous server track is not reusable. */
+  serverDetached?: boolean;
+  serverSessionId?: string;
+  segmentationId?: string;
+  sourceHash?: string;
+  sourceImageUrl?: string;
+  candidates?: SamMask[];
   /** How many matches SAM returned before the best was picked. */
   candidateCount?: number;
   id: string;
@@ -27,6 +35,7 @@ export interface SamMask {
   maskBase64: string; // Binary/RLE mask canvas data
   box: BoundingBox;
   confidence: number;
+  providerConfidence?: number;
   provenance?: 'offline-fixture' | 'live-sam-3.1';
 }
 
@@ -42,6 +51,11 @@ export interface PixelVerificationReport extends MaskVerificationReport {
 }
 
 export interface StoryboardShot {
+  narrationDataUrl?: string;
+  narrationName?: string;
+  narrationDurationSeconds?: number;
+  mediaSource?: 'sample' | 'generated';
+  continuityChecks?: Array<{ ruleId: string; targetObject: string; status: RuleStatus; explanation: string }>;
   id: string;
   shotNumber: number;
   durationSeconds: number;
@@ -57,6 +71,7 @@ export interface StoryboardShot {
   status: RuleStatus;
   videoUrl?: string;
   generatedJobId?: string;
+  videoMaskPlan?: VideoTrackPlan;
   detectedObjects?: Array<{
     id: string;
     maskRef: string;
@@ -81,6 +96,11 @@ export interface StoryboardShot {
     candidates?: SamMask[];
   };
   revisions: Array<{
+    videoUrl?: string;
+    generatedJobId?: string;
+  videoMaskPlan?: VideoTrackPlan;
+    sourceTime?: number;
+    mediaSource?: 'sample' | 'generated';
     revisionId: string;
     timestamp: number;
     imageUrl: string;

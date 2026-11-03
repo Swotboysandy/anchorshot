@@ -1,26 +1,16 @@
+import {archiveLocalMedia,importLocalMedia} from './mediaArchive';
 import express from 'express';
 import {spawn, type ChildProcess} from 'node:child_process';
-import {randomUUID} from 'node:crypto';
-import {existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
+import {randomUUID,createHash} from 'node:crypto';
+import {existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync, renameSync, lstatSync} from 'node:fs';
 import path from 'node:path';
 import type {Plugin} from 'vite';
+import {readVideoManifest, validateVideoPlan, correctVideoFrames, decodeVideoMask, runVision, VideoTrackError} from './videoTracks';
+import type {VideoObjectTrack, VideoTrackPlan} from '../src/types/videoTracks';
 
 const ID = /^[a-f0-9-]{36}$/;
-const assets = new Set(['generated-image.png', 'generated-video.mp4', 'contact-sheet.png', 'inference-report.json', 'objects.json', 'modification-report.json']);
-type Job = {id: string; kind: 'image'|'video'; prompt: string; seed: number; status: string; message: string; createdAt: string; report?: Record<string, any>; error?: string};
-
-// Render exactly 16 evenly-sampled PNG keyframes from a video into folder/frame-%03d.png.
-// Uses the ffmpeg binary already relied on by scripts/run_local_ai.py and modify_video.py.
-function extractKeyframes(video: string, folder: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('ffmpeg', ['-v', 'error', '-y', '-i', video,
-      '-frames:v', '16', path.join(folder, 'frame-%03d.png')], {windowsHide: true});
-    proc.on('error', reject);
-    proc.on('close', code => code === 0
-      ? resolve()
-      : reject(new Error(`ffmpeg keyframe extraction exited with code ${code}.`)));
-  });
-}
+const assets = new Set(['generated-image.png', 'generated-video.mp4', 'contact-sheet.png', 'inference-report.json', 'objects.json', 'modification-report.json', 'reviewed-tracks.json']);
+type Job = {id: string; kind: 'image'|'video'; prompt: string; seed: number; status: string; message: string; createdAt: string; report?: Record<string, any>; error?: string; importToken?: string};
 
 export function createLocalAi(root: string, launch = spawn) {
   const runtime = path.join(root, '.artifacts/local-ai');
@@ -31,12 +21,14 @@ export function createLocalAi(root: string, launch = spawn) {
   ].find((p) => existsSync(p)) || path.join(runtime, 'venv/python.exe');
   mkdirSync(output, {recursive: true});
   const jobs = new Map<string, Job>();
+  const corrections = new Set<AbortController>();
+  const trackingPython = process.env.ANCHORSHOT_TRACKING_PYTHON || path.join(process.env.LOCALAPPDATA || runtime,'AnchorShot/vision/Scripts/python.exe');
   let active: {job: Job; child: ChildProcess} | undefined;
   const save = (job: Job) => writeFileSync(path.join(output, job.id, 'job.json'), JSON.stringify(job));
   for (const id of readdirSync(output).filter(id => ID.test(id))) {
     try {
       const job: Job = JSON.parse(readFileSync(path.join(output, id, 'job.json'), 'utf8'));
-      if (job.id !== id) continue;
+      if (job.id !== id || job.status === 'importing') continue;
       if (job.status === 'running') {
         job.status = 'failed'; job.error = 'Local server restarted. Run generation again.'; save(job);
       }
@@ -58,13 +50,128 @@ export function createLocalAi(root: string, launch = spawn) {
     }
     res.setHeader('Cache-Control', 'no-store'); next();
   });
+  app.use('/imports',express.json({limit:'180mb'}));
+  app.use('/jobs/:id/correct',express.json({limit:'24mb'}));
+  app.use('/jobs/:id/track',express.json({limit:'24mb'}));
   app.use(express.json({limit: '8kb'}));
-  app.get('/health', (_req, res) => res.json({ready: requirements.every(p => existsSync(p)), activeJobId: active?.job.id || null}));
+  app.get('/health', (_req, res) => res.json({ready: requirements.every(p => existsSync(p)), activeJobId: active?.job.id || null, trackingReady: existsSync(trackingPython)}));
   app.get('/jobs', (_req, res) => res.json([...jobs.values()].sort((a,b) => b.createdAt.localeCompare(a.createdAt)).slice(0,20)));
   app.get('/jobs/:id', (req, res) => {
     const job = jobs.get(req.params.id);
     if (!job) { res.status(404).json({error: 'Job not found.'}); return; }
     res.json(job);
+  });
+  type ImportRecord = {version:1;token:string;ids:string[];fingerprint?:string;sourceIds?:string[];status:'importing'|'pending'|'committed'|'rolledBack'};
+  const journalFolder=path.join(runtime,'import-transactions');
+  mkdirSync(journalFolder,{recursive:true});
+  const importRecords=new Map<string,ImportRecord>();
+  const journalPath=(token:string)=>{
+    if(!ID.test(token))throw new Error('Invalid import transaction.');
+    return path.join(journalFolder,`${token}.json`);
+  };
+  const persistImport=(record:ImportRecord)=>{
+    const destination=journalPath(record.token),temporary=`${destination}.${randomUUID()}.tmp`;
+    try{
+      writeFileSync(temporary,JSON.stringify(record),{flag:'wx',flush:true});
+      renameSync(temporary,destination);
+      importRecords.set(record.token,record);
+    }finally{if(existsSync(temporary))rmSync(temporary);}
+  };
+  for(const name of readdirSync(journalFolder)){
+    if(!/^[a-f0-9-]{36}\.json$/.test(name))continue;
+    try{
+      const file=path.join(journalFolder,name),stat=lstatSync(file);
+      if(!stat.isFile()||stat.isSymbolicLink()||stat.size>8192)continue;
+      const record:ImportRecord=JSON.parse(readFileSync(file,'utf8'));
+      if(record.version!==1||name!==`${record.token}.json`||!ID.test(record.token)||!Array.isArray(record.ids)||record.ids.length>24||!record.ids.every(id=>typeof id==='string'&&ID.test(id))||!['importing','pending','committed','rolledBack'].includes(record.status))continue;
+      importRecords.set(record.token,record);
+    }catch{/* Preserve malformed records and their media; never infer permission to delete. */}
+  }
+
+  const discardImport=(token:string,finalize=true)=>{
+    const record=importRecords.get(token);
+    if(!record||record.status==='committed')throw new Error('Import transaction not found or already finalized.');
+    if(record.status==='rolledBack')return;
+    const folders=record.ids.map(id=>{
+      const folder=path.resolve(output,id);
+      if(!ID.test(id)||path.dirname(folder)!==path.resolve(output))throw new Error('Unsafe import rollback target.');
+      if(existsSync(folder)){
+        const stat=lstatSync(folder);
+        if(!stat.isDirectory()||stat.isSymbolicLink())throw new Error('Unsafe import rollback target.');
+        if(record.status==='importing'&&readdirSync(folder).length===0){/* Crash between mkdir and ownership write. */}
+        else{
+          const job=JSON.parse(readFileSync(path.join(folder,'job.json'),'utf8'));
+          if(job.id!==id||job.importToken!==token)throw new Error('Imported media ownership changed; preserved files.');
+        }
+      }
+      return {id,folder};
+    });
+    for(const {id,folder} of folders){rmSync(folder,{recursive:true,force:true});jobs.delete(id);}
+    if(finalize)persistImport({...record,status:'rolledBack'});
+  };
+  app.post('/imports/:token/rollback',(req,res)=>{
+    if(importing)return void res.status(409).json({error:'An import is running. Retry rollback after it finishes.'});
+    try{discardImport(req.params.token);res.json({rolledBack:true});}
+    catch(error){res.status(409).json({error:error instanceof Error?error.message:'Import rollback failed.'});}
+  });
+  app.post('/imports/:token/commit',(req,res)=>{
+    if(importing)return void res.status(409).json({error:'An import is running. Retry finalization after it finishes.'});
+    const record=importRecords.get(req.params.token);
+    if(!record||record.status==='rolledBack'||record.status==='importing')return void res.status(409).json({error:'Import transaction not found or already rolled back.'});
+    try{if(record.status!=='committed')persistImport({...record,status:'committed'});res.json({committed:true});}
+    catch{res.status(503).json({error:'Import finalization could not be saved. Media was preserved; retry finalization.'});}
+  });
+  let importing=false;
+  app.post('/imports',async(req,res)=>{
+    if(importing)return void res.status(409).json({error:'Another media import is running.'});
+    const operationId=req.body?.operationId;
+    if(operationId!==undefined && (!req.body?.transactional||typeof operationId!=='string'||!ID.test(operationId)))return void res.status(400).json({error:'Use a valid transaction operation ID.'});
+    const fingerprint=createHash('sha256').update(JSON.stringify(req.body?.archives??null)).digest('hex');
+    const previous=operationId?importRecords.get(operationId):undefined;
+    if(previous){
+      if(previous.fingerprint!==fingerprint||!previous.sourceIds||previous.sourceIds.length!==previous.ids.length)return void res.status(409).json({error:'This import operation belongs to a different backup.'});
+      if(previous.status==='rolledBack')return void res.status(409).json({error:'This import operation was rolled back. Start a new restore.'});
+      if(previous.status==='importing'){
+        try{discardImport(operationId,false);}catch(error){return void res.status(409).json({error:error instanceof Error?error.message:'Partial import could not be recovered.'});}
+      }else{
+      importing=true;
+      try{
+        const items=[];
+        for(let index=0;index<previous.ids.length;index++){
+          const id=previous.ids[index],job=jobs.get(id);
+          if(!job||job.status!=='completed'||job.importToken!==operationId)throw new Error('Imported media is no longer available for this operation.');
+          const manifest=job.kind==='video'?await readVideoManifest(path.join(output,id),id):undefined;
+          items.push({sourceJobId:previous.sourceIds[index],job,manifest});
+        }
+        res.json({items,importToken:operationId});
+      }catch(error){res.status(409).json({error:error instanceof Error?error.message:'Import recovery failed.'});}
+      finally{importing=false;}
+      return;
+      }
+    }
+    if(req.body?.transactional && [...importRecords.values()].filter(record=>record.status==='pending'||record.status==='importing').length>=20)return void res.status(409).json({error:'Too many unfinished imports. Resolve existing imports first.'});
+    importing=true;
+    try {
+      const importToken=req.body?.transactional?(operationId??randomUUID()):undefined;
+      const restored=await importLocalMedia(output,req.body?.archives,importToken?{
+        token:importToken,
+        prepare:(ids,sourceIds)=>persistImport({version:1,token:importToken,ids,sourceIds,fingerprint,status:'importing'}),
+      }:undefined);
+      for(const item of restored)jobs.set(item.job.id,item.job);
+      if(req.body?.transactional){
+        for(const item of restored){const job={...item.job,importToken};save(job);jobs.set(job.id,job);}
+        persistImport({version:1,token:importToken!,ids:restored.map(item=>item.job.id),sourceIds:restored.map(item=>item.sourceJobId),fingerprint,status:'pending'});
+        res.status(201).json({items:restored,importToken});
+      }else res.status(201).json(restored);
+    }
+    catch(error){res.status(422).json({error:error instanceof Error?error.message:'Media import failed.'});}
+    finally{importing=false;}
+  });
+  app.get('/jobs/:id/archive', (req,res)=>{
+    const job=jobs.get(req.params.id);
+    if(!job||!ID.test(req.params.id))return void res.status(404).json({error:'Local media was not found.'});
+    try {res.json(archiveLocalMedia(path.join(output,job.id),{...job,kind:job.kind}));}
+    catch(error){res.status(422).json({error:error instanceof Error?error.message:'Media backup failed.'});}
   });
   app.get('/jobs/:id/assets/:file', (req, res) => {
     const {id, file} = req.params;
@@ -76,6 +183,7 @@ export function createLocalAi(root: string, launch = spawn) {
     });
   });
   function stop(reason: string) {
+    corrections.forEach(controller=>controller.abort());
     if (!active) return;
     const {job, child} = active;
     job.status = 'cancelled'; job.message = reason; save(job);
@@ -94,7 +202,11 @@ export function createLocalAi(root: string, launch = spawn) {
     const folder = path.join(output, job.id);
     const objectsFile = path.join(folder, 'objects.json');
     if (existsSync(objectsFile)) {
-      try { res.json(JSON.parse(readFileSync(objectsFile, 'utf8'))); return; } catch {}
+      try {
+        const saved = JSON.parse(readFileSync(objectsFile, 'utf8'));
+        res.json(saved.map((object: any) => ({ ...object, source: 'local-saliency', provenance: 'unverified-proposal',
+          confidence: 0, maskRef: `local-saliency:${object.objectId}`, requiresReview: true }))); return;
+      } catch {}
     }
     if (!existsSync(python)) {
       res.status(503).json({error: 'Python runtime not found. Run scripts/setup_local_ai.ps1 first.'});
@@ -111,7 +223,11 @@ export function createLocalAi(root: string, launch = spawn) {
       if (responded) return;
       responded = true;
       if (code === 0 && existsSync(objectsFile)) {
-        try { res.json(JSON.parse(readFileSync(objectsFile, 'utf8'))); return; } catch {}
+        try {
+        const saved = JSON.parse(readFileSync(objectsFile, 'utf8'));
+        res.json(saved.map((object: any) => ({ ...object, source: 'local-saliency', provenance: 'unverified-proposal',
+          confidence: 0, maskRef: `local-saliency:${object.objectId}`, requiresReview: true }))); return;
+      } catch {}
       }
       res.status(500).json({error: 'Failed to extract objects from video frames.'});
     });
@@ -120,28 +236,65 @@ export function createLocalAi(root: string, launch = spawn) {
   app.post('/jobs/:id/modify', (req, res) => {
     const job = jobs.get(req.params.id);
     if (!job || job.status !== 'completed') { res.status(404).json({error: 'Job not found or not completed.'}); return; }
-    const {objectId = '0', color = 'emerald'} = req.body || {};
-    const folder = path.join(output, job.id);
-    if (!existsSync(python)) {
-      res.status(503).json({error: 'Python runtime not found. Run scripts/setup_local_ai.ps1 first.'});
-      return;
-    }
-    let responded = false;
-    const proc = launch(python, [path.join(root, 'scripts/modify_video.py'), folder, '--object-id', String(objectId), '--color', String(color)], {cwd: root, windowsHide: true});
-    proc.on('error', err => {
-      if (responded) return;
-      responded = true;
-      res.status(500).json({error: `Failed to spawn modification process: ${err.message}`});
-    });
-    proc.on('close', code => {
-      if (responded) return;
-      responded = true;
-      const reportFile = path.join(folder, 'modification-report.json');
-      if (code === 0 && existsSync(reportFile)) {
-        try { res.json(JSON.parse(readFileSync(reportFile, 'utf8'))); return; } catch {}
+    // The current detector only proposes regions in frame 0. Repeating that mask
+    // across a moving clip would repaint the background and is not object tracking.
+    res.status(422).json({error: 'Video recolouring needs verified masks for every frame. Current local proposals are not tracked. No video was changed; use current-frame mask correction instead.'});
+  });
+
+  function completedVideo(id: string) {
+    const job = jobs.get(id);
+    if (!ID.test(id) || !job || job.kind !== 'video' || job.status !== 'completed') throw new VideoTrackError('Choose a completed local video.');
+    return job;
+  }
+  app.get('/jobs/:id/frames', async (req,res) => {
+    try { const job=completedVideo(req.params.id); res.json(await readVideoManifest(path.join(output,job.id),job.id)); }
+    catch (error) { res.status(422).json({error:error instanceof Error ? error.message : 'Clip frames could not be read.'}); }
+  });
+  app.post('/jobs/:id/track', async (req,res) => {
+    const controller=new AbortController();
+    res.on('close',()=>{if(!res.writableEnded)controller.abort();});
+    if (corrections.size) return void res.status(409).json({error:'Another local video operation is running.'});
+    corrections.add(controller);
+    try {
+      const job=completedVideo(req.params.id);
+      if (!existsSync(trackingPython)) return void res.status(503).json({error:'Local motion suggestions are not installed. You can still select and review each frame manually.'});
+      const folder=path.join(output,job.id);
+      const manifest=await readVideoManifest(folder,job.id,controller.signal);
+      const {fingerprint,track}=req.body as {fingerprint:string;track:VideoObjectTrack};
+      if(fingerprint!==manifest.fingerprint || !track || !['cup','umbrella'].includes(track.objectId) || !Array.isArray(track.frames) || track.frames.length>manifest.frames.length)
+        throw new VideoTrackError('Reload the clip and review an object before suggesting motion.');
+      const indices=new Set<number>();
+      for(const entry of track.frames) {
+        const frame=manifest.frames[entry?.frameIndex];
+        if(!frame || indices.has(entry.frameIndex) || entry.sourceHash!==frame.sourceHash || !Number.isInteger(entry.revision) || entry.revision<1) throw new VideoTrackError('A seed mask belongs to a different frame.');
+        indices.add(entry.frameIndex);
+        const mask=decodeVideoMask(entry.maskBase64,frame.width*frame.height);
+        if(entry.reviewed && (entry.absent ? mask.some(Boolean) : mask.reduce((sum,pixel)=>sum+pixel,0)<16)) throw new VideoTrackError('Review visible pixels or mark the object absent.');
       }
-      res.status(500).json({error: 'Failed to apply modification across video frames.'});
-    });
+      const result=await runVision(trackingPython,[path.join(root,'scripts/track_video_masks.py'),folder],controller.signal,32*1024*1024,JSON.stringify({manifest,track}));
+      if(!res.destroyed)res.json(JSON.parse(result.toString()));
+    } catch(error) { if(!res.destroyed)res.status(422).json({error:error instanceof Error ? error.message : 'Motion proposal failed.'}); }
+    finally { corrections.delete(controller); }
+  });
+  app.post('/jobs/:id/correct', async (req,res) => {
+    const controller=new AbortController(); let derived: Job|undefined;
+    res.on('close',()=>{if(!res.writableEnded)controller.abort();});
+    if(corrections.size) return void res.status(409).json({error:'Another local video operation is running.'});
+    corrections.add(controller);
+    try {
+      const source=completedVideo(req.params.id), folder=path.join(output,source.id);
+      const manifest=await readVideoManifest(folder,source.id,controller.signal);
+      const plan=req.body as VideoTrackPlan;
+      validateVideoPlan(manifest,plan);
+      derived={id:randomUUID(),kind:'video',prompt:source.prompt,seed:source.seed,status:'running',message:'Applying reviewed frame masks.',createdAt:new Date().toISOString()};
+      const destination=path.join(output,derived.id);mkdirSync(destination);jobs.set(derived.id,derived);save(derived);
+      const report=await correctVideoFrames(folder,destination,manifest,plan,controller.signal);
+      derived.status='completed';derived.message='Corrected local take. Review the encoded video.';derived.report={...report,operation:'reviewed-mask-correction'};save(derived);
+      if(!res.destroyed)res.status(201).json({id:derived.id,sourceJobId:source.id,videoUrl:`/api/local-ai/jobs/${derived.id}/assets/generated-video.mp4`,imageUrl:`/api/local-ai/jobs/${derived.id}/assets/frame-000.png`,report});
+    } catch(error) {
+      if(derived){derived.status=controller.signal.aborted?'cancelled':'failed';derived.error=error instanceof Error?error.message:'Video correction failed.';derived.message='Source clip remains unchanged.';save(derived);}
+      if(!res.destroyed)res.status(422).json({error:error instanceof Error?error.message:'Video correction failed.'});
+    } finally { corrections.delete(controller); }
   });
 
   app.post('/jobs', (req, res) => {
@@ -153,91 +306,8 @@ export function createLocalAi(root: string, launch = spawn) {
 
     if (active) { res.status(409).json({error: 'Another GPU job is still running. Wait or cancel it.'}); return; }
 
-    const modalEndpoint = process.env.MODAL_VIDEO_ENDPOINT;
-    if (kind === 'video' && modalEndpoint) {
-      const job: Job = {
-        id: randomUUID(),
-        kind,
-        prompt: prompt.trim(),
-        seed,
-        status: 'running',
-        message: 'Rendering on Modal Cloud GPU (A10G)…',
-        createdAt: new Date().toISOString(),
-      };
-      const folder = path.join(output, job.id);
-      mkdirSync(folder);
-      jobs.set(job.id, job);
-      save(job);
-
-      // Asynchronously invoke Modal A10G Serverless Endpoint
-      (async () => {
-        try {
-          const modalRes = await fetch(modalEndpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt: job.prompt, seed }),
-          });
-          if (!modalRes.ok) throw new Error(`Modal status ${modalRes.status}: ${await modalRes.text()}`);
-          const buffer = Buffer.from(await modalRes.arrayBuffer());
-          writeFileSync(path.join(folder, 'generated-video.mp4'), buffer);
-          // Extract 16 discrete keyframes (frame-000.png..frame-015.png) so object
-          // detection (detect_objects.py) and SAM tracking have per-frame images.
-          await extractKeyframes(path.join(folder, 'generated-video.mp4'), folder);
-          const report = {
-            status: 'passed',
-            pipeline: 'modal-a10g-ltx-video',
-            model: 'Lightricks/LTX-Video',
-            endpoint: modalEndpoint,
-            prompt: job.prompt,
-            inferenceSeconds: 4.5,
-            cudaPeakAllocatedMiB: 4096,
-            frames: 17,
-            generatedAt: new Date().toISOString(),
-          };
-          writeFileSync(path.join(folder, 'inference-report.json'), JSON.stringify(report, null, 2));
-          job.report = report;
-          job.status = 'completed';
-          job.message = 'Generated on Modal Cloud GPU (A10G) via Lightricks LTX-Video. Ready for preview.';
-          save(job);
-        } catch (err: any) {
-          // If Modal fails or times out, fall back to local GPU pipeline
-          if (requirements.every(p => existsSync(p))) {
-            job.message = `Modal fallback (${err.message}). Rendering on local GPU…`;
-            save(job);
-            const child = launch(python, ['-u', path.join(root, 'scripts/run_local_ai.py'), kind, '--prompt', job.prompt,
-              '--seed', String(seed), '--output', folder], {cwd: root, windowsHide: true, shell: false});
-            active = {job, child};
-            let localLog = '';
-            const timer = setTimeout(() => stop('Stopped after 10 minutes. Check local GPU availability and retry.'), 600000);
-            child.stdout?.on('data', chunk => { localLog = (localLog + chunk.toString()).slice(-8000); });
-            child.stderr?.on('data', chunk => { localLog = (localLog + chunk.toString()).slice(-8000); });
-            child.on('close', code => {
-              clearTimeout(timer);
-              writeFileSync(path.join(folder, 'worker.log'), localLog);
-              if (job.status !== 'cancelled') {
-                if (code === 0 && existsSync(path.join(folder, 'generated-video.mp4'))) {
-                  job.status = 'completed';
-                  job.message = 'Generated on local GPU. Review visual quality.';
-                } else {
-                  job.status = 'failed';
-                  job.error = `Generation failed (${code}).`;
-                }
-              }
-              save(job);
-              active = undefined;
-            });
-          } else {
-            job.status = 'failed';
-            job.error = err.message || 'Modal cloud generation failed.';
-            save(job);
-          }
-        }
-      })();
-
-      res.status(202).json(job);
-      return;
-    }
-
+    // This endpoint is explicitly local. Environment settings must never silently
+    // route its no-credit generation button to a billed cloud GPU.
     if (!requirements.every(p => existsSync(p))) { res.status(503).json({error: 'Local models are not installed. Run scripts/setup_local_ai.ps1 first.'}); return; }
     const job: Job = {id: randomUUID(), kind, prompt: prompt.trim(), seed, status: 'running', message: 'Loading local model…', createdAt: new Date().toISOString()};
     const folder = path.join(output, job.id);

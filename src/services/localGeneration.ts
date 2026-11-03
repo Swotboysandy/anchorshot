@@ -1,11 +1,14 @@
+import type {VideoCorrectionReport} from '../types/videoTracks';
+import type { StoryboardShot } from '../types/framelock';
 export type LocalJob = {
   id: string; kind: 'image' | 'video'; prompt: string; seed: number;
   status: 'running' | 'completed' | 'failed' | 'cancelled'; message: string; error?: string;
-  report?: {inferenceSeconds: number; cudaPeakAllocatedMiB: number; frames: number; width: number; height: number; encodingPSNRdB?: number};
+  report?: ({operation?: undefined; inferenceSeconds?: number; cudaPeakAllocatedMiB?: number; frames: number; width?: number; height?: number; encodingPSNRdB?: number} | (VideoCorrectionReport & {operation: 'reviewed-mask-correction'}));
 };
-export async function localRequest<T>(route: string, body?: unknown, timeoutMs = 10000): Promise<T> {
-  const response = await fetch(`/api/local-ai${route}`, body === undefined ? {signal: AbortSignal.timeout(timeoutMs)} : {
-    signal: AbortSignal.timeout(timeoutMs),
+export async function localRequest<T>(route: string, body?: unknown, timeoutMs = 10000, signal?: AbortSignal): Promise<T> {
+  const requestSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
+  const response = await fetch(`/api/local-ai${route}`, body === undefined ? {signal: requestSignal} : {
+    signal: requestSignal,
     method: 'POST', headers: {'Content-Type': 'application/json', 'X-Anchorshot-Local': '1'}, body: JSON.stringify(body),
   });
   if (!response.headers.get('content-type')?.includes('application/json')) throw new Error('Local generation service unavailable. Start the app with npm run dev.');
@@ -31,3 +34,8 @@ export async function modifyLocalVideo(jobId: string, objectId: string, color: s
     60000
   );
 }
+
+/** Recoloured data URLs still belong to generated media; never apply sample masks to them. */
+export const isGeneratedShot = (shot: StoryboardShot) => shot.mediaSource === 'generated' || Boolean(shot.generatedJobId) || isGeneratedImage(shot.currentImageUrl) || isGeneratedImage(shot.originalImageUrl) || shot.revisions.some(revision => isGeneratedImage(revision.imageUrl));
+
+export const localMeasurementsAsset = (job: LocalJob) => localAsset(job, job.report?.operation === 'reviewed-mask-correction' ? 'modification-report.json' : 'inference-report.json');

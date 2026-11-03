@@ -34,3 +34,19 @@ test('umbrella upload and keyboard correction work on mobile independently of cu
  await expect(page.getByRole('button',{name:'Select real cup',exact:true})).toBeEnabled();await expect(page.getByRole('button',{name:'Edit umbrella mask'})).toBeEnabled();
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
 });
+
+for(const viewport of [{width:1440,height:1080},{width:390,height:844}])test(`hole outlines subtract only selected pixels and undo at ${viewport.width}px`,async({page})=>{
+ await page.setViewportSize(viewport);await page.goto('/');await page.getByRole('button',{name:'Kitchen to ocean',exact:true}).click();await page.getByRole('button',{name:'Apply direction',exact:true}).click();await page.getByRole('region',{name:'Film preview'}).waitFor();await page.getByRole('tab',{name:'Dream',exact:true}).click();await page.getByRole('button',{name:/Open dream transition/}).click();await page.getByRole('button',{name:'Select real cup',exact:true}).click();await page.getByRole('button',{name:'Use real cup sample',exact:true}).click();
+ const editor=page.getByRole('region',{name:'Real cup mask editor'}),canvas=editor.getByRole('img',{name:'Cup selection canvas'}),preview=editor.getByRole('img',{name:'Selected cup cutout'});
+ await expect(canvas).toBeVisible();await expect(editor.getByRole('button',{name:'Trace hole',exact:true})).toBeDisabled();
+ const click=async(x:number,y:number)=>{const b=(await canvas.boundingBox())!;await canvas.click({position:{x:b.width*x,y:b.height*y}});};
+ for(const [x,y]of [[.2,.2],[.8,.2],[.8,.8],[.2,.8]])await click(x,y);await editor.getByRole('button',{name:'Close outline',exact:true}).click();
+ const pixels=()=>preview.evaluate(c=>{const cv=c as HTMLCanvasElement;return Array.from(cv.getContext('2d')!.getImageData(0,0,cv.width,cv.height).data);});
+ const before=await pixels();await editor.getByRole('button',{name:'Trace hole',exact:true}).click();
+ for(const [x,y]of [[.4,.4],[.6,.4],[.6,.6],[.4,.6]])await click(x,y);await expect(editor.getByRole('button',{name:'Apply cup to dream',exact:true})).toBeDisabled();
+ await canvas.focus();await page.keyboard.press('Enter');const after=await pixels();
+ const size=await preview.evaluate(c=>({w:(c as HTMLCanvasElement).width,h:(c as HTMLCanvasElement).height}));let removed=0,invalid=0;
+ for(let y=0;y<size.h;y++)for(let x=0;x<size.w;x++){const i=(y*size.w+x)*4;if(after[i+3]!==before[i+3]){removed++;if(after[i+3]!==0||x/size.w<=.38||x/size.w>=.62||y/size.h<=.38||y/size.h>=.62)invalid++;}else for(let ch=0;ch<4;ch++)if(after[i+ch]!==before[i+ch])invalid++;}
+ expect(invalid).toBe(0);
+ expect(removed).toBeGreaterThan(100);await editor.getByRole('button',{name:'Undo mask edit',exact:true}).click();expect(Buffer.from(await pixels()).equals(Buffer.from(before))).toBe(true);
+});
