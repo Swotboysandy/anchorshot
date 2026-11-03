@@ -357,18 +357,34 @@ export class MetaModelClient {
     const headers={'Content-Type':'application/json','X-Anchorshot-Session':String(health.sessionToken??'')};
     onProgress?.('Planning scenes from your direction…',5);
     const response=await fetch('/api/muse/spark',{method:'POST',headers,signal,
-      body:JSON.stringify({transcript:transcript+'\nProduction constraint: create at most 3 shots for this test. Use only the requested story, with no demo objects.',previousRevision:0})});
+      body:JSON.stringify({transcript:transcript+'\nProduction constraint: create the shortest complete shot list, opening on the most important moment. Use only the requested story, with no demo objects.',previousRevision:0})});
     const plan=await response.json();
     if(!response.ok)throw new Error(plan.error||'Scene planning failed.');
-    if(plan.provenance!=='live-model'||!Array.isArray(plan.shots)||!plan.shots.length||plan.shots.length>3)throw new Error('The planner must provide 1–3 real scene descriptions for this test. No video request sent.');
+    if(plan.provenance!=='live-model'||!Array.isArray(plan.shots)||!plan.shots.length)throw new Error('The planner must provide real scene descriptions. No video request sent.');
+    // FILM_SHOTS bounds paid clips per film.
+    plan.shots=plan.shots.slice(0,Number(health.filmShots)||4);
     const rules:ContinuityRule[]=Array.isArray(plan.rules)?plan.rules:[];
     const shots:StoryboardShot[]=[];
+    const cast=normalizeCast(plan.cast);
+    // First solo frame of each character, reused so their later shots keep the same face.
+    const referenceFrames=new Map<string,string>();
     for(let i=0;i<plan.shots.length;i++) {
       signal?.throwIfAborted();
       const planned=normalizeShot(plan.shots[i]);
-      const prompt=buildShotPrompt({shot:planned,continuity:rules.filter(r=>r.property==='color'),cast:normalizeCast(plan.cast),hasReferences:false});
-      onProgress?.(`Rendering scene ${i+1} of ${plan.shots.length} at 25 fps: ${planned.subject}`,10+Math.round(i/plan.shots.length*85));
-      const res=await fetch('/api/muse/video',{method:'POST',headers,body:JSON.stringify({prompt}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(630000)]):AbortSignal.timeout(630000)});
+      const onScreen=castInShot(planned,cast);
+      const references=[...new Set(onScreen.map(c=>referenceFrames.get(c.name)).filter((url):url is string=>Boolean(url)))];
+      const prompt=buildShotPrompt({shot:planned,continuity:rules.filter(r=>r.property==='color'),cast,hasReferences:references.length>0});
+      let image:string|undefined;
+      if(health.imageModel) {
+        onProgress?.(`Drawing the start frame for scene ${i+1} of ${plan.shots.length}…`,10+Math.round(i/plan.shots.length*85));
+        const drawn=await fetch('/api/muse/image',{method:'POST',headers,signal,body:JSON.stringify({prompt,references,targetObject:rules[0]?.targetObject??'scene',seed:(i+1)*17})});
+        const frame=await drawn.json();
+        if(!drawn.ok||typeof frame.url!=='string')throw new Error(frame.error||`The start frame for scene ${i+1} could not be drawn.`);
+        image=frame.url;
+        if(onScreen.length===1&&!referenceFrames.has(onScreen[0].name))referenceFrames.set(onScreen[0].name,frame.url);
+      }
+      onProgress?.(`Rendering scene ${i+1} of ${plan.shots.length} at 25 fps: ${planned.subject}`,10+Math.round((i+0.2)/plan.shots.length*85));
+      const res=await fetch('/api/muse/video',{method:'POST',headers,body:JSON.stringify({prompt,image,seed:i+1}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(930000)]):AbortSignal.timeout(930000)});
       const clip=await res.json();
       if(!res.ok)throw new Error(clip.error||`Scene ${i+1} could not be rendered.`);
       if(clip.fps!==25||typeof clip.videoUrl!=='string'||typeof clip.imageUrl!=='string'||!Number.isFinite(clip.seconds))throw new Error('The renderer returned invalid video metadata.');

@@ -101,6 +101,7 @@ export function createApp(options: Options) {
       tracksStored: trackStore.listTracks().length,
       plannerLive: planner !== fixturePlanner,
       videoReady: Boolean(options.video),
+      filmShots: options.video?.shots,
       videoModel: options.video?.model ?? null,
       imageModel: options.imager?.model ?? null,
       transcribeModel: options.transcriber?.model ?? null,
@@ -523,9 +524,12 @@ export function createApp(options: Options) {
     if(typeof prompt!=='string'||!prompt.trim()||prompt.length>4000)return res.status(400).json({error:'Provide a scene prompt of 1–4000 characters.'});
     if(videoActive)return res.status(409).json({error:'A video is already rendering. Wait for it to finish.'});
     const controller=new AbortController();res.once('close',()=>{if(!res.writableEnded)controller.abort();});
+    const frame=req.body?.image;
+    if(frame!==undefined&&(typeof frame!=='string'||!/^\/api\/muse\/frames\/[a-f0-9]{64}\.png$/.test(frame)||!existsSync(join(frameFolder,frame.split('/').pop()!))))
+      return res.status(400).json({error:'The start frame is no longer available.'});
     videoActive=true;
-    try {reserveRequest();const clip=await options.video.generate(prompt.trim(),controller.signal);if(!res.destroyed)res.json(clip);}
-    catch(error){if(!res.destroyed)next(error);}
+    try {reserveRequest();const clip=await options.video.generate(prompt.trim(),controller.signal,frame?{image:readFileSync(join(frameFolder,frame.split('/').pop()!)),seed:Number.isInteger(req.body?.seed)?req.body.seed:7}:undefined);if(!res.destroyed)res.json(clip);}
+    catch(error){if(!res.destroyed){if(error instanceof UserError)next(error);else res.status(502).json({error:`The video could not be rendered. ${(error as Error).message}`});}}
     finally {videoActive=false;}
   });
 
