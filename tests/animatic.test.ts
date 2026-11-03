@@ -22,10 +22,11 @@ describe.skipIf(!hasFfmpeg)('animatic encoding with local ffmpeg', () => {
     const file = path.join(mkdtempSync(path.join(tmpdir(), 'animatic-test-')), 'out.mp4');
     writeFileSync(file, video);
     const probe = JSON.parse(
-      execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,width,height:format=duration', '-of', 'json', file], { encoding: 'utf8' }),
+      execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,width,height,avg_frame_rate:format=duration', '-of', 'json', file], { encoding: 'utf8' }),
     );
     expect(probe.streams.map((s: { codec_name: string }) => s.codec_name).sort()).toEqual(['aac', 'h264']);
     expect(probe.streams.find((s: { width?: number }) => s.width)).toMatchObject({ width: 1280, height: 720 });
+    expect(probe.streams.find((s: { width?: number }) => s.width).avg_frame_rate).toBe('25/1');
     expect(Number(probe.format.duration)).toBeCloseTo(2.5, 0);
   }, 60_000);
 
@@ -94,11 +95,11 @@ describe('/api/export/animatic', () => {
     expect((await post(app, { shots: [{ image, seconds: 2 }] })).status).toBe(200);
   });
 
-  it('formats SMPTE timecode at 30 fps correctly', () => {
+  it('formats SMPTE timecode at 25 fps correctly', () => {
     expect(formatSmpteTimecode(0)).toBe('00:00:00:00');
     expect(formatSmpteTimecode(1)).toBe('00:00:01:00');
-    expect(formatSmpteTimecode(1.5)).toBe('00:00:01:15');
-    expect(formatSmpteTimecode(65.1)).toBe('00:01:05:03');
+    expect(formatSmpteTimecode(1.5)).toBe('00:00:01:13');
+    expect(formatSmpteTimecode(65.2)).toBe('00:01:05:05');
   });
 
   it('passes burnInTimecode flag from request body to renderAnimatic', async () => {

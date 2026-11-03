@@ -11,7 +11,7 @@ test('local dream preserves cup, scrubs, exports and cancels without model calls
   const study=page.getByRole('region',{name:'Kitchen to ocean dream study'});
   await expect(study.getByRole('img',{name:/Kitchen transforming/})).toBeVisible();
   await study.getByRole('button',{name:'Check cup preservation'}).click();
-  await expect(study.getByRole('status',{name:'Cup preservation results'})).toContainText('PASS · 289 frames · 0 changed protected pixels',{timeout:30000});
+  await expect(study.getByRole('status',{name:'Cup preservation results'})).toContainText('PASS · 301 frames · 0 changed protected pixels',{timeout:30000});
   await mkdir('.artifacts/dream-tests',{recursive:true});
   const mask=await page.evaluate(async()=>{
     const modulePath='/src/services/dreamTransition.ts';

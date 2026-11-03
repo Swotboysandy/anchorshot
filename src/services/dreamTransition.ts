@@ -1,5 +1,5 @@
 // Local deterministic compositor. No model/API calls occur in this module.
-export const DREAM = {width: 800, height: 450, duration: 12, fps: 24, hold: 2} as const;
+export const DREAM = {width: 800, height: 450, duration: 12, fps: 25, hold: 2} as const;
 export type Pixels = {width: number; height: number; data: Uint8ClampedArray};
 export type DreamAssets = {kitchen: Pixels; ocean: Pixels; anchor: Pixels; mask: Uint8Array; anchors?: {id:string;name:string;revision:number;mask:Uint8Array}[]; selectionInfo?: {source: 'local-manual-photo' | 'sam-3.1-photo'; name:string; revision:number; sourceSelectedPixels:number; provenance?: string; confidence?: number; maskRef?: string}};
 export const dreamProgress = (seconds: number, reduced = false) => {

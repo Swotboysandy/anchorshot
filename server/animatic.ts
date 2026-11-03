@@ -30,8 +30,9 @@ export class AnimaticError extends Error {}
 const WIDTH = 1280;
 const HEIGHT = 720;
 const NARRATION_TAIL = 0.4;
+const FPS = 25;
 
-export function formatSmpteTimecode(seconds: number, fps = 30): string {
+export function formatSmpteTimecode(seconds: number, fps = FPS): string {
   const totalFrames = Math.max(0, Math.round(seconds * fps));
   const frames = totalFrames % fps;
   const totalSec = Math.floor(totalFrames / fps);
@@ -60,7 +61,7 @@ export function createTimecodeOverlaySvg(
       <g filter="url(#bgShadow)">
         <rect x="28" y="${HEIGHT - 72}" width="400" height="48" rx="6" fill="#0A0D12" fill-opacity="0.88" stroke="#323A46" stroke-width="1.5"/>
         <text x="44" y="${HEIGHT - 44}" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="16" font-weight="700" fill="#38BDF8" letter-spacing="1.5">TC ${tcStr}</text>
-        <text x="44" y="${HEIGHT - 30}" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" fill="#94A3B8" letter-spacing="0.5">${shotLabel} &#8226; ${durLabel} &#8226; 30 FPS</text>
+        <text x="44" y="${HEIGHT - 30}" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" fill="#94A3B8" letter-spacing="0.5">${shotLabel} &#8226; ${durLabel} &#8226; ${FPS} FPS</text>
       </g>
     </svg>
   `);
@@ -85,7 +86,7 @@ export async function ffmpegAvailable(ffmpeg = 'ffmpeg'): Promise<boolean> {
 
 /** A gentle Ken Burns move for a planned camera move; locked and unknown moves stay still. */
 export function cameraMove(movement: string | undefined, seconds: number): string {
-  const total = Math.max(1, Math.round(seconds * 30));
+  const total = Math.max(1, Math.round(seconds * FPS));
   const t = `min(on/${total},1)`;
   const centre = { x: 'iw/2-(iw/zoom/2)', y: 'ih/2-(ih/zoom/2)' };
   const moves: Record<string, { z: string; x: string; y: string }> = {
@@ -98,7 +99,7 @@ export function cameraMove(movement: string | undefined, seconds: number): strin
   const move = movement ? moves[movement] : undefined;
   if (!move) return '';
   // Upscale first so the slow move does not jitter from whole-pixel steps.
-  return `,scale=${WIDTH * 2}:${HEIGHT * 2},zoompan=z='${move.z}':x='${move.x}':y='${move.y}':d=1:s=${WIDTH}x${HEIGHT}:fps=30`;
+  return `,scale=${WIDTH * 2}:${HEIGHT * 2},zoompan=z='${move.z}':x='${move.x}':y='${move.y}':d=1:s=${WIDTH}x${HEIGHT}:fps=${FPS}`;
 }
 
 export async function renderAnimatic(
@@ -143,21 +144,21 @@ export async function renderAnimatic(
           sourceHasAudio=Array.isArray(streams.streams)&&streams.streams.length>0;
         }
         args.push('-stream_loop', '-1', '-ss', String(shot.startSeconds ?? 0), '-t', String(seconds), '-i', clip);
-      } else args.push('-framerate', '30', '-loop', '1', '-t', String(seconds), '-i', frame);
+      } else args.push('-framerate', String(FPS), '-loop', '1', '-t', String(seconds), '-i', frame);
       // An attached narration replaces source audio; otherwise preserve the clip's soundtrack.
       const a = sourceHasAudio ? v : inputIndex++;
       if (audio) args.push('-i', audio);
       else if(!sourceHasAudio) args.push('-f', 'lavfi', '-t', String(seconds), '-i', 'anullsrc=r=44100:cl=stereo');
       const videoLabel = options?.burnInTimecode ? `base${i}` : `v${i}`;
       filters.push(
-        `[${v}:v]trim=duration=${seconds},setpts=PTS-STARTPTS,scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30${shot.video ? '' : cameraMove(shot.movement, seconds)},format=yuv420p[${videoLabel}]`,
+        `[${v}:v]trim=duration=${seconds},setpts=PTS-STARTPTS,scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${FPS}${shot.video ? '' : cameraMove(shot.movement, seconds)},format=yuv420p[${videoLabel}]`,
         `[${a}:a]aresample=44100,aformat=channel_layouts=stereo,apad,atrim=0:${seconds},asetpts=PTS-STARTPTS[a${i}]`,
       );
       if (options?.burnInTimecode) {
         const overlay = path.join(folder, `timecode-${i}.png`);
         await sharp(createTimecodeOverlaySvg(i, shots.length, cumulativeSeconds, seconds)).png().toFile(overlay);
         const overlayIndex = inputIndex++;
-        args.push('-framerate', '30', '-loop', '1', '-t', String(seconds), '-i', overlay);
+        args.push('-framerate', String(FPS), '-loop', '1', '-t', String(seconds), '-i', overlay);
         filters.push(`[${videoLabel}][${overlayIndex}:v]overlay=0:0:shortest=1[v${i}]`);
       }
       cumulativeSeconds += seconds;

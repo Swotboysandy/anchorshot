@@ -818,7 +818,7 @@ export async function exportStoryboardAnimaticVideo(
 
   const {fixWebmDuration} = await import('@fix-webm-duration/fix');
   if(document.hidden)throw new Error('Keep this tab visible for browser export, or use local MP4 export.');
-  const stream = canvas.captureStream(30);
+  const stream = canvas.captureStream(25);
   const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
     ? 'video/webm;codecs=vp9'
     : 'video/webm';

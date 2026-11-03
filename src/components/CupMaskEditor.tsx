@@ -78,7 +78,7 @@ export function CupMaskEditor({initial,onApply,onCancel,objectKind='cup',fixedFr
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {objectKind==='umbrella' && name==='Authored umbrella illustration' && <button type="button" className={button} onClick={()=>{checkpoint();update(umbrellaSample().mask);setPoints([]);setTool('erase');}}>Start umbrella sample mask</button>}
-          {name==='CC0 coffee photograph' && <button type="button" className={button} onClick={()=>{checkpoint();update(polygonMask(photo.width,photo.height,[{x:174,y:108},{x:186,y:65},{x:217,y:34},{x:267,y:18},{x:322,y:21},{x:366,y:43},{x:397,y:76},{x:411,y:119},{x:401,y:168},{x:380,y:215},{x:348,y:258},{x:285,y:283},{x:248,y:279},{x:229,y:305},{x:209,y:310},{x:195,y:289},{x:198,y:260},{x:214,y:234},{x:193,y:201},{x:180,y:158}]));setPoints([]);setTool('erase');}}>Start rough sample outline</button>}
+          {name==='CC0 coffee photograph' && <button type="button" className={button} onClick={()=>{checkpoint();update(polygonMask(photo.width,photo.height,[{x:174,y:108},{x:186,y:65},{x:217,y:34},{x:267,y:18},{x:322,y:21},{x:366,y:43},{x:397,y:76},{x:411,y:119},{x:401,y:168},{x:380,y:215},{x:348,y:258},{x:285,y:283},{x:248,y:279},{x:229,y:305},{x:209,y:310},{x:195,y:301},{x:198,y:260},{x:214,y:234},{x:193,y:201},{x:180,y:158}]));setPoints([]);setTool('erase');}}>Start rough sample outline</button>}
           {samInfo && (
             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs bg-[#0F172A] border border-[#38BDF8]/60 text-[#38BDF8]">
               <span className="w-1.5 h-1.5 rounded-full bg-[#38BDF8]" />

@@ -4,9 +4,9 @@ import {DREAM,verifyDream,renderDreamFrame,type DreamAssets} from '../src/servic
 const photo=(color:number)=>({width:20,height:20,data:Uint8ClampedArray.from({length:1600},(_,i)=>i%4===3?255:color)});
 const selection=(color:number):CupSelection=>({photo:photo(color),mask:new Uint8Array(400).fill(1),name:'test',revision:1});
 const base=():DreamAssets=>{const p={width:800,height:450,data:new Uint8ClampedArray(800*450*4).fill(30)};return {kitchen:p,ocean:{...p,data:new Uint8ClampedArray(p.data.length).fill(220)},anchor:p,mask:new Uint8Array(800*450)};};
-it('preserves two independent masks through all 289 transition frames',async()=>{
+it('preserves two independent masks through all 301 transition frames',async()=>{
  const a=applyDreamSelections(base(),selection(80),selection(150));
- const report=await verifyDream(a);expect(report.passed).toBe(true);expect(report.framesChecked).toBe(289);
+ const report=await verifyDream(a);expect(report.passed).toBe(true);expect(report.framesChecked).toBe(301);
  expect(report.objects.map(o=>o.id)).toEqual(['cup','umbrella']);
  for(const score of report.objects){expect(score.protectedPixels).toBeGreaterThan(0);expect(score.changedProtectedPixelsAcrossFrames).toBe(0);}
  const first=new Uint8ClampedArray(a.anchor.data.length),last=first.slice();renderDreamFrame(a,first,0);renderDreamFrame(a,last,DREAM.duration);

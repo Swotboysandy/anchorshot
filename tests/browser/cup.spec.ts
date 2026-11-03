@@ -19,7 +19,7 @@ test('real photograph, editable mask, approval and protected export with no API 
  await editor.getByRole('button',{name:'Apply cup to dream'}).click();
  await expect(study.getByText('Approved photo mask · revision 1')).toBeVisible();
  await study.getByRole('button',{name:'Check cup preservation'}).click();
- await expect(study.getByRole('status',{name:'Cup preservation results'})).toContainText('PASS · 289 frames · 0 changed protected pixels',{timeout:30000});
+ await expect(study.getByRole('status',{name:'Cup preservation results'})).toContainText('PASS · 301 frames · 0 changed protected pixels',{timeout:30000});
  await mkdir('.artifacts/cup-tests',{recursive:true});
  for(const [button,file] of [['Save quality report','quality.json'],['Save protection mask','mask.png'],['Save PNG frame','first.png']]){const d=page.waitForEvent('download');await study.getByRole('button',{name:button}).click();await(await d).saveAs('.artifacts/cup-tests/'+file);}
  await study.getByRole('button',{name:'Ocean',exact:true}).click();const last=page.waitForEvent('download');await study.getByRole('button',{name:'Save PNG frame'}).click();await(await last).saveAs('.artifacts/cup-tests/last.png');

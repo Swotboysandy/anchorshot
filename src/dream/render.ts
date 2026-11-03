@@ -319,7 +319,7 @@ export async function recordDream(
   const { fixWebmDuration } = await import('@fix-webm-duration/fix');
   const { canvas, ctx } = surface();
   renderDream(ctx, assets, 0, plan);
-  const stream = canvas.captureStream(30),
+  const stream = canvas.captureStream(25),
     recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 5_000_000 });
   return new Promise((resolve, reject) => {
     const chunks: BlobPart[] = [];

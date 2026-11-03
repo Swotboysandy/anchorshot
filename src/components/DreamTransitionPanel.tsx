@@ -149,7 +149,7 @@ export function DreamTransitionPanel({projectId='legacy'}:{projectId?:string}) {
         <p className="text-[#E2E8F0] text-sm leading-relaxed">{time<6?'“I was in my grandmother’s kitchen, holding a cup. The tiles began to move like water.”':'“The room opened into an ocean. I was still holding the same cup.”'}</p>
         <div className="flex flex-wrap items-center gap-2">
           <button className={button} type="button" aria-pressed={overlay} onClick={()=>setOverlay(!overlay)}>{overlay?'Hide':'Show'} protected region</button>
-          <button className={button} type="button" disabled={Boolean(busy)||Boolean(editing)} onClick={()=>void run('check')}>{busy==='check'?'Checking 289 frames…':umbrella?'Check both objects':'Check cup preservation'}</button>
+          <button className={button} type="button" disabled={Boolean(busy)||Boolean(editing)} onClick={()=>void run('check')}>{busy==='check'?'Checking 301 frames…':umbrella?'Check both objects':'Check cup preservation'}</button>
           <button className={button} type="button" disabled={Boolean(busy)||Boolean(editing)} onClick={()=>void run('export')}><Download size={16} aria-hidden="true"/>{busy==='export'?'Exporting…':'Export dream WebM'}</button>
           <button className={button} type="button" disabled={Boolean(busy)||Boolean(editing)} onClick={()=>{
             const c=document.createElement('canvas');c.width=DREAM.width;c.height=DREAM.height;const ctx=c.getContext('2d')!,p=ctx.createImageData(c.width,c.height);
