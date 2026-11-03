@@ -224,8 +224,8 @@ export async function startAgentConversation(
           transcript = (await post('/api/muse/transcribe', session, { audio: await toDataUrl(clip) }, controller.signal)).transcript;
         } catch (error) {
           const message = error instanceof Error ? error.message : '';
-          // Background noise stays quiet; a real failure is always spoken.
-          if (!ended && !/heard no speech/i.test(message)) await say(`I could not transcribe that. ${message}`.trim());
+          // Brief noise never reaches here, so a director who spoke must not be met with silence.
+          if (!ended) await say(/heard no speech/i.test(message) ? 'I did not catch that. Please say it again.' : `I could not transcribe that. ${message}`.trim());
           continue;
         }
         if (ended) break;

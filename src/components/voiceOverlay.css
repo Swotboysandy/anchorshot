@@ -9,8 +9,10 @@
 .studio-activity{position:sticky;top:0;z-index:30;display:grid;gap:8px;padding:12px 24px;background:#111;border-bottom:1px solid #333;font-size:13px}
 .editor-shell .studio-activity{margin-left:var(--editor-rail,0)}
 @media(max-width:700px){.editor-shell .studio-activity{margin-left:0}}
-.voice-captions{position:absolute;bottom:calc(100% + 12px);right:0;width:min(28rem,calc(100vw - 32px));max-height:min(40vh,320px)}
+.studio-transcript{margin-top:20px;display:grid;gap:12px}
+.studio-transcript h3{margin:0;font-size:13px;font-weight:600}
+.voice-captions{position:relative;max-height:320px;min-height:80px}
+.studio-script{max-height:180px;overflow:auto;margin:0;padding:12px;font-size:13px;line-height:1.5;white-space:pre-wrap;border:1px solid #333;border-radius:8px}
 @media(max-width:700px){
   .voice-orb-only{right:16px}
-  .voice-captions{right:0}
 }

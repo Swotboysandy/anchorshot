@@ -2,7 +2,9 @@ import {TimelineNarration} from './TimelineNarration';
 import {DashboardLayout} from './DashboardLayout';
 import { Tabs as BeTabs, TabsList as BeTabsList, TabsTrigger as BeTabsTrigger, TabsContent as BeTabsContent } from './ui/beui-tabs';
 import { CreationComposer } from './CreationComposer';
-import { VoiceOverlay } from './VoiceOverlay';
+import { VoiceOverlay, type VoiceCaption } from './VoiceOverlay';
+import { Conversation, ConversationContent } from './ui/conversation';
+import { Message, MessageContent } from './ui/message';
 import type { AgentTools } from '../services/voiceAgent';
 import { Progress } from './ui/progress';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
@@ -95,6 +97,7 @@ type Props = {
 export function CleanStudio(p: Props) {
   const archiveInput=useRef<HTMLInputElement>(null);
   const [videoError,setVideoError]=useState('');
+  const [captions,setCaptions]=useState<VoiceCaption[]>([]);
   const playbackError=useRef(p.onPlaybackError);playbackError.current=p.onPlaybackError;
   const [workspace, setWorkspace] = useState('create'),
     [inputMode, setInputMode] = useState('describe'),
@@ -516,6 +519,29 @@ export function CleanStudio(p: Props) {
                     </p>
                   </BeTabsContent>
                 </BeTabs>
+                {(captions.length > 0 || p.transcript.trim()) && (
+                  <div className="studio-transcript">
+                    {captions.length > 0 && <>
+                      <h3>Conversation</h3>
+                      <Conversation className="voice-captions rounded-lg border border-border bg-background text-foreground" aria-label="Voice agent captions">
+                        <ConversationContent>
+                          {captions.map((caption) => (
+                            <Message key={caption.id} from={caption.from}>
+                              <MessageContent>
+                                <span className="sr-only">{caption.from === 'user' ? 'You said:' : 'Agent said:'}</span>
+                                {caption.text}
+                              </MessageContent>
+                            </Message>
+                          ))}
+                        </ConversationContent>
+                      </Conversation>
+                    </>}
+                    {p.transcript.trim() && <>
+                      <h3>Script</h3>
+                      <p className="studio-script">{p.transcript}</p>
+                    </>}
+                  </div>
+                )}
               </section>
               {hasStory && <section className="film-column" aria-label="Film preview">
                 <div className="section-heading">
@@ -813,6 +839,7 @@ export function CleanStudio(p: Props) {
         open={voiceOpen}
         onOpenChange={setVoiceOpen}
         agentTools={agentTools}
+        onCaptions={setCaptions}
       />
     </div>
   );

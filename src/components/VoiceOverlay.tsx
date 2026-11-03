@@ -3,8 +3,6 @@ import { motion, useMotionValue, useReducedMotion } from 'motion/react';
 import { VoiceOrb } from './agents/voice-orb';
 import './voiceOverlay.css';
 import { SPRING_PRESS } from '../lib/ease';
-import { Conversation, ConversationContent } from './ui/conversation';
-import { Message, MessageContent } from './ui/message';
 import { agentAvailable, startAgentConversation, type AgentConversation, type AgentTools } from '../services/voiceAgent';
 import { speechRecognitionService } from '../services/speechRecognitionService';
 
@@ -14,10 +12,13 @@ type Props = {
   onOpenChange: (open: boolean) => void;
   /** App actions the voice agent may call. Without a connected agent the orb only meters locally. */
   agentTools?: AgentTools;
+  /** Receives the conversation, which the studio shows in its left panel. */
+  onCaptions?: (captions: VoiceCaption[]) => void;
 };
+export type VoiceCaption = { id: number; from: 'user' | 'assistant'; text: string };
 
 /** Persistent entry to voice: the voice agent when connected, otherwise local metering. */
-export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
+export function VoiceOverlay({ open, onOpenChange, agentTools, onCaptions }: Props) {
   const reduced = useReducedMotion();
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [pending, setPending] = useState(false);
@@ -31,6 +32,7 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
   const [agentStatus, setAgentStatus] = useState('');
   const [captions, setCaptions] = useState<Array<{ id: number; from: 'user' | 'assistant'; text: string }>>([]);
   const captionId = useRef(0);
+  useEffect(() => onCaptions?.(captions), [captions, onCaptions]);
   const stop = useCallback(() => {
     generation.current++;
     cancelAnimationFrame(frame.current);
@@ -89,7 +91,6 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
   const start = async () => {
     if (pending || analyser || conversation.current) return;
     const request = ++generation.current;
-    setCaptions([]);
     setPending(true);
     setError('');
     const agent = agentTools ? await agentAvailable() : { ready: false, session: '' };
@@ -152,20 +153,6 @@ export function VoiceOverlay({ open, onOpenChange, agentTools }: Props) {
   };
   return (
     <div className="voice-orb-only">
-      {captions.length > 0 && (
-        <Conversation className="voice-captions dark rounded-lg border border-border bg-background text-foreground" aria-label="Voice agent captions">
-          <ConversationContent>
-            {captions.map((caption) => (
-              <Message key={caption.id} from={caption.from}>
-                <MessageContent>
-                  <span className="sr-only">{caption.from === 'user' ? 'You said:' : 'Agent said:'}</span>
-                  {caption.text}
-                </MessageContent>
-              </Message>
-            ))}
-          </ConversationContent>
-        </Conversation>
-      )}
       <motion.button type="button" className="voice-orb-toggle"
         animate={{scale: reduced ? 1 : analyser ? 1.12 : 1}}
         whileHover={reduced ? undefined : {scale: analyser ? 1.16 : 1.04}}
