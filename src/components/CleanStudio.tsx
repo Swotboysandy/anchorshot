@@ -61,6 +61,7 @@ type Props = {
   onGenerateFrom: (script: string) => Promise<string>;
   onGenerate: () => void;
   onCommand: (s: string) => void;
+  onEditObject: (object: string, instruction: string, shotNumber?: number) => Promise<string>;
   onSelect: (id: string) => void;
   onPlay: () => void;
   onPlaybackError?: (message:string)=>void;
@@ -253,6 +254,49 @@ export function CleanStudio(p: Props) {
       p.shots.length
         ? p.shots.map((s) => `Shot ${s.shotNumber}, ${s.status}: ${s.promptDescription}`).join('\n')
         : 'The storyboard is empty.',
+    edit_object: ({ object, instruction, shot }) =>
+      typeof object === 'string' && typeof instruction === 'string' && object.trim() && instruction.trim()
+        ? p.onEditObject(object.trim(), instruction.trim(), Number(shot) || undefined)
+        : 'Say which object to change and what it should become.',
+    open_workspace: ({ name }) => {
+      if (name !== 'create' && name !== 'dream' && name !== 'review') return 'That workspace does not exist.';
+      selectWorkspace(name);
+      return `The ${name} workspace is open.`;
+    },
+    narrate_shot: () => {
+      if (!p.activeShot) return 'There is no shot to read.';
+      p.onNarrate();
+      return p.activeShot.spokenDescription;
+    },
+    export_film: () => {
+      if (!p.shots.length) return 'There is no film to export yet.';
+      if (p.exporting || p.processing) return 'Wait for the current operation to finish.';
+      p.onExport();
+      return 'The export has started. The file will download when it is ready.';
+    },
+    toggle_mute: () => {
+      p.onMute();
+      return p.muted ? 'Spoken feedback is on.' : 'Spoken feedback is muted.';
+    },
+    move_shot: ({ number, direction }) => {
+      const target = p.shots.find((s) => s.shotNumber === Number(number));
+      if (!target || !p.onReorderShot) return `There is no shot ${number}.`;
+      p.onReorderShot(target.id, direction === 'earlier' ? 'left' : 'right');
+      return `Moved shot ${number} ${direction === 'earlier' ? 'earlier' : 'later'}.`;
+    },
+    change_shot_length: ({ number, seconds }) => {
+      const target = p.shots.find((s) => s.shotNumber === Number(number));
+      if (!target || !p.onNudgeDuration) return `There is no shot ${number}.`;
+      if (!Number.isFinite(Number(seconds)) || !Number(seconds)) return 'Say how many seconds to change.';
+      p.onNudgeDuration(target.id, Number(seconds));
+      return `Changed shot ${number} by ${seconds} seconds.`;
+    },
+    next_take: ({ number }) => {
+      const target = p.shots.find((s) => s.shotNumber === Number(number));
+      if (!target || !p.onCycleShotTake) return `There is no shot ${number}.`;
+      p.onCycleShotTake(target.id);
+      return target.revisions.length > 1 ? `Switched shot ${number} to its next take.` : `Shot ${number} has only one take.`;
+    },
   };
   return (
     <div className={hasStory ? "clean-studio dark editor-shell" : "clean-studio dark"}>

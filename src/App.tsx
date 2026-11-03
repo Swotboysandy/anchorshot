@@ -528,6 +528,42 @@ export default function App() {
     }
   }, [projectState.shots, projectState.projectId, projectState.isProcessing]);
 
+  // Spoken object edit: find the named object with SAM, then change only its pixels.
+  const handleEditObject = useCallback(async (object: string, instruction: string, shotNumber?: number) => {
+    const source = currentProjectRef.current;
+    const shot = shotNumber ? source.shots.find((s) => s.shotNumber === shotNumber) : source.shots.find((s) => s.id === source.activeShotId) ?? source.shots[0];
+    if (!shot) return shotNumber ? `There is no shot ${shotNumber}.` : 'There is no shot to edit yet.';
+    if (source.isProcessing) return 'Wait for the current operation to finish.';
+    const sourceImage = shot.currentImageUrl;
+    const unchanged = (state: ProjectState) => state.projectId === source.projectId && state.shots.find((s) => s.id === shot.id)?.currentImageUrl === sourceImage;
+    setProjectState((prev) => ({ ...prev, isProcessing: true, activeShotId: shot.id, statusAnnouncement: `Finding the ${object} in Shot ${shot.shotNumber}...` }));
+    try {
+      const mask = await metaModelClient.segmentObjectWithSam3(shot.shotNumber, object, undefined, undefined, 1, sourceImage);
+      if (mask.provenance !== 'live-sam-3.1' || !mask.maskBase64) throw new Error(`The ${object} could not be found in Shot ${shot.shotNumber}. Nothing was changed.`);
+      setProjectState((prev) => ({ ...prev, statusAnnouncement: `Changing the ${object} in Shot ${shot.shotNumber}...` }));
+      const res = await metaModelClient.editFrameGenerative(sourceImage, `${instruction}. Change only the ${object}. Keep the rest of the image identical.`, mask.maskBase64);
+      if (!unchanged(currentProjectRef.current)) return 'The shot changed during the edit, so the result was not applied.';
+      const message = `Changed the ${object} in Shot ${shot.shotNumber}. ${res.outsideDrift} pixels outside it changed. Continuity needs review.`;
+      setProjectState((prev) => !unchanged(prev) ? prev : {
+        ...prev,
+        statusAnnouncement: message,
+        shots: prev.shots.map((s) => s.id !== shot.id ? s : {
+          ...s, currentImageUrl: res.editedImageUrl, status: 'uncertain', mediaSource: 'generated',
+          videoUrl: undefined, generatedJobId: undefined, videoMaskPlan: undefined, detectedObjects: undefined, proposedFix: undefined, discrepancyMessage: undefined,
+          revisions: [...s.revisions, { revisionId: `voice-edit-${Date.now()}`, timestamp: Date.now(), imageUrl: res.editedImageUrl, mediaSource: 'generated', actionApplied: `Object edit: ${object}, ${instruction}; continuity unreviewed` }],
+        }),
+      });
+      speechService.playEarcon('fixApplied');
+      return message;
+    } catch (error) {
+      const message = `The edit failed: ${(error as Error).message}`;
+      setProjectState((prev) => ({ ...prev, statusAnnouncement: message }));
+      return message;
+    } finally {
+      setProjectState((prev) => prev.projectId === source.projectId ? { ...prev, isProcessing: false } : prev);
+    }
+  }, []);
+
   // Meta muse-spark-1.3 video continuity analysis: inspect the rendered sequence and
   // suggest real continuity fixes evaluated against the project's ContinuityRule records.
   const handleAnalyzeVideoContinuity = useCallback(async (shotId: string) => {
@@ -1509,6 +1545,7 @@ export default function App() {
         onGenerate={() => void handleRebuildFromTranscript(true)}
         onGenerateFrom={(script) => handleRebuildFromTranscript(true, script)}
         onCommand={(text) => handleExecuteVoiceCommand(text)}
+        onEditObject={handleEditObject}
         onSelect={(id) => handleSelectShot(id)}
         onPlay={handleTogglePlayAnimatic}
         onSeek={handleScrubTime}

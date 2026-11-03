@@ -60,6 +60,7 @@ Never describe visuals you were not told about; use describe_storyboard to read 
 The director may not be able to see the screen, so do what they ask with a tool straight away instead of asking for confirmation.
 When the director gives scene direction, call set_direction with their words. If they also ask to make, create or generate it, call generate_storyboard in the same turn; otherwise offer to. This creates real videos, not sample storyboard drawings. Never claim a film is ready when generation reports missing configuration or a failure.
 Use select_shot to open a shot by number and read back what it returns. Use run_command for playback and continuity commands such as "play", "pause", "check continuity" or "the cup must be blue".
+For a new colour use run_command, such as "make the dress red" or "make the dress red in shot 2". To change what an object is, or to add or replace something on it, use edit_object. Never regenerate the film for a change to one object.
 Say plainly what the result reports, in your own words; never mention tools and never claim more than it says. A rule change does not repaint frames unless the result says so. If nothing changed, say so.`;
 
 const tool = (name: string, description: string, properties: Record<string, object> = {}): OpenAI.Chat.ChatCompletionTool => ({
@@ -74,6 +75,18 @@ export const AGENT_TOOLS = [
   tool('run_command', 'Run a studio command such as play, pause, check continuity, or a continuity colour rule.', { command: { type: 'string', description: 'The command text.' } }),
   tool('select_shot', 'Open a shot by its number and get its spoken description.', { number: { type: 'number', description: 'Shot number, starting at 1.' } }),
   tool('describe_storyboard', 'List every shot with its continuity status and description.'),
+  tool('edit_object', 'Change or replace one named object in a shot image, for example turn the dress into a raincoat. Only that object changes. Takes up to a minute.', {
+    object: { type: 'string', description: 'The object to find, such as dress.' },
+    instruction: { type: 'string', description: 'What it should become, in the director\'s words.' },
+    shot: { type: 'number', description: 'Shot number, or 0 for the open shot.' },
+  }),
+  tool('open_workspace', 'Open a workspace.', { name: { type: 'string', enum: ['create', 'dream', 'review'] } }),
+  tool('narrate_shot', 'Read the open shot aloud.'),
+  tool('export_film', 'Export the film as an MP4 file.'),
+  tool('toggle_mute', 'Mute or unmute spoken feedback. Use only when asked.'),
+  tool('move_shot', 'Move a shot earlier or later in the film.', { number: { type: 'number' }, direction: { type: 'string', enum: ['earlier', 'later'] } }),
+  tool('change_shot_length', 'Lengthen or shorten a shot by half a second per step.', { number: { type: 'number' }, seconds: { type: 'number', description: 'Change in seconds, such as 1 or -0.5.' } }),
+  tool('next_take', 'Switch a shot to its next take.', { number: { type: 'number' } }),
 ];
 
 type Chat = Pick<OpenAI['chat']['completions'], 'create'>;

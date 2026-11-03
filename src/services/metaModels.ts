@@ -368,7 +368,7 @@ export class MetaModelClient {
       const planned=normalizeShot(plan.shots[i]);
       const prompt=buildShotPrompt({shot:planned,continuity:rules.filter(r=>r.property==='color'),cast:normalizeCast(plan.cast),hasReferences:false});
       onProgress?.(`Rendering scene ${i+1} of ${plan.shots.length} at 25 fps: ${planned.subject}`,10+Math.round(i/plan.shots.length*85));
-      const res=await fetch('/api/muse/video',{method:'POST',headers,body:JSON.stringify({prompt}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(330000)]):AbortSignal.timeout(330000)});
+      const res=await fetch('/api/muse/video',{method:'POST',headers,body:JSON.stringify({prompt}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(630000)]):AbortSignal.timeout(630000)});
       const clip=await res.json();
       if(!res.ok)throw new Error(clip.error||`Scene ${i+1} could not be rendered.`);
       if(clip.fps!==25||typeof clip.videoUrl!=='string'||typeof clip.imageUrl!=='string'||!Number.isFinite(clip.seconds))throw new Error('The renderer returned invalid video metadata.');
