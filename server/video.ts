@@ -18,6 +18,7 @@ export function validateVideoProbe(probe:any) {
 /** Disabled until a video deployment and a bounded test window are explicitly configured. */
 export function videoFromSettings(values:Record<string,string|undefined>, folder:string):VideoProvider|undefined {
   const pick=(name:string)=>(process.env[name]??values[name]??'').trim();
+  if(pick('VIDEO_PROVIDER')==='modal')return modalVideo(pick('MODAL_VIDEO_ENDPOINT'),pick('MODAL_VIDEO_KEY'),folder);
   if(pick('VIDEO_PROVIDER')!=='baseten')return;
   const endpoint=pick('VIDEO_BASE_URL'),key=pick('VIDEO_API_KEY')||pick('BASETEN_API_KEY');
   if(!endpoint||!key)return;
@@ -42,14 +43,35 @@ export function videoFromSettings(values:Record<string,string|undefined>, folder
     for(;;){const {done,value}=await reader.read();if(done)break;length+=value.length;if(length>90*1024*1024){await reader.cancel();throw new Error('Video response exceeds 90 MB.');}chunks.push(value);}
     const data=JSON.parse(Buffer.concat(chunks).toString());
     if(typeof data.video!=='string'||!data.video.length||!/^[A-Za-z0-9+/]+={0,2}$/.test(data.video))throw new Error('Baseten returned no valid base64 video.');
-    const file=join(destination,'generated-video.mp4');writeFileSync(file,Buffer.from(data.video,'base64'));
-    const {stdout}=await exec('ffprobe',['-v','error','-count_frames','-show_streams','-show_format','-of','json',file],{signal,timeout:30000,windowsHide:true});
-    const metadata=validateVideoProbe(JSON.parse(stdout));
-    await exec('ffmpeg',['-v','error','-xerror','-i',file,'-f','null','-'],{signal,timeout:30000,windowsHide:true});
-    await exec('ffmpeg',['-v','error','-i',file,'-frames:v','1',join(destination,'frame-000.png')],{signal,timeout:30000,windowsHide:true});
-    const report={...metadata,model,provider:'baseten',status:'technical_pass',continuity:'unreviewed'};
-    writeFileSync(join(destination,'inference-report.json'),JSON.stringify(report));
-    writeFileSync(join(destination,'job.json'),JSON.stringify({id,kind:'video',status:'completed',prompt,seed:42,createdAt:new Date().toISOString(),message:'Generated on Baseten; continuity unreviewed.',report}));
-    return {id,model,...metadata,imageUrl:`/api/local-ai/jobs/${id}/assets/frame-000.png`,videoUrl:`/api/local-ai/jobs/${id}/assets/generated-video.mp4`};
+    return saveClip(Buffer.from(data.video,'base64'),destination,id,prompt,model,'baseten',signal);
+  }};
+}
+/** Checks a returned clip really is 25 fps, then stores it with the project's media. */
+async function saveClip(bytes:Buffer,destination:string,id:string,prompt:string,model:string,provider:string,signal:AbortSignal):Promise<GeneratedVideo> {
+  const file=join(destination,'generated-video.mp4');writeFileSync(file,bytes);
+  const {stdout}=await exec('ffprobe',['-v','error','-count_frames','-show_streams','-show_format','-of','json',file],{signal,timeout:30000,windowsHide:true});
+  const metadata=validateVideoProbe(JSON.parse(stdout));
+  await exec('ffmpeg',['-v','error','-xerror','-i',file,'-f','null','-'],{signal,timeout:30000,windowsHide:true});
+  await exec('ffmpeg',['-v','error','-i',file,'-frames:v','1',join(destination,'frame-000.png')],{signal,timeout:30000,windowsHide:true});
+  const report={...metadata,model,provider,status:'technical_pass',continuity:'unreviewed'};
+  writeFileSync(join(destination,'inference-report.json'),JSON.stringify(report));
+  writeFileSync(join(destination,'job.json'),JSON.stringify({id,kind:'video',status:'completed',prompt,seed:42,createdAt:new Date().toISOString(),message:`Generated on ${provider}; continuity unreviewed.`,report}));
+  return {id,model,...metadata,imageUrl:`/api/local-ai/jobs/${id}/assets/frame-000.png`,videoUrl:`/api/local-ai/jobs/${id}/assets/generated-video.mp4`};
+}
+/** VIDEO_PROVIDER=modal: scripts/modal_video.py, bounded by the session request limit. */
+function modalVideo(endpoint:string,key:string,folder:string):VideoProvider|undefined {
+  if(!endpoint||!key)return;
+  const url=new URL(endpoint);
+  if(url.protocol!=='https:'||!url.hostname.endsWith('.modal.run')||url.username||url.password||url.search)throw new Error('Configure a dedicated Modal video endpoint.');
+  const model='LTX-Video on Modal';
+  return {model,async generate(prompt,signal) {
+    const id=randomUUID(),destination=join(folder,id);mkdirSync(destination,{recursive:true});
+    // A cold start downloads and loads the model before the first clip.
+    const response=await fetch(new URL('/generate',url),{method:'POST',redirect:'error',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},
+      body:JSON.stringify({prompt}),signal:AbortSignal.any([signal,AbortSignal.timeout(600000)])});
+    if(!response.ok)throw new Error(`Modal video request failed (${response.status}). No automatic retry was sent.`);
+    const bytes=Buffer.from(await response.arrayBuffer());
+    if(bytes.length>90*1024*1024)throw new Error('Video response exceeds 90 MB.');
+    return saveClip(bytes,destination,id,prompt,model,'modal',signal);
   }};
 }

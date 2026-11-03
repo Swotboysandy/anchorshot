@@ -1,7 +1,7 @@
 import modal
-from fastapi import FastAPI, Response, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Header, Response, HTTPException
 from pydantic import BaseModel
+import hmac
 import io
 import os
 import tempfile
@@ -28,19 +28,19 @@ image = (
 )
 
 web_app = FastAPI(title="AnchorShot LTX-Video Serverless API")
-web_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+# Every clip uses paid GPU time, so only the AnchorShot server may ask for one.
+FPS = 25
+
+def require_key(authorization: str | None):
+    expected = f"Bearer {os.environ['VIDEO_ENDPOINT_KEY']}"
+    if not authorization or not hmac.compare_digest(authorization, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 class VideoPromptRequest(BaseModel):
     prompt: str
     negative_prompt: str = "low quality, worst quality, deformed, distorted, blurry, jerky movement"
-    num_frames: int = 25  # (8 * k + 1) for LTX-Video: 9, 17, 25, 33, 49
-    fps: int = 12
+    num_frames: int = 97  # (8 * k + 1) for LTX-Video; 97 frames is about 4 seconds at 25 fps
     width: int = 704     # Divisible by 32
     height: int = 480    # Divisible by 32
     num_inference_steps: int = 25
@@ -82,7 +82,8 @@ def health():
 
 @web_app.post("/")
 @web_app.post("/generate")
-def generate_video(req: VideoPromptRequest):
+def generate_video(req: VideoPromptRequest, authorization: str | None = Header(default=None)):
+    require_key(authorization)
     import torch
     from diffusers.utils import export_to_video
 
@@ -90,7 +91,7 @@ def generate_video(req: VideoPromptRequest):
     generator = torch.Generator("cuda").manual_seed(req.seed)
 
     # Ensure frame count is 8k + 1 (LTX requirement)
-    num_frames = req.num_frames
+    num_frames = min(req.num_frames, 193)
     if (num_frames - 1) % 8 != 0:
         num_frames = ((num_frames - 1) // 8) * 8 + 1
         if num_frames < 9:
@@ -116,7 +117,7 @@ def generate_video(req: VideoPromptRequest):
         tmp_path = tmp.name
 
     try:
-        export_to_video(frames, tmp_path, fps=req.fps)
+        export_to_video(frames, tmp_path, fps=FPS)
         with open(tmp_path, "rb") as f:
             video_bytes = f.read()
     finally:
@@ -136,7 +137,8 @@ def generate_video(req: VideoPromptRequest):
     volumes={"/cache/huggingface": model_volume},
     env={"HF_HOME": "/cache/huggingface"},
     timeout=600,
-    scaledown_window=300,
+    scaledown_window=60,
+    secrets=[modal.Secret.from_name("anchorshot-video")],
 )
 @modal.asgi_app()
 def fastapi_app():
