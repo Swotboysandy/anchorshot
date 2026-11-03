@@ -811,7 +811,7 @@ export const ShotInspectorPanel: React.FC<ShotInspectorPanelProps> = ({
           ))}
         </div>
       </details>
-      <details className="generation-disclosure">
+      <details className="generation-disclosure" open>
         <summary>Generate new media</summary>
         <LocalGenerationPanel
           isProcessing={isProcessing}

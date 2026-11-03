@@ -20,7 +20,8 @@
     "demo:walkthrough": "node --import tsx scripts/run_demo_walkthrough.ts",
     "export:evidence": "node --import tsx scripts/export_evidence_bundle.ts",
     "check": "npm run typecheck && npm run test:rendering && npm run test:local-ai && npm test && npm run build",
-    "test:local-ai": "node --import tsx --test tests/localAi.test.ts"
+    "test:local-ai": "node --import tsx --test tests/localAi.test.ts",
+    "dev:local": "node scripts/dev-local.mjs"
   },
   "engines": {
     "node": ">=22.12.0"

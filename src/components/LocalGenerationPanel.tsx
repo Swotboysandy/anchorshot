@@ -1,6 +1,7 @@
 import React, {useEffect, useState} from 'react';
 
 import {Cpu} from 'lucide-react';
+import {Skeleton} from './ui/skeleton';
 
 import {localAsset, localMeasurementsAsset, localRequest, type LocalJob} from '../services/localGeneration';
 
@@ -25,6 +26,7 @@ export function LocalGenerationPanel({shotId, shotNumber, initialPrompt, onUseIm
   const [selected, setSelected] = useState('');
 
   const [ready, setReady] = useState(false);
+  const [checking, setChecking] = useState(true);
 
   const [busy, setBusy] = useState(false);
 
@@ -58,13 +60,13 @@ export function LocalGenerationPanel({shotId, shotNumber, initialPrompt, onUseIm
 
         if (health.ready) setError(prev => (prev.includes('Local service unavailable') ? '' : prev));
 
-        setSelected(previous => previous || recent[0]?.id || '');
+        setSelected(previous => previous || health.activeJobId || recent[0]?.id || '');
 
       } catch (e) {
 
         if (!disposed) {setReady(false); setError(e instanceof Error ? e.message : 'Local service unavailable.');}
 
-      } finally {if (!disposed) timer = setTimeout(refresh, 1500);}
+      } finally {if (!disposed) {setChecking(false); timer = setTimeout(refresh, 1500);}}
 
     }
 
@@ -134,11 +136,17 @@ export function LocalGenerationPanel({shotId, shotNumber, initialPrompt, onUseIm
 
     </div>
 
-    <p className="text-xs text-[#94A3B8]">{!ready ? 'Local runtime unavailable. Run scripts/setup_local_ai.ps1, then npm run dev.' : busy ? 'GPU busy — one generation at a time.' : '512×512 · Image ~20s · Video uses disk offload and can take a few minutes for 2 seconds.'}</p>
+    <p className="text-xs text-[#94A3B8]">{checking ? 'Checking local GPU service…' : !ready ? 'Local runtime unavailable. Run scripts/setup_local_ai.ps1, then npm run dev.' : busy ? 'GPU busy — one generation at a time.' : '512×512 · Image ~20s · Video uses disk offload and can take a few minutes for 2 seconds.'}</p>
 
     {error && <p role="alert" className="text-sm text-[#FDE047]">{error}</p>}
 
     {jobs.length > 0 && <><label htmlFor="local-result" className="text-xs text-[#E2E8F0]">Saved local results</label><select id="local-result" value={selected} onChange={e => {setSelected(e.target.value); setNotice('');}} className="min-h-[40px] p-2 bg-[#16191E] border border-[#323A46] rounded text-white text-sm">{jobs.map(item => <option key={item.id} value={item.id}>{item.kind} · {item.status} · {item.prompt.slice(0,35)}</option>)}</select></>}
+
+    {(checking || sending || job?.status === 'running') && <div aria-busy="true" aria-label="Local generation in progress" className="space-y-3 rounded-lg border border-white/15 p-4">
+      <Skeleton className="aspect-video w-full" />
+      <Skeleton className="h-3 w-2/3" />
+      <p className="text-sm text-neutral-300">{checking ? 'Connecting to the local runtime…' : sending ? 'Submitting your generation…' : `Creating your ${job?.kind} on this computer. The preview appears when rendering finishes.`}</p>
+    </div>}
 
     <p role="status" className="text-sm text-[#E2E8F0]">{notice || job?.message}</p>
 

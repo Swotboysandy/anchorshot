@@ -172,3 +172,13 @@ it('aborts the upstream model when the browser disconnects', async () => {
     await pending;
   } finally {server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
+
+
+describe('explicit compatible voice provider', () => {
+  it('requires its own endpoint, key and model without using the Meta key', () => {
+    const settings = {AGENT_PROVIDER: 'openai-compatible', AGENT_BASE_URL: 'https://inference.baseten.co/v1', AGENT_API_KEY: 'fixture-key', AGENT_MODEL: 'configured-tool-model', META_API_KEY: 'fixture-meta'};
+    expect(agentFromSettings(settings)?.model).toBe('configured-tool-model');
+    for (const missing of ['AGENT_BASE_URL','AGENT_API_KEY','AGENT_MODEL']) expect(agentFromSettings({...settings,[missing]:''})).toBeUndefined();
+    expect(agentFromSettings({...settings,AGENT_PROVIDER:'offline'})).toBeUndefined();
+  });
+});

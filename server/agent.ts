@@ -58,7 +58,7 @@ export const AGENT_PROMPT = `You are a spoken co-director inside a storyboard st
 Your words are read aloud, so reply in one or two short plain sentences, with no markdown or lists.
 Never describe visuals you were not told about; use describe_storyboard to read shots and their continuity status.
 The director may not be able to see the screen, so do what they ask with a tool straight away instead of asking for confirmation.
-When the director gives scene direction, call set_direction with their words. If they also ask to make, create or generate it, call generate_storyboard in the same turn; otherwise offer to.
+When the director gives scene direction, call set_direction with their words. If they also ask to make, create or generate it, call generate_storyboard in the same turn; otherwise offer to. This creates real videos, not sample storyboard drawings. Never claim a film is ready when generation reports missing configuration or a failure.
 Use select_shot to open a shot by number and read back what it returns. Use run_command for playback and continuity commands such as "play", "pause", "check continuity" or "the cup must be blue".
 Say plainly what the result reports, in your own words; never mention tools and never claim more than it says. A rule change does not repaint frames unless the result says so. If nothing changed, say so.`;
 
@@ -70,7 +70,7 @@ const tool = (name: string, description: string, properties: Record<string, obje
 /** Names match the studio actions the browser exposes in CleanStudio. */
 export const AGENT_TOOLS = [
   tool('set_direction', "Save the director's spoken scene direction into the script.", { text: { type: 'string', description: "The direction, in the director's words." } }),
-  tool('generate_storyboard', 'Build the storyboard shots from the current script.'),
+  tool('generate_storyboard', 'Generate real scene videos from the current script and apply them to the film timeline. This can take several minutes; report only the actual returned result.'),
   tool('run_command', 'Run a studio command such as play, pause, check continuity, or a continuity colour rule.', { command: { type: 'string', description: 'The command text.' } }),
   tool('select_shot', 'Open a shot by its number and get its spoken description.', { number: { type: 'number', description: 'Shot number, starting at 1.' } }),
   tool('describe_storyboard', 'List every shot with its continuity status and description.'),
@@ -93,12 +93,15 @@ export function chatAgent(options: { model: string; chat: Chat }): VoiceAgent {
   };
 }
 
-/** AGENT_PROVIDER=meta with META_API_KEY; AGENT_MODEL defaults to muse-spark-1.3. */
+/** Explicit server-side provider configuration; never falls back to a different paid provider. */
 export function agentFromSettings(values: Record<string, string | undefined>): VoiceAgent | undefined {
   const pick = (name: string) => (process.env[name] ?? values[name] ?? '').trim();
-  const apiKey = pick('META_API_KEY');
-  if (pick('AGENT_PROVIDER') !== 'meta' || !apiKey) return undefined;
-  const baseURL = pick('META_API_BASE_URL') || 'https://api.meta.ai/v1';
+  const provider = pick('AGENT_PROVIDER');
+  if (provider !== 'meta' && provider !== 'openai-compatible') return undefined;
+  const apiKey = provider === 'meta' ? pick('META_API_KEY') : pick('AGENT_API_KEY');
+  const baseURL = provider === 'meta' ? pick('META_API_BASE_URL') || 'https://api.meta.ai/v1' : pick('AGENT_BASE_URL');
+  const model = pick('AGENT_MODEL') || (provider === 'meta' ? 'muse-spark-1.3' : '');
+  if (!apiKey || !baseURL || !model) return undefined;
   const client = new OpenAI({ baseURL, apiKey, maxRetries: 0, timeout: 60_000 });
-  return chatAgent({ model: pick('AGENT_MODEL') || 'muse-spark-1.3', chat: client.chat.completions });
+  return chatAgent({ model, chat: client.chat.completions });
 }

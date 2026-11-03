@@ -344,6 +344,44 @@ export class MetaModelClient {
    * Generates structured shot list from director transcript, synthesizes frames with `muse-image-1.0`,
    * and runs initial multimodal audit + `sam-3.1` segmentation on any continuity discrepancy.
    */
+  public async generateFilmFromTranscript(
+    transcript:string, onProgress?:(message:string,percent:number)=>void, signal?:AbortSignal,
+  ):Promise<{rules:ContinuityRule[];shots:StoryboardShot[]}> {
+    const healthResponse=await fetch('/api/health',{signal});
+    if(!healthResponse.ok)throw new Error('The local server is unavailable.');
+    const health=await healthResponse.json();
+    if(!health.plannerLive)throw new Error('Connect the scene planner before generating a film.');
+    // Without a video model, a connected image model still draws real frames from the plan.
+    if(!health.videoReady&&health.imageModel)return this.generateStoryboardFromTranscript(transcript,undefined,false,onProgress);
+    if(!health.videoReady)throw new Error('Video generation is not connected yet. Your prompt is kept; no cup demo or sample scenes were created.');
+    const headers={'Content-Type':'application/json','X-Anchorshot-Session':String(health.sessionToken??'')};
+    onProgress?.('Planning scenes from your direction…',5);
+    const response=await fetch('/api/muse/spark',{method:'POST',headers,signal,
+      body:JSON.stringify({transcript:transcript+'\nProduction constraint: create at most 3 shots for this test. Use only the requested story, with no demo objects.',previousRevision:0})});
+    const plan=await response.json();
+    if(!response.ok)throw new Error(plan.error||'Scene planning failed.');
+    if(plan.provenance!=='live-model'||!Array.isArray(plan.shots)||!plan.shots.length||plan.shots.length>3)throw new Error('The planner must provide 1–3 real scene descriptions for this test. No video request sent.');
+    const rules:ContinuityRule[]=Array.isArray(plan.rules)?plan.rules:[];
+    const shots:StoryboardShot[]=[];
+    for(let i=0;i<plan.shots.length;i++) {
+      signal?.throwIfAborted();
+      const planned=normalizeShot(plan.shots[i]);
+      const prompt=buildShotPrompt({shot:planned,continuity:rules.filter(r=>r.property==='color'),cast:normalizeCast(plan.cast),hasReferences:false});
+      onProgress?.(`Rendering scene ${i+1} of ${plan.shots.length} at 25 fps: ${planned.subject}`,10+Math.round(i/plan.shots.length*85));
+      const res=await fetch('/api/muse/video',{method:'POST',headers,body:JSON.stringify({prompt}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(330000)]):AbortSignal.timeout(330000)});
+      const clip=await res.json();
+      if(!res.ok)throw new Error(clip.error||`Scene ${i+1} could not be rendered.`);
+      if(clip.fps!==25||typeof clip.videoUrl!=='string'||typeof clip.imageUrl!=='string'||!Number.isFinite(clip.seconds))throw new Error('The renderer returned invalid video metadata.');
+      shots.push({id:`shot-${i+1}`,shotNumber:i+1,durationSeconds:clip.seconds,promptDescription:planned.subject,
+        spokenDescription:`Scene ${i+1}: ${planned.subject}. Generated video at 25 frames per second; continuity unreviewed.`,
+        currentImageUrl:clip.imageUrl,originalImageUrl:clip.imageUrl,videoUrl:clip.videoUrl,generatedJobId:clip.id,mediaSource:'generated',status:'uncertain',
+        revisions:[{revisionId:`rev-${clip.id}`,timestamp:Date.now(),imageUrl:clip.imageUrl,videoUrl:clip.videoUrl,generatedJobId:clip.id,mediaSource:'generated',actionApplied:`Generated video by ${clip.model}; 25 fps; continuity unreviewed`}],
+      });
+    }
+    onProgress?.('Your generated scenes are ready.',100);
+    return {rules,shots};
+  }
+
   public async generateStoryboardFromTranscript(
     transcript: string,
     existingRules?: ContinuityRule[],

@@ -209,9 +209,10 @@ export default function App() {
       orcaTracker.trackAction('generation', `Rebuilding storyboard from transcript: "${targetTranscript.slice(0, 60)}..."`, { targetTranscript });
       setProjectState((prev) => ({
         ...prev,
+        transcript: targetTranscript,
         isProcessing: true,
         statusAnnouncement:
-          'Running muse-spark-1.3 shot planner and muse-image-1.0 storyboard synthesis...',
+          'Preparing your prompt-to-video generation…',
       }));
 
       setCurrentTimeSeconds(0);
@@ -219,17 +220,15 @@ export default function App() {
       let shots: StoryboardShot[];
       try {
         try {
-          ({ rules, shots } = await metaModelClient.generateStoryboardFromTranscript(
+          ({ rules, shots } = await metaModelClient.generateFilmFromTranscript(
             targetTranscript,
-            undefined,
-            injectDiscrepancy,
             (message, percent) => {
               setGenerationPercent(percent);
               setProjectState((prev) => ({ ...prev, statusAnnouncement: message }));
             }
           ).finally(() => setGenerationPercent(undefined)));
         } catch (error) {
-          const message = `Storyboard generation failed: ${error instanceof Error ? error.message : String(error)}`;
+          const message = `Film generation failed: ${error instanceof Error ? error.message : String(error)}`;
           speechService.playEarcon('mismatch');
           setProjectState((prev) => ({ ...prev, isProcessing: false, statusAnnouncement: message }));
           speechService.speak(message, true);
@@ -239,7 +238,7 @@ export default function App() {
 
       const mismatchShot = shots.find((s) => s.status === 'mismatch');
 
-      // Generated clips are applied explicitly to a selected shot from the media panel.
+      // Prompt and voice generation return real clips already assembled into these shots.
 
       speechService.playEarcon(mismatchShot ? 'mismatch' : shots.some((s) => s.status === 'uncertain') ? 'focus' : 'consistent');
 

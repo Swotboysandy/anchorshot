@@ -175,6 +175,10 @@ export function createLocalAi(root: string, launch = spawn) {
   });
   app.get('/jobs/:id/assets/:file', (req, res) => {
     const {id, file} = req.params;
+    // Cloud clips share the app-owned media store; load completed records saved after startup.
+    if(ID.test(id)&&!jobs.has(id)) {
+      try {const saved=JSON.parse(readFileSync(path.join(output,id,'job.json'),'utf8'));if(saved.id===id&&saved.status==='completed')jobs.set(id,saved);} catch { /* Missing media remains 404. */ }
+    }
     if (!ID.test(id) || !jobs.has(id) || (!assets.has(file) && !/^frame-\d{3}\.png$/.test(file)) || jobs.get(id)?.status !== 'completed') {
       res.status(404).end(); return;
     }

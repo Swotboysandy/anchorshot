@@ -62,6 +62,8 @@ npm install
 npm run dev
 ```
 
+For credit-free GPU testing, run `npm run dev:local`. This explicitly disables paid providers even if `.env.local` contains keys. In the editor, choose **Review shot → Generate new media → Generate video**, then **Use video in Shot** after completion. Story submission alone creates the offline sample storyboard, not an AI video.
+
 Open http://127.0.0.1:4317. `npm run dev` and `npm run dev:server` both load the providers from `.env.local`.
 
 **Checks:**

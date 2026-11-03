@@ -1,3 +1,4 @@
+import type {VideoProvider} from './video';
 import { randomBytes, createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
@@ -46,6 +47,7 @@ interface Options {
     revision?: number,
   ) => Promise<SegmentationResult>;
   planner?: Planner;
+  video?: VideoProvider;
   imager?: Imager;
   frameFolder?: string;
   jobFolder?: string;
@@ -69,6 +71,7 @@ export function createApp(options: Options) {
   let requestsUsed = 0;
   let active = false;
   let imageActive = false;
+  let videoActive = false;
   let transcribeActive = false;
   let exportActive = false;
   const frameFolder = options.frameFolder ?? resolve('.artifacts/frames');
@@ -97,6 +100,8 @@ export function createApp(options: Options) {
       requestLimit: settings.requestLimit,
       tracksStored: trackStore.listTracks().length,
       plannerLive: planner !== fixturePlanner,
+      videoReady: Boolean(options.video),
+      videoModel: options.video?.model ?? null,
       imageModel: options.imager?.model ?? null,
       transcribeModel: options.transcriber?.model ?? null,
       agentReady: Boolean(options.agent),
@@ -509,6 +514,19 @@ export function createApp(options: Options) {
     } finally {
       imageActive = false;
     }
+  });
+
+  app.post('/api/muse/video', async (req,res,next) => {
+    if(!hasValidSession(req))return res.status(403).json({error:'Refresh the page before generating video.'});
+    if(!options.video)return res.status(503).json({error:'No video model is connected. Your prompt is saved; no demo scenes were created.'});
+    const prompt=req.body?.prompt;
+    if(typeof prompt!=='string'||!prompt.trim()||prompt.length>4000)return res.status(400).json({error:'Provide a scene prompt of 1–4000 characters.'});
+    if(videoActive)return res.status(409).json({error:'A video is already rendering. Wait for it to finish.'});
+    const controller=new AbortController();res.once('close',()=>{if(!res.writableEnded)controller.abort();});
+    videoActive=true;
+    try {reserveRequest();const clip=await options.video.generate(prompt.trim(),controller.signal);if(!res.destroyed)res.json(clip);}
+    catch(error){if(!res.destroyed)next(error);}
+    finally {videoActive=false;}
   });
 
   app.get('/api/muse/frames/:file', (req, res) => {

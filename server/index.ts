@@ -1,3 +1,4 @@
+import {videoFromSettings} from './video';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +40,7 @@ const app = express();
 const localAi = createLocalAi(root);
 app.use('/api/local-ai', localAi.app);
 app.use(createApp({ settings: localSettings, planner: plannerFromSettings(localSettings().values),
+  video: videoFromSettings(localSettings().values, resolve(root,'.artifacts/local-ai/ui-jobs')),
   imager: imagerFromSettings(localSettings().values),
   transcriber: transcriberFromSettings(localSettings().values),
   agent: agentFromSettings(localSettings().values) }));

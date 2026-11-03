@@ -1,3 +1,4 @@
+import {videoFromSettings} from './server/video';
 import fs from 'node:fs';
 import path from 'path';
 import {localAiPlugin} from './server/localAi.ts';
@@ -44,6 +45,7 @@ function anchorShotSamApiPlugin(): Plugin {
           requestLimit,
         }),
         planner: plannerFromSettings(localEnv),
+        video: videoFromSettings(localEnv, path.resolve(__dirname, '.artifacts/local-ai/ui-jobs')),
         imager: imagerFromSettings(localEnv),
         transcriber: transcriberFromSettings(localEnv),
         agent: agentFromSettings(localEnv),
