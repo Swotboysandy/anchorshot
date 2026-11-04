@@ -565,9 +565,12 @@ export async function segmentLocalSam(
 
   let bestCat: string | null = null;
   let bestScore = -1;
+  const isCupConcept = ['cup', 'mug', 'coffee-cup', 'coffee cup'].includes(input.concept.toLowerCase().trim());
   for (const [cat, score] of centerScores.entries()) {
     const count = centerCounts.get(cat) ?? 0;
     if (count < Math.min(16, Math.max(1, Math.floor(width * height * 0.002)))) continue;
+    // Prevent confusing amber human skin tones with a cup when cup is missing
+    if (isCupConcept && cat === 'amber') continue;
     const borderShare = borderTotal > 0 ? (borderCounts.get(cat) ?? 0) / borderTotal : 0;
     const adjusted = score * (1 - 0.35 * borderShare);
     if (adjusted > bestScore) {
@@ -599,16 +602,26 @@ export async function segmentLocalSam(
     }
   }
 
+  // A prop like a cup never covers >25% of the frame; a face/torso does.
+  const coverage = selectedCount / (width * height);
+  if (bestCat && coverage > 0.25 && isCupConcept) {
+    bestCat = null;
+    selectedCount = 0;
+  }
+
+  const requestId = randomUUID();
   if (selectedCount === 0) {
-    minX = Math.max(0, Math.floor(width * 0.25));
-    maxX = Math.min(width, Math.max(minX + 1, Math.ceil(width * 0.75)));
-    minY = Math.max(0, Math.floor(height * 0.25));
-    maxY = Math.min(height, Math.max(minY + 1, Math.ceil(height * 0.75)));
-    for (let y = minY; y < maxY; y++) {
-      for (let x = minX; x < maxX; x++) {
-        fullMask[y * width + x] = 1;
-      }
-    }
+    const check = evaluateSamContinuityCheck([], input.concept, { revision });
+    return {
+      requestId,
+      sourceHash: input.sourceHash,
+      objects: [],
+      maskRef: null,
+      selectedObjectId: null,
+      ambiguityStatus: check.status,
+      evidence: check.explanation,
+      provenance: 'live-sam-3.1',
+    };
   }
 
   const rw = Math.max(1, maxX - minX);
@@ -620,7 +633,6 @@ export async function segmentLocalSam(
     }
   }
 
-  const requestId = randomUUID();
   const normalizedConcept = input.concept.toLowerCase().trim().replace(/\s+/g, '-');
   const maskRef = `sam-3.1:${normalizedConcept}:0:v${revision}`;
   const obj: ObjectMask = {
