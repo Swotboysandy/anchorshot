@@ -125,6 +125,14 @@ export function createApp(options: Options) {
     return token === sessionToken;
   };
 
+  app.post('/api/session/reset', (req, res) => {
+    if (!hasValidSession(req))
+      return res.status(403).json({ error: 'Refresh the page before resetting the session limit.' });
+    requestsUsed = 0;
+    const settings = options.settings();
+    res.json({ ok: true, requestsUsed, requestLimit: settings.requestLimit });
+  });
+
   app.post('/api/segment', async (req, res, next) => {
     if (!hasValidSession(req))
       return res.status(403).json({ error: 'Refresh the page before selecting an object.' });
@@ -137,7 +145,7 @@ export function createApp(options: Options) {
       return res
         .status(409)
         .json({ error: 'A selection is already running. Wait for it to finish.' });
-    if (requestsUsed >= settings.requestLimit)
+    if (settings.key !== 'local' && requestsUsed >= settings.requestLimit)
       return res
         .status(429)
         .json({ error: 'The session request limit has been reached. No further call was sent.' });
@@ -156,7 +164,7 @@ export function createApp(options: Options) {
         rawRuleRevision >= 1
           ? Math.floor(rawRuleRevision)
           : 1;
-      reserveRequest();
+      if (settings.key !== 'local') reserveRequest();
       const result = await (options.segment ?? requestSam)(
         input,
         settings.key,
@@ -186,7 +194,7 @@ export function createApp(options: Options) {
       return res
         .status(409)
         .json({ error: 'A selection is already running. Wait for it to finish.' });
-    if (settings.key && requestsUsed >= settings.requestLimit)
+    if (settings.key && settings.key !== 'local' && requestsUsed >= settings.requestLimit)
       return res
         .status(429)
         .json({ error: 'The session request limit has been reached. No further call was sent.' });
@@ -218,7 +226,7 @@ export function createApp(options: Options) {
 
       let segmentation: SegmentationResult;
       if (settings.key) {
-        reserveRequest();
+        if (settings.key !== 'local') reserveRequest();
         segmentation = await (options.segment ?? requestSam)(
           input,
           settings.key,

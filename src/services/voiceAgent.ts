@@ -40,11 +40,21 @@ export async function agentAvailable(): Promise<{ ready: boolean; session: strin
 }
 
 async function post(url: string, session: string, body: object, signal?: AbortSignal) {
-  const res = await fetch(url, {
+  let res = await fetch(url, {
     method: 'POST', signal,
     headers: { 'Content-Type': 'application/json', 'X-Anchorshot-Session': session },
     body: JSON.stringify(body),
   });
+  if (res.status === 403) {
+    const refreshed = await agentAvailable();
+    if (refreshed.session) {
+      res = await fetch(url, {
+        method: 'POST', signal,
+        headers: { 'Content-Type': 'application/json', 'X-Anchorshot-Session': refreshed.session },
+        body: JSON.stringify(body),
+      });
+    }
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || 'The voice agent could not respond.');
   return data;
@@ -71,7 +81,19 @@ export async function runAgentTurn(session: string, messages: Message[], tools: 
     const calls: Array<{ id: string; function: { name: string; arguments: string } }> = message.tool_calls ?? [];
     if (calls.some(call => !call || typeof call.id !== 'string' || !call.function || typeof call.function.name !== 'string' || typeof call.function.arguments !== 'string'))
       throw new Error('The voice agent returned an invalid tool request.');
-    messages.push(message);
+    messages.push({
+      role: 'assistant',
+      content: typeof message.content === 'string' ? message.content : null,
+      ...(calls.length
+        ? {
+            tool_calls: calls.map((call) => ({
+              id: call.id,
+              type: 'function',
+              function: { name: call.function.name, arguments: call.function.arguments },
+            })),
+          }
+        : {}),
+    });
     if (!calls.length) return String(message.content ?? '').trim();
     for (const call of calls) {
       signal?.throwIfAborted();

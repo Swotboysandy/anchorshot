@@ -28,14 +28,28 @@ import {
   Download,
   ChevronRight,
   Square,
+  History,
+  AlertTriangle,
+  RotateCcw,
 } from 'lucide-react';
 import { useReducedMotion } from 'motion/react';
 import { StudioTour } from './StudioTour';
 import { DreamTransitionPanel } from './DreamTransitionPanel';
+import { GenerationHistoryPanel, type GenerationHistoryEntry } from './GenerationHistoryPanel';
 import { SceneTransition } from './SceneTransition';
 import { transitionAt } from '../services/sceneTransitions';
 import type { StoryboardShot } from '../types/framelock';
 import { isLocalImage, isGeneratedImage } from '../services/localGeneration';
+
+export interface SceneEditError {
+  kind: 'session_limit' | 'generation_error';
+  title: string;
+  explanation: string;
+  nextStep: string;
+  preservedPrompt: string;
+  partialShotsCount?: number;
+  plannedShotsCount?: number;
+}
 
 const hasVerifiedRepair = (shot: StoryboardShot) =>
   !isLocalImage(shot.currentImageUrl) && Boolean(shot.pixelVerification?.passed) &&
@@ -93,6 +107,11 @@ type Props = {
   listening: boolean;
   onToggleVoice: () => void;
   voiceNotice: string | null;
+  sceneEditError?: SceneEditError | null;
+  onDismissSceneEditError?: () => void;
+  onResetSessionLimit?: (retryPrompt?: string) => void | Promise<void>;
+  onRevisitHistoryEntry?: (entry: GenerationHistoryEntry, mode: 'replace-active' | 'append-shot') => void;
+  onRestoreHistorySequence?: (entries: GenerationHistoryEntry[], sequenceTitle: string) => void;
 };
 export function CleanStudio(p: Props) {
   const archiveInput=useRef<HTMLInputElement>(null);
@@ -262,7 +281,7 @@ export function CleanStudio(p: Props) {
         ? p.onEditObject(object.trim(), instruction.trim(), Number(shot) || undefined)
         : 'Say which object to change and what it should become.',
     open_workspace: ({ name }) => {
-      if (name !== 'create' && name !== 'dream' && name !== 'review') return 'That workspace does not exist.';
+      if (name !== 'create' && name !== 'dream' && name !== 'review' && name !== 'history') return 'That workspace does not exist.';
       selectWorkspace(name);
       return `The ${name} workspace is open.`;
     },
@@ -365,6 +384,9 @@ export function CleanStudio(p: Props) {
             <TabsTrigger value="review">
               <Check size={18} aria-hidden="true"/> Review
             </TabsTrigger>
+            <TabsTrigger value="history">
+              <History size={18} aria-hidden="true"/> History
+            </TabsTrigger>
           </TabsList>
           <Button variant="ghost" size="sm" className="shortcut-button" onClick={p.onShortcuts}>
             Keyboard shortcuts <span>?</span>
@@ -378,6 +400,8 @@ export function CleanStudio(p: Props) {
                   ? 'FILM EDITOR · STORYBOARD'
                   : workspace === 'dream'
                   ? 'TRANSITIONS · COMPOSITING'
+                  : workspace === 'history'
+                  ? 'VERSION ARCHIVE · MEDIA'
                   : 'CONTINUITY · QC'}
               </span>
               <h1>
@@ -385,6 +409,8 @@ export function CleanStudio(p: Props) {
                   ? 'Storyboard'
                   : workspace === 'dream'
                   ? 'Dream studio'
+                  : workspace === 'history'
+                  ? 'Generation history'
                   : 'Scene review'}
               </h1>
             </div>
@@ -453,6 +479,95 @@ export function CleanStudio(p: Props) {
                         isListening={p.listening}
                       />
                     </div>
+                    {p.sceneEditError && (
+                      <div
+                        role="alert"
+                        aria-live="assertive"
+                        className="mt-3 rounded-2xl border border-[#444] bg-[#171717] p-4 text-left flex flex-col gap-2.5"
+                      >
+                        <div className="flex items-start gap-2.5">
+                          <AlertTriangle size={18} className="text-white shrink-0 mt-0.5" aria-hidden="true" />
+                          <div className="flex flex-col gap-1 min-w-0">
+                            <strong className="text-sm font-medium text-white">
+                              {p.sceneEditError.title}
+                            </strong>
+                            <p className="text-xs text-[#C7C7C7] m-0 leading-relaxed">
+                              {p.sceneEditError.explanation}
+                            </p>
+                            <p className="text-xs text-[#9E9E9E] m-0 leading-relaxed">
+                              {p.sceneEditError.nextStep}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 pt-1">
+                          {p.sceneEditError.kind === 'session_limit' ? (
+                            <>
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="h-8 text-xs"
+                                disabled={p.processing}
+                                onClick={() =>
+                                  void p.onResetSessionLimit?.(
+                                    p.draft.trim() || p.sceneEditError?.preservedPrompt
+                                  )
+                                }
+                              >
+                                <RotateCcw size={13} />
+                                Reset limit &amp; retry edit
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 text-xs"
+                                disabled={p.processing}
+                                onClick={() => void p.onResetSessionLimit?.()}
+                              >
+                                Reset limit only
+                              </Button>
+                            </>
+                          ) : (
+                            <Button
+                              type="button"
+                              size="sm"
+                              className="h-8 text-xs"
+                              disabled={p.processing}
+                              onClick={() => {
+                                const retryText =
+                                  p.draft.trim() || p.sceneEditError?.preservedPrompt || '';
+                                if (retryText) {
+                                  p.onDraft('');
+                                  p.onCommand(retryText);
+                                }
+                              }}
+                            >
+                              <RotateCcw size={13} />
+                              Retry edit
+                            </Button>
+                          )}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 text-xs"
+                            onClick={() => selectWorkspace('history')}
+                          >
+                            <History size={13} />
+                            Generation history
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 text-xs"
+                            onClick={p.onDismissSceneEditError}
+                          >
+                            Dismiss
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                     <p className="input-note">Type a direction, or open the voice preview.</p>
                     {!hasStory && <div className="starter-suggestions" aria-label="Story suggestions">
                       {[
@@ -464,6 +579,15 @@ export function CleanStudio(p: Props) {
                         onClick={() => { p.onDraft(idea); setFocusDirection(true); }}>
                         {label}<ArrowUpRight size={13} aria-hidden="true" />
                       </Button>)}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="rounded-full"
+                        onClick={() => selectWorkspace('history')}
+                      >
+                        <History size={13} aria-hidden="true" />
+                        Browse generation history
+                      </Button>
                     </div>}
                     {hasStory && (
                       <div className="starter-suggestions direction-suggestions" aria-label="Direction suggestions">
@@ -490,6 +614,15 @@ export function CleanStudio(p: Props) {
                           }}
                         >
                           Narrate the scene<ArrowUpRight size={13} aria-hidden="true" />
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="rounded-full"
+                          onClick={() => selectWorkspace('history')}
+                        >
+                          <History size={13} aria-hidden="true" />
+                          Generation history
                         </Button>
                       </div>
                     )}
@@ -787,7 +920,65 @@ export function CleanStudio(p: Props) {
                   ))}
                 </div>
               </section>}
+              {hasStory && p.onRevisitHistoryEntry && (
+                <aside className="dashboard-details" aria-label="Generation history panel">
+                  <GenerationHistoryPanel
+                    shots={p.shots}
+                    activeShot={shot ?? p.activeShot}
+                    isProcessing={p.processing}
+                    compact
+                    onRevisitEntry={p.onRevisitHistoryEntry}
+                    onRestoreSequence={p.onRestoreHistorySequence}
+                  />
+                </aside>
+              )}
 
+            </DashboardLayout>
+          </TabsContent>
+          <TabsContent value="history" forceMount hidden={workspace !== 'history'}>
+            <DashboardLayout active>
+              <section className="workspace-guide">
+                <p className="eyebrow">VERSION ARCHIVE</p>
+                <h1>Generation history</h1>
+                <p>
+                  Every generated scene clip and frame is saved with its descriptive name, creation timestamp, and preview thumbnail.
+                </p>
+                <ol>
+                  <li>Browse individual generations or grouped multi-scene sequences</li>
+                  <li>Select any entry to preview its video or frame</li>
+                  <li>Revisit an earlier version in your active scene or restore a full sequence</li>
+                </ol>
+                <Button variant="outline" onClick={() => selectWorkspace('create')}>
+                  Back to film
+                </Button>
+              </section>
+              <section className="tools-surface" aria-label="Dedicated generation history browser">
+                {p.onRevisitHistoryEntry && (
+                  <GenerationHistoryPanel
+                    shots={p.shots}
+                    activeShot={shot ?? p.activeShot}
+                    isProcessing={p.processing}
+                    onRevisitEntry={(entry, mode) => {
+                      p.onRevisitHistoryEntry?.(entry, mode);
+                      selectWorkspace('create');
+                    }}
+                    onRestoreSequence={(entries, title) => {
+                      p.onRestoreHistorySequence?.(entries, title);
+                      selectWorkspace('create');
+                    }}
+                  />
+                )}
+              </section>
+              <aside className="workspace-guide">
+                <p className="eyebrow">CONTINUITY &amp; TAKES</p>
+                <h2>Safe version switching.</h2>
+                <p>
+                  Revisiting an earlier generation in an existing scene adds a new take without deleting your previous revisions.
+                </p>
+                <p>
+                  Multi-shot runs are automatically grouped under Sequences so you can restore an entire outdoor or indoor scene pass at once.
+                </p>
+              </aside>
             </DashboardLayout>
           </TabsContent>
           <TabsContent value="dream" forceMount hidden={workspace !== 'dream'}>

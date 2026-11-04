@@ -21,11 +21,12 @@ web_app = FastAPI(title="AnchorShot Wan 2.2")
 # Wan 2.2 TI2V is designed for 24 fps; its frames are encoded at 25 without duplication.
 FPS = 25
 cached_pipe = None
+cached_t2v_pipe = None
 
 
 class ClipRequest(BaseModel):
     prompt: str
-    image: str  # base64 start frame
+    image: str | None = None  # optional base64 start frame
     seed: int = 7
     num_frames: int = 97  # 4k + 1; about 3.9 seconds at 25 fps
 
@@ -52,6 +53,22 @@ def get_pipeline():
     return cached_pipe
 
 
+def get_t2v_pipeline():
+    global cached_t2v_pipe
+    if cached_t2v_pipe is None:
+        from diffusers import WanPipeline
+
+        pipe = get_pipeline()
+        cached_t2v_pipe = WanPipeline(
+            tokenizer=pipe.tokenizer,
+            text_encoder=pipe.text_encoder,
+            transformer=pipe.transformer,
+            vae=pipe.vae,
+            scheduler=pipe.scheduler,
+        )
+    return cached_t2v_pipe
+
+
 # A cancelled request keeps running on the GPU, so renders must never overlap.
 render_lock = threading.Lock()
 
@@ -64,12 +81,18 @@ def generate(req: ClipRequest, authorization: str | None = Header(default=None))
     from PIL import Image
 
     num_frames = ((min(max(req.num_frames, 17), 121) - 1) // 4) * 4 + 1
-    start = Image.open(io.BytesIO(base64.b64decode(req.image))).convert("RGB").resize((1280, 704))
     with render_lock:
         try:
-            frames = get_pipeline()(image=start, prompt=req.prompt, height=704, width=1280, num_frames=num_frames,
-                                    num_inference_steps=40, guidance_scale=5.0,
-                                    generator=torch.Generator("cuda").manual_seed(req.seed)).frames[0]
+            gen = torch.Generator("cuda").manual_seed(req.seed)
+            if req.image:
+                start = Image.open(io.BytesIO(base64.b64decode(req.image))).convert("RGB").resize((1280, 704))
+                frames = get_pipeline()(image=start, prompt=req.prompt, height=704, width=1280, num_frames=num_frames,
+                                        num_inference_steps=40, guidance_scale=5.0,
+                                        generator=gen).frames[0]
+            else:
+                frames = get_t2v_pipeline()(prompt=req.prompt, height=704, width=1280, num_frames=num_frames,
+                                            num_inference_steps=40, guidance_scale=5.0,
+                                            generator=gen).frames[0]
         finally:
             gc.collect()
             torch.cuda.empty_cache()

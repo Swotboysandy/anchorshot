@@ -357,7 +357,7 @@ export class MetaModelClient {
     const headers={'Content-Type':'application/json','X-Anchorshot-Session':String(health.sessionToken??'')};
     onProgress?.('Planning scenes from your direction…',5);
     const response=await fetch('/api/muse/spark',{method:'POST',headers,signal,
-      body:JSON.stringify({transcript:transcript+'\nProduction constraint: create the shortest complete shot list, opening on the most important moment. Use only the requested story, with no demo objects.',previousRevision:0})});
+      body:JSON.stringify({transcript:transcript+'\nProduction constraint: plan 4 distinct shots in story order, opening on the establishing moment. Use only the requested story, with no demo objects.',previousRevision:0})});
     const plan=await response.json();
     if(!response.ok)throw new Error(plan.error||'Scene planning failed.');
     if(plan.provenance!=='live-model'||!Array.isArray(plan.shots)||!plan.shots.length)throw new Error('The planner must provide real scene descriptions. No video request sent.');
@@ -368,34 +368,61 @@ export class MetaModelClient {
     const cast=normalizeCast(plan.cast);
     // First solo frame of each character, reused so their later shots keep the same face.
     const referenceFrames=new Map<string,string>();
-    for(let i=0;i<plan.shots.length;i++) {
-      signal?.throwIfAborted();
-      const planned=normalizeShot(plan.shots[i]);
-      const onScreen=castInShot(planned,cast);
-      const references=[...new Set(onScreen.map(c=>referenceFrames.get(c.name)).filter((url):url is string=>Boolean(url)))];
-      const prompt=buildShotPrompt({shot:planned,continuity:rules.filter(r=>r.property==='color'),cast,hasReferences:references.length>0});
-      let image:string|undefined;
-      if(health.imageModel) {
-        onProgress?.(`Drawing the start frame for scene ${i+1} of ${plan.shots.length}…`,10+Math.round(i/plan.shots.length*85));
-        const drawn=await fetch('/api/muse/image',{method:'POST',headers,signal,body:JSON.stringify({prompt,references,targetObject:rules[0]?.targetObject??'scene',seed:(i+1)*17})});
-        const frame=await drawn.json();
-        if(!drawn.ok||typeof frame.url!=='string')throw new Error(frame.error||`The start frame for scene ${i+1} could not be drawn.`);
-        image=frame.url;
-        if(onScreen.length===1&&!referenceFrames.has(onScreen[0].name))referenceFrames.set(onScreen[0].name,frame.url);
+    try {
+      for(let i=0;i<plan.shots.length;i++) {
+        signal?.throwIfAborted();
+        const planned=normalizeShot(plan.shots[i]);
+        const onScreen=castInShot(planned,cast);
+        const references=[...new Set(onScreen.map(c=>referenceFrames.get(c.name)).filter((url):url is string=>Boolean(url)))];
+        const prompt=buildShotPrompt({shot:planned,continuity:rules.filter(r=>r.property==='color'),cast,hasReferences:references.length>0});
+        let image:string|undefined;
+        if(health.imageModel) {
+          onProgress?.(`Drawing the start frame for scene ${i+1} of ${plan.shots.length}…`,10+Math.round(i/plan.shots.length*85));
+          const drawn=await fetch('/api/muse/image',{method:'POST',headers,signal,body:JSON.stringify({prompt,references,targetObject:rules[0]?.targetObject??'scene',seed:(i+1)*17})});
+          const frame=await drawn.json();
+          if(!drawn.ok||typeof frame.url!=='string')throw new Error(frame.error||`The start frame for scene ${i+1} could not be drawn.`);
+          image=frame.url;
+          if(onScreen.length===1&&!referenceFrames.has(onScreen[0].name))referenceFrames.set(onScreen[0].name,frame.url);
+        }
+        onProgress?.(`Rendering scene ${i+1} of ${plan.shots.length} at 25 fps: ${planned.subject}`,10+Math.round((i+0.2)/plan.shots.length*85));
+        const res=await fetch('/api/muse/video',{method:'POST',headers,body:JSON.stringify({prompt,image,seed:i+1}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(930000)]):AbortSignal.timeout(930000)});
+        const clip=await res.json();
+        if(!res.ok)throw new Error(clip.error||`Scene ${i+1} could not be rendered.`);
+        if(clip.fps!==25||typeof clip.videoUrl!=='string'||typeof clip.imageUrl!=='string'||!Number.isFinite(clip.seconds))throw new Error('The renderer returned invalid video metadata.');
+        shots.push({id:`shot-${i+1}`,shotNumber:i+1,durationSeconds:clip.seconds,promptDescription:planned.subject,
+          spokenDescription:`Scene ${i+1}: ${planned.subject}. Generated video at 25 frames per second; continuity unreviewed.`,
+          currentImageUrl:clip.imageUrl,originalImageUrl:clip.imageUrl,videoUrl:clip.videoUrl,generatedJobId:clip.id,mediaSource:'generated',status:'uncertain',
+          revisions:[{revisionId:`rev-${clip.id}`,timestamp:Date.now(),imageUrl:clip.imageUrl,videoUrl:clip.videoUrl,generatedJobId:clip.id,mediaSource:'generated',actionApplied:`Generated video by ${clip.model}; 25 fps; continuity unreviewed`}],
+        });
       }
-      onProgress?.(`Rendering scene ${i+1} of ${plan.shots.length} at 25 fps: ${planned.subject}`,10+Math.round((i+0.2)/plan.shots.length*85));
-      const res=await fetch('/api/muse/video',{method:'POST',headers,body:JSON.stringify({prompt,image,seed:i+1}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(930000)]):AbortSignal.timeout(930000)});
-      const clip=await res.json();
-      if(!res.ok)throw new Error(clip.error||`Scene ${i+1} could not be rendered.`);
-      if(clip.fps!==25||typeof clip.videoUrl!=='string'||typeof clip.imageUrl!=='string'||!Number.isFinite(clip.seconds))throw new Error('The renderer returned invalid video metadata.');
-      shots.push({id:`shot-${i+1}`,shotNumber:i+1,durationSeconds:clip.seconds,promptDescription:planned.subject,
-        spokenDescription:`Scene ${i+1}: ${planned.subject}. Generated video at 25 frames per second; continuity unreviewed.`,
-        currentImageUrl:clip.imageUrl,originalImageUrl:clip.imageUrl,videoUrl:clip.videoUrl,generatedJobId:clip.id,mediaSource:'generated',status:'uncertain',
-        revisions:[{revisionId:`rev-${clip.id}`,timestamp:Date.now(),imageUrl:clip.imageUrl,videoUrl:clip.videoUrl,generatedJobId:clip.id,mediaSource:'generated',actionApplied:`Generated video by ${clip.model}; 25 fps; continuity unreviewed`}],
-      });
+    } catch (error) {
+      if (error instanceof Error && shots.length > 0) {
+        const enriched = error as Error & { partialShots?: StoryboardShot[]; partialRules?: ContinuityRule[]; plannedCount?: number };
+        enriched.partialShots = shots;
+        enriched.partialRules = rules;
+        enriched.plannedCount = plan.shots.length;
+      }
+      throw error;
     }
     onProgress?.('Your generated scenes are ready.',100);
     return {rules,shots};
+  }
+
+  public async resetSessionRequestLimit(): Promise<{ ok: boolean; requestsUsed: number; requestLimit: number }> {
+    const healthResponse = await fetch('/api/health');
+    if (!healthResponse.ok) throw new Error('The local server is unavailable.');
+    const health = await healthResponse.json();
+    const res = await fetch('/api/session/reset', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Anchorshot-Session': String(health.sessionToken ?? ''),
+      },
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || 'Could not reset the session request limit.');
+    this.sessionToken = String(health.sessionToken ?? '');
+    return body;
   }
 
   public async generateStoryboardFromTranscript(

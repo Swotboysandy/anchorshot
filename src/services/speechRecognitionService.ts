@@ -94,11 +94,18 @@ class SpeechRecognitionService {
             reader.readAsDataURL(clip);
           });
           if (!current()) return;
-          const res = await fetch('/api/muse/transcribe', {
-            method: 'POST', signal: controller.signal,
-            headers: { 'Content-Type': 'application/json', 'X-Anchorshot-Session': this.backendSession },
-            body: JSON.stringify({ audio }),
-          });
+          const sendTranscribe = (token: string) =>
+            fetch('/api/muse/transcribe', {
+              method: 'POST', signal: controller.signal,
+              headers: { 'Content-Type': 'application/json', 'X-Anchorshot-Session': token },
+              body: JSON.stringify({ audio }),
+            });
+          let res = await sendTranscribe(this.backendSession);
+          if (res.status === 403) {
+            await this.connectBackend();
+            if (!current()) return;
+            res = await sendTranscribe(this.backendSession);
+          }
           const result = await res.json().catch(() => ({}));
           if (!res.ok || typeof result.transcript !== 'string')
             throw new Error(result.error || `${model} could not transcribe the recording.`);

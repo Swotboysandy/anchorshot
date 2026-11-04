@@ -25,6 +25,15 @@ export function createLocalAi(root: string, launch = spawn) {
   const trackingPython = process.env.ANCHORSHOT_TRACKING_PYTHON || path.join(process.env.LOCALAPPDATA || runtime,'AnchorShot/vision/Scripts/python.exe');
   let active: {job: Job; child: ChildProcess} | undefined;
   const save = (job: Job) => writeFileSync(path.join(output, job.id, 'job.json'), JSON.stringify(job));
+  const getJob = (id: string): Job | undefined => {
+    if (ID.test(id) && !jobs.has(id)) {
+      try {
+        const saved: Job = JSON.parse(readFileSync(path.join(output, id, 'job.json'), 'utf8'));
+        if (saved.id === id && saved.status === 'completed') jobs.set(id, saved);
+      } catch { /* Missing media remains 404. */ }
+    }
+    return jobs.get(id);
+  };
   for (const id of readdirSync(output).filter(id => ID.test(id))) {
     try {
       const job: Job = JSON.parse(readFileSync(path.join(output, id, 'job.json'), 'utf8'));
@@ -54,10 +63,24 @@ export function createLocalAi(root: string, launch = spawn) {
   app.use('/jobs/:id/correct',express.json({limit:'24mb'}));
   app.use('/jobs/:id/track',express.json({limit:'24mb'}));
   app.use(express.json({limit: '8kb'}));
+  const syncJobsFromDisk = () => {
+    try {
+      for (const id of readdirSync(output).filter(id => ID.test(id))) {
+        if (jobs.has(id)) continue;
+        try {
+          const saved: Job = JSON.parse(readFileSync(path.join(output, id, 'job.json'), 'utf8'));
+          if (saved.id === id && saved.status === 'completed') jobs.set(id, saved);
+        } catch { /* Ignore incomplete metadata */ }
+      }
+    } catch { /* Output directory unreadable */ }
+  };
   app.get('/health', (_req, res) => res.json({ready: requirements.every(p => existsSync(p)), activeJobId: active?.job.id || null, trackingReady: existsSync(trackingPython)}));
-  app.get('/jobs', (_req, res) => res.json([...jobs.values()].sort((a,b) => b.createdAt.localeCompare(a.createdAt)).slice(0,20)));
+  app.get('/jobs', (_req, res) => {
+    syncJobsFromDisk();
+    res.json([...jobs.values()].sort((a,b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 60));
+  });
   app.get('/jobs/:id', (req, res) => {
-    const job = jobs.get(req.params.id);
+    const job = getJob(req.params.id);
     if (!job) { res.status(404).json({error: 'Job not found.'}); return; }
     res.json(job);
   });
@@ -168,18 +191,15 @@ export function createLocalAi(root: string, launch = spawn) {
     finally{importing=false;}
   });
   app.get('/jobs/:id/archive', (req,res)=>{
-    const job=jobs.get(req.params.id);
+    const job=getJob(req.params.id);
     if(!job||!ID.test(req.params.id))return void res.status(404).json({error:'Local media was not found.'});
     try {res.json(archiveLocalMedia(path.join(output,job.id),{...job,kind:job.kind}));}
     catch(error){res.status(422).json({error:error instanceof Error?error.message:'Media backup failed.'});}
   });
   app.get('/jobs/:id/assets/:file', (req, res) => {
     const {id, file} = req.params;
-    // Cloud clips share the app-owned media store; load completed records saved after startup.
-    if(ID.test(id)&&!jobs.has(id)) {
-      try {const saved=JSON.parse(readFileSync(path.join(output,id,'job.json'),'utf8'));if(saved.id===id&&saved.status==='completed')jobs.set(id,saved);} catch { /* Missing media remains 404. */ }
-    }
-    if (!ID.test(id) || !jobs.has(id) || (!assets.has(file) && !/^frame-\d{3}\.png$/.test(file)) || jobs.get(id)?.status !== 'completed') {
+    const job = getJob(id);
+    if (!ID.test(id) || !job || (!assets.has(file) && !/^frame-\d{3}\.png$/.test(file)) || job.status !== 'completed') {
       res.status(404).end(); return;
     }
     res.sendFile(path.resolve(output, id, file), {dotfiles: 'allow'}, (err) => {
@@ -201,7 +221,7 @@ export function createLocalAi(root: string, launch = spawn) {
     const job = active.job; stop('Cancelled by you.'); res.json(job);
   });
   app.post('/jobs/:id/detect-objects', (req, res) => {
-    const job = jobs.get(req.params.id);
+    const job = getJob(req.params.id);
     if (!job || job.status !== 'completed') { res.status(404).json({error: 'Job not found or not completed.'}); return; }
     const folder = path.join(output, job.id);
     const objectsFile = path.join(folder, 'objects.json');
@@ -238,7 +258,7 @@ export function createLocalAi(root: string, launch = spawn) {
   });
 
   app.post('/jobs/:id/modify', (req, res) => {
-    const job = jobs.get(req.params.id);
+    const job = getJob(req.params.id);
     if (!job || job.status !== 'completed') { res.status(404).json({error: 'Job not found or not completed.'}); return; }
     // The current detector only proposes regions in frame 0. Repeating that mask
     // across a moving clip would repaint the background and is not object tracking.
@@ -246,7 +266,7 @@ export function createLocalAi(root: string, launch = spawn) {
   });
 
   function completedVideo(id: string) {
-    const job = jobs.get(id);
+    const job = getJob(id);
     if (!ID.test(id) || !job || job.kind !== 'video' || job.status !== 'completed') throw new VideoTrackError('Choose a completed local video.');
     return job;
   }
