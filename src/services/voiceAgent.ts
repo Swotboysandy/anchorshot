@@ -137,6 +137,7 @@ export async function runAgentTurn(session: string, messages: Message[], tools: 
         : {}),
     });
     if (!calls.length) return String(message.content ?? '').trim();
+    const roundGatedPrompts: string[] = [];
     for (const call of calls) {
       signal?.throwIfAborted();
       let content: string;
@@ -146,13 +147,13 @@ export async function runAgentTurn(session: string, messages: Message[], tools: 
       } catch (error) {
         content = `That failed: ${error instanceof Error ? error.message : String(error)}`;
       }
+      if (content.startsWith('CONFIRMATION_REQUIRED:')) {
+        roundGatedPrompts.push(content.replace(/^CONFIRMATION_REQUIRED:\s*/, ''));
+      }
       messages.push({ role: 'tool', tool_call_id: call.id, content });
     }
-    if (messages.some((m) => m.role === 'tool' && typeof m.content === 'string' && m.content.startsWith('CONFIRMATION_REQUIRED:'))) {
-      const gatedMsg = messages
-        .filter((m) => m.role === 'tool' && typeof m.content === 'string' && m.content.startsWith('CONFIRMATION_REQUIRED:'))
-        .map((m) => String(m.content).replace(/^CONFIRMATION_REQUIRED:\s*/, ''))
-        .join(' ');
+    if (roundGatedPrompts.length > 0) {
+      const gatedMsg = roundGatedPrompts.join(' ');
       messages.push({ role: 'assistant', content: gatedMsg });
       return gatedMsg;
     }
