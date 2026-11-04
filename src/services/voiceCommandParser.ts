@@ -70,6 +70,73 @@ export function normalizeVoiceObject(noun: string): string {
   return words[words.length - 1];
 }
 
+export type VoiceConfirmationDecision = 'confirm' | 'repeat' | 'cancel' | null;
+
+/**
+ * Classifies a short spoken reply when the studio is waiting for voice confirmation
+ * ("yes", "confirm", "go ahead" vs "repeat", "try again", "mistake" vs "cancel").
+ */
+export function classifyVoiceConfirmationReply(rawText: string): VoiceConfirmationDecision {
+  const cleaned = rawText
+    .replace(/\b(uh|um|please)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s.,!?;:]+|[\s.,!?;:]+$/g, '')
+    .toLowerCase();
+  if (!cleaned) return null;
+  if (/^(?:yes|yeah|yep|confirm|confirmed|go ahead|do it|run it|proceed|correct|ok|okay|sure|apply|apply it)$/.test(cleaned)) {
+    return 'confirm';
+  }
+  if (/^(?:repeat|try again|record again|re-?record|mistake|wrong|no|nope|not that|start over|redo)$/.test(cleaned)) {
+    return 'repeat';
+  }
+  if (/^(?:cancel|stop|never mind|nevermind|dismiss|abort|forget it)$/.test(cleaned)) {
+    return 'cancel';
+  }
+  return null;
+}
+
+/**
+ * Summarizes what a voice command will do in plain spoken language so the user
+ * can confirm or repeat before any action is taken.
+ */
+export function describeVoiceActionSummary(rawText: string, hasExistingShots: boolean): string {
+  const intent = parseVoiceCommand(rawText);
+  if (!hasExistingShots && !['playback', 'help', 'narrate', 'invalid_command'].includes(intent.kind)) {
+    return 'generate a 4-scene storyboard from your spoken description';
+  }
+  switch (intent.kind) {
+    case 'playback':
+      return intent.action === 'play' ? 'start playing the animatic' : 'pause the animatic';
+    case 'help':
+      return 'open the keyboard and voice shortcuts guide';
+    case 'audit':
+      return 'run a SAM 3.1 continuity check across all scenes';
+    case 'narrate':
+      return 'read the full storyboard sequence aloud';
+    case 'segment':
+      return `find and segment the ${intent.object}${intent.shotNumber ? ` in Shot ${intent.shotNumber}` : ' in the active scene'}`;
+    case 'recolor':
+      return `change the ${intent.object || 'tracked object'} to ${intent.color}${intent.shotNumber ? ` in Shot ${intent.shotNumber}` : ''}`;
+    case 'fix':
+      return `apply the continuity repair${intent.shotNumber ? ` in Shot ${intent.shotNumber}` : ''}${intent.color ? ` (${intent.color})` : ''}`;
+    case 'modify_video':
+      return `recolour the reviewed ${intent.object} video mask to ${intent.color}`;
+    case 'generative_edit':
+      return intent.object
+        ? `change the ${intent.object} to "${intent.prompt}"${intent.shotNumber ? ` in Shot ${intent.shotNumber}` : ''}`
+        : `apply a masked edit ("${intent.prompt}") to the active scene`;
+    case 'rule_update':
+      return `update the continuity rule so ${intent.object || 'the tracked object'} stays ${intent.color}`;
+    case 'invalid_command':
+      return intent.message;
+    case 'rebuild':
+    default:
+      return hasExistingShots
+        ? 'update and regenerate your storyboard scenes with this direction'
+        : 'generate a 4-scene storyboard from your spoken description';
+  }
+}
+
 export function parseVoiceCommand(rawText: string): VoiceIntent {
   const cleaned = rawText
     .replace(/\b(uh|um|please|can\s+you|could\s+you|would\s+you)\b/gi, ' ')

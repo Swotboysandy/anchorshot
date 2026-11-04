@@ -8,7 +8,14 @@ import { chatPlanner } from '../server/planner';
 import { chatAgent } from '../server/agent';
 import { openAiTranscriber } from '../server/transcriber';
 import { MetaModelClient, getMetaApiEnvConfig } from '../src/services/metaModels';
-import { parseVoiceCommand, resolveVoiceColor, normalizeVoiceObject } from '../src/services/voiceCommandParser';
+import {
+  classifyVoiceConfirmationReply,
+  describeVoiceActionSummary,
+  parseVoiceCommand,
+  resolveVoiceColor,
+  normalizeVoiceObject,
+} from '../src/services/voiceCommandParser';
+import { describeAgentToolAction, isMutatingAgentTool } from '../src/services/voiceAgent';
 import {
   describeGenerationPrompt,
   formatGenerationTimestamp,
@@ -341,5 +348,34 @@ describe('voice object editing in the scene', () => {
     });
     expect(resolveVoiceColor('make it crimson red')).toBe('red');
     expect(normalizeVoiceObject('the courier jacket')).toBe('jacket');
+  });
+
+  it('classifies spoken confirmation vs repeat/cancel replies and summarizes pending voice actions', () => {
+    expect(classifyVoiceConfirmationReply('yes')).toBe('confirm');
+    expect(classifyVoiceConfirmationReply('uh please confirm')).toBe('confirm');
+    expect(classifyVoiceConfirmationReply('go ahead')).toBe('confirm');
+    expect(classifyVoiceConfirmationReply('repeat')).toBe('repeat');
+    expect(classifyVoiceConfirmationReply('no, try again')).toBe(null);
+    expect(classifyVoiceConfirmationReply('try again')).toBe('repeat');
+    expect(classifyVoiceConfirmationReply('mistake')).toBe('repeat');
+    expect(classifyVoiceConfirmationReply('cancel')).toBe('cancel');
+    expect(classifyVoiceConfirmationReply('change the cup to blue')).toBe(null);
+
+    expect(describeVoiceActionSummary('change the coffee cup to red in shot 2', true)).toBe(
+      'change the cup to red in Shot 2'
+    );
+    expect(describeVoiceActionSummary('A rainy street at night', false)).toBe(
+      'generate a 4-scene storyboard from your spoken description'
+    );
+
+    expect(isMutatingAgentTool('describe_storyboard')).toBe(false);
+    expect(isMutatingAgentTool('select_shot', { number: 2 })).toBe(false);
+    expect(isMutatingAgentTool('run_command', { command: 'play' })).toBe(false);
+    expect(isMutatingAgentTool('run_command', { command: 'change the cup to red' })).toBe(true);
+    expect(isMutatingAgentTool('generate_storyboard')).toBe(true);
+    expect(isMutatingAgentTool('edit_object', { object: 'jacket', instruction: 'red', shot: 2 })).toBe(true);
+    expect(describeAgentToolAction('edit_object', { object: 'jacket', instruction: 'red', shot: 2 })).toBe(
+      'change the jacket (red) in Shot 2'
+    );
   });
 });

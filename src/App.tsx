@@ -3,7 +3,7 @@ import {validNarrationUrl,type NarrationAttachment} from './services/narration';
 import type {VideoTrackPlan} from './types/videoTracks';
 import { updateShotDetails, restoreShotTake } from './lib/shotEdits';
 import {loadLocal,saveLocal,localSaveError,flushLocalSaves,type ProjectLibrary} from './services/projectStorage';
-import {CleanStudio, type SceneEditError} from './components/CleanStudio';
+import {CleanStudio, type PendingVoiceConfirmation, type SceneEditError} from './components/CleanStudio';
 import {type GenerationHistoryEntry} from './components/GenerationHistoryPanel';
 import {isGeneratedImage, isGeneratedShot, isLocalImage} from './services/localGeneration';
 import { useReducedMotion } from 'motion/react';
@@ -18,7 +18,13 @@ import {
 import { applyVideoFindingsToShots, DIRECTOR_PRESETS, metaModelClient } from './services/metaModels';
 import { speechService } from './services/speechService';
 import { exportAnimaticMp4 } from './services/animaticExport';
-import { normalizeVoiceObject, parseVoiceCommand, resolveVoiceColor } from './services/voiceCommandParser';
+import {
+  classifyVoiceConfirmationReply,
+  describeVoiceActionSummary,
+  normalizeVoiceObject,
+  parseVoiceCommand,
+  resolveVoiceColor,
+} from './services/voiceCommandParser';
 import { speechRecognitionService } from './services/speechRecognitionService';
 import {
   exportStoryboardAnimaticVideo,
@@ -69,6 +75,7 @@ export default function App() {
   },[storageReady,projectState,sessionProjects]);
   const [directionDraft, setDirectionDraft] = useState('');
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  const [pendingVoiceConfirmation, setPendingVoiceConfirmation] = useState<PendingVoiceConfirmation | null>(null);
   const [sceneEditError, setSceneEditError] = useState<SceneEditError | null>(null);
   const switchingProject = useRef(false);
   const archiveLock = useRef(false);
@@ -1383,36 +1390,131 @@ export default function App() {
   );
 
   // Dictation uses the configured server provider; unconfigured mode stays local.
+  const startVoiceDictationSession = useCallback(
+    (baseDraft: string, existingPending: PendingVoiceConfirmation | null) => {
+      const unavailable = (reason: string) => {
+        setProjectState((prev) => ({ ...prev, isRecording: false }));
+        setVoiceNotice(`Voice unavailable: ${reason} Type your direction instead.`);
+        announceStatus(`Voice unavailable: ${reason}`);
+      };
+      if (!speechRecognitionService.isSupported()) {
+        unavailable('transcription is not connected or microphone recording is unavailable.');
+        return;
+      }
+      const started = speechRecognitionService.startListening({
+        continuous: true,
+        interimResults: true,
+        onResult: (text, isFinal) => {
+          const trimmedText = text.trim();
+          if (!trimmedText) return;
+          if (!isFinal) {
+            setDirectionDraft(baseDraft ? `${baseDraft} ${trimmedText}` : trimmedText);
+            return;
+          }
+          if (existingPending) {
+            const decision = classifyVoiceConfirmationReply(trimmedText);
+            if (decision === 'confirm') {
+              const toRun = existingPending.transcript;
+              setPendingVoiceConfirmation(null);
+              setVoiceNotice(null);
+              setDirectionDraft('');
+              announceStatus(`Confirmed: "${toRun}". Executing now...`, true);
+              void handleExecuteVoiceCommand(toRun);
+              return;
+            }
+            if (decision === 'repeat') {
+              const prevDraft = existingPending.previousDraft;
+              setPendingVoiceConfirmation(null);
+              setDirectionDraft(prevDraft);
+              announceStatus('Cleared mistaken voice input. Listening again — please repeat your direction.', true);
+              setTimeout(() => {
+                startVoiceDictationSession(prevDraft, null);
+              }, 250);
+              return;
+            }
+            if (decision === 'cancel') {
+              setPendingVoiceConfirmation(null);
+              setVoiceNotice(null);
+              setDirectionDraft(existingPending.previousDraft);
+              announceStatus('Voice command cancelled.', true);
+              return;
+            }
+          }
+          const combined = baseDraft ? `${baseDraft} ${trimmedText}` : trimmedText;
+          const actionSummary = describeVoiceActionSummary(
+            combined,
+            currentProjectRef.current.shots.length > 0
+          );
+          setDirectionDraft(combined);
+          setPendingVoiceConfirmation({
+            transcript: combined,
+            previousDraft: baseDraft,
+            actionSummary,
+          });
+          setVoiceNotice(
+            `Heard: "${combined}" — Confirm to ${actionSummary}, or Repeat to record again.`
+          );
+          announceStatus(
+            `I heard: "${combined}". This will ${actionSummary}. Click Confirm or say "yes" to proceed, or click Repeat to record again if there was a mistake.`,
+            true
+          );
+        },
+        onError: (err) => unavailable(err),
+        onStateChange: (listening) => {
+          setProjectState((prev) => ({ ...prev, isRecording: listening }));
+          if (listening) {
+            setVoiceNotice(
+              existingPending
+                ? 'Listening for confirmation: say "yes" to confirm, or "repeat" to try again.'
+                : 'Listening. Speak your direction.'
+            );
+          }
+        },
+      });
+      if (!started) unavailable('the microphone could not start.');
+    },
+    [announceStatus, handleExecuteVoiceCommand]
+  );
+
   const handleToggleRecording = useCallback(() => {
     if (speechRecognitionService.isListening() || projectState.isRecording) {
       speechRecognitionService.stopListening();
       setProjectState((prev) => ({ ...prev, isRecording: false }));
-      setVoiceNotice(null);
-      announceStatus('Voice dictation stopped.');
+      announceStatus('Voice recording stopped. Processing transcription...', false);
       return;
     }
-    const unavailable = (reason: string) => {
-      setProjectState((prev) => ({ ...prev, isRecording: false }));
-      setVoiceNotice(`Voice unavailable: ${reason} Type your direction instead.`);
-      announceStatus(`Voice unavailable: ${reason}`);
-    };
-    if (!speechRecognitionService.isSupported()) {
-      unavailable('transcription is not connected or microphone recording is unavailable.');
-      return;
+    const base = pendingVoiceConfirmation
+      ? pendingVoiceConfirmation.previousDraft
+      : directionDraft.trim();
+    startVoiceDictationSession(base, pendingVoiceConfirmation);
+  }, [announceStatus, directionDraft, pendingVoiceConfirmation, projectState.isRecording, startVoiceDictationSession]);
+
+  const handleConfirmVoiceAction = useCallback(async () => {
+    if (!pendingVoiceConfirmation) return;
+    const toRun = (directionDraft.trim() || pendingVoiceConfirmation.transcript).trim();
+    setPendingVoiceConfirmation(null);
+    setVoiceNotice(null);
+    setDirectionDraft('');
+    if (toRun) {
+      await handleExecuteVoiceCommand(toRun);
     }
-    const base = directionDraft.trim();
-    const started = speechRecognitionService.startListening({
-      continuous: true,
-      interimResults: true,
-      onResult: (text) => setDirectionDraft(base ? `${base} ${text}` : text),
-      onError: (err) => unavailable(err),
-      onStateChange: (listening) => {
-        setProjectState((prev) => ({ ...prev, isRecording: listening }));
-        setVoiceNotice(listening ? 'Listening. Speak your direction.' : null);
-      },
-    });
-    if (!started) unavailable('the microphone could not start.');
-  }, [announceStatus, directionDraft, projectState.isRecording]);
+  }, [directionDraft, handleExecuteVoiceCommand, pendingVoiceConfirmation]);
+
+  const handleRepeatVoiceRecording = useCallback(() => {
+    const prevDraft = pendingVoiceConfirmation?.previousDraft ?? '';
+    speechRecognitionService.cancelListening();
+    speechService.stopSpeaking();
+    setPendingVoiceConfirmation(null);
+    setDirectionDraft(prevDraft);
+    announceStatus('Discarded previous voice recording. Speak your direction again.', false);
+    startVoiceDictationSession(prevDraft, null);
+  }, [announceStatus, pendingVoiceConfirmation, startVoiceDictationSession]);
+
+  const handleDismissVoiceConfirmation = useCallback(() => {
+    setPendingVoiceConfirmation(null);
+    setVoiceNotice(null);
+    announceStatus('Voice confirmation dismissed. You can edit the text in the box before running.', false);
+  }, [announceStatus]);
 
   // A hidden tab cannot keep canvas, media and spoken narration synchronized.
   useEffect(() => {
@@ -1959,6 +2061,10 @@ export default function App() {
         listening={projectState.isRecording}
         onToggleVoice={handleToggleRecording}
         voiceNotice={voiceNotice}
+        pendingVoiceConfirmation={pendingVoiceConfirmation}
+        onConfirmVoiceAction={handleConfirmVoiceAction}
+        onRepeatVoiceRecording={handleRepeatVoiceRecording}
+        onDismissVoiceConfirmation={handleDismissVoiceConfirmation}
         sceneEditError={sceneEditError}
         onDismissSceneEditError={() => setSceneEditError(null)}
         onResetSessionLimit={handleResetSessionLimit}

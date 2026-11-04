@@ -41,6 +41,12 @@ import { transitionAt } from '../services/sceneTransitions';
 import type { StoryboardShot } from '../types/framelock';
 import { isLocalImage, isGeneratedImage } from '../services/localGeneration';
 
+export interface PendingVoiceConfirmation {
+  transcript: string;
+  previousDraft: string;
+  actionSummary: string;
+}
+
 export interface SceneEditError {
   kind: 'session_limit' | 'generation_error';
   title: string;
@@ -108,6 +114,10 @@ type Props = {
   listening: boolean;
   onToggleVoice: () => void;
   voiceNotice: string | null;
+  pendingVoiceConfirmation?: PendingVoiceConfirmation | null;
+  onConfirmVoiceAction?: () => void | Promise<void>;
+  onRepeatVoiceRecording?: () => void;
+  onDismissVoiceConfirmation?: () => void;
   sceneEditError?: SceneEditError | null;
   onDismissSceneEditError?: () => void;
   onResetSessionLimit?: (retryPrompt?: string) => void | Promise<void>;
@@ -472,7 +482,10 @@ export function CleanStudio(p: Props) {
                         prompt={p.draft}
                         setPrompt={p.onDraft}
                         isLoading={p.processing}
-                        onSubmit={p.onCommand}
+                        onSubmit={(text) => {
+                          p.onDismissVoiceConfirmation?.();
+                          p.onCommand(text);
+                        }}
                         onScript={() => setInputMode('script')}
                         hasStory={hasStory}
                         onReview={() => selectWorkspace('review')}
@@ -481,6 +494,71 @@ export function CleanStudio(p: Props) {
                         isListening={p.listening}
                       />
                     </div>
+                    {p.pendingVoiceConfirmation && (
+                      <div
+                        role="region"
+                        aria-label="Confirm voice command before running"
+                        className="mt-3 rounded-2xl border border-[#444] bg-[#171717] p-4 text-left flex flex-col gap-2.5"
+                      >
+                        <div className="flex items-start gap-2.5">
+                          <Mic size={18} className="text-white shrink-0 mt-0.5" aria-hidden="true" />
+                          <div className="flex flex-col gap-1 min-w-0">
+                            <strong className="text-sm font-medium text-white">
+                              Confirm voice instruction before taking action
+                            </strong>
+                            <p className="text-xs text-[#E5E5E5] m-0 leading-relaxed">
+                              Heard: <span className="font-mono text-white">&ldquo;{p.pendingVoiceConfirmation.transcript}&rdquo;</span>
+                            </p>
+                            <p className="text-xs text-[#9E9E9E] m-0 leading-relaxed">
+                              Action: Will {p.pendingVoiceConfirmation.actionSummary}. Confirm to run, or click Repeat if there was a mistake.
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 pt-1">
+                          <Button
+                            type="button"
+                            size="sm"
+                            className="h-8 text-xs"
+                            disabled={p.processing}
+                            onClick={() => void p.onConfirmVoiceAction?.()}
+                          >
+                            <Check size={13} />
+                            Confirm &amp; run
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 text-xs"
+                            disabled={p.processing}
+                            onClick={() => p.onRepeatVoiceRecording?.()}
+                          >
+                            <RotateCcw size={13} />
+                            Repeat (re-record)
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 text-xs"
+                            disabled={p.processing}
+                            onClick={p.onToggleVoice}
+                          >
+                            <Mic size={13} />
+                            {p.listening ? 'Stop voice reply' : 'Reply by voice ("Yes" / "Repeat")'}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 text-xs text-[#9E9E9E]"
+                            onClick={() => p.onDismissVoiceConfirmation?.()}
+                          >
+                            Edit text manually
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                     {p.sceneEditError && (
                       <div
                         role="alert"

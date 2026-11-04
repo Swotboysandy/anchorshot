@@ -1,6 +1,47 @@
 import { speechService } from './speechService';
+import { classifyVoiceConfirmationReply, describeVoiceActionSummary, parseVoiceCommand } from './voiceCommandParser';
 
 export type AgentTools = Record<string, (parameters: Record<string, unknown>) => string | Promise<string>>;
+
+const READ_ONLY_AGENT_TOOLS = new Set([
+  'describe_storyboard',
+  'select_shot',
+  'narrate_shot',
+  'open_workspace',
+  'toggle_mute',
+  'set_direction',
+]);
+
+export function isMutatingAgentTool(name: string, parameters: Record<string, unknown> = {}): boolean {
+  if (READ_ONLY_AGENT_TOOLS.has(name)) return false;
+  if (name === 'run_command') {
+    const cmd = typeof parameters.command === 'string' ? parameters.command : '';
+    const intent = parseVoiceCommand(cmd);
+    return !['playback', 'help', 'narrate', 'invalid_command'].includes(intent.kind);
+  }
+  return true;
+}
+
+export function describeAgentToolAction(name: string, parameters: Record<string, unknown> = {}): string {
+  switch (name) {
+    case 'generate_storyboard':
+      return 'generate the storyboard video scenes';
+    case 'edit_object':
+      return `change the ${String(parameters.object || 'object')} (${String(parameters.instruction || 'edit')})${parameters.shot ? ` in Shot ${parameters.shot}` : ''}`;
+    case 'run_command':
+      return describeVoiceActionSummary(String(parameters.command || ''), true);
+    case 'move_shot':
+      return `move Shot ${String(parameters.number || 1)} ${String(parameters.direction || 'later')}`;
+    case 'change_shot_length':
+      return `adjust Shot ${String(parameters.number || 1)} duration by ${String(parameters.seconds || 0)} seconds`;
+    case 'next_take':
+      return `switch Shot ${String(parameters.number || 1)} to its next take`;
+    case 'export_film':
+      return 'export the film as an MP4 file';
+    default:
+      return `run ${name.replace(/_/g, ' ')}`;
+  }
+}
 
 export interface AgentHandlers {
   onStatus: (status: string) => void;
@@ -234,6 +275,35 @@ export async function startAgentConversation(
   };
 
   void (async () => {
+    let pendingAction: {
+      name: string;
+      parameters: Record<string, unknown>;
+      heardTranscript: string;
+      summary: string;
+    } | null = null;
+    let lastHeardTranscript = '';
+
+    const gatedTools = new Proxy({} as AgentTools, {
+      get: (_, prop) => {
+        const name = String(prop);
+        const target = tools[name];
+        if (!target) return undefined;
+        return async (parameters: Record<string, unknown>) => {
+          if (isMutatingAgentTool(name, parameters)) {
+            const summary = describeAgentToolAction(name, parameters);
+            pendingAction = {
+              name,
+              parameters,
+              heardTranscript: lastHeardTranscript,
+              summary,
+            };
+            return `Awaiting director confirmation. Tell the director you heard "${lastHeardTranscript}" and ask them to say "yes" to confirm (${summary}) or "repeat" if there was a mistake.`;
+          }
+          return await target(parameters);
+        };
+      },
+    });
+
     try {
       await say(GREETING);
       while (!ended) {
@@ -253,10 +323,45 @@ export async function startAgentConversation(
         if (ended) break;
         if (!transcript) continue;
         handlers.onMessage('user', transcript);
+
+        if (pendingAction) {
+          const decision = classifyVoiceConfirmationReply(transcript);
+          if (decision === 'confirm') {
+            const actionToRun = pendingAction;
+            pendingAction = null;
+            handlers.onStatus(`Confirmed: ${actionToRun.summary}...`);
+            try {
+              const run = tools[actionToRun.name];
+              const result = run ? await run(actionToRun.parameters) : `Unknown tool ${actionToRun.name}.`;
+              messages.push(
+                { role: 'user', content: transcript },
+                { role: 'assistant', content: String(result) }
+              );
+              if (!ended) await say(String(result));
+            } catch (err) {
+              const errMsg = `That failed: ${err instanceof Error ? err.message : String(err)}`;
+              if (!ended) await say(errMsg);
+            }
+            continue;
+          }
+          if (decision === 'repeat' || decision === 'cancel') {
+            pendingAction = null;
+            messages.push(
+              { role: 'user', content: transcript },
+              { role: 'assistant', content: 'Cancelled. Please repeat your instruction.' }
+            );
+            if (!ended) await say('Okay, I cancelled that action. Please repeat your instruction.');
+            continue;
+          }
+          // If the director spoke a brand-new instruction instead of yes/repeat, clear the old pending action and process the new utterance.
+          pendingAction = null;
+        }
+
+        lastHeardTranscript = transcript;
         messages.push({ role: 'user', content: transcript });
         let reply: string;
         try {
-          reply = await runAgentTurn(session, messages, tools, controller.signal);
+          reply = await runAgentTurn(session, messages, gatedTools, controller.signal);
         } catch (error) {
           reply = `I could not respond. ${error instanceof Error ? error.message : ''}`.trim();
           if (!ended) messages.push({ role: 'assistant', content: reply });

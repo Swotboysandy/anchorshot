@@ -28,7 +28,10 @@ class ClipRequest(BaseModel):
     prompt: str
     image: str | None = None  # optional base64 start frame
     seed: int = 7
-    num_frames: int = 97  # 4k + 1; about 3.9 seconds at 25 fps
+    num_frames: int = 49  # 4k + 1; ~1.96 seconds at 25 fps for fast rendering
+    width: int = 832      # multiple of 32 (480p 16:9 widescreen)
+    height: int = 480     # multiple of 32 (480p 16:9 widescreen)
+    num_inference_steps: int = 20  # reduced from 40 for ~10x faster rendering
 
 
 def require_key(authorization: str | None):
@@ -81,17 +84,20 @@ def generate(req: ClipRequest, authorization: str | None = Header(default=None))
     from PIL import Image
 
     num_frames = ((min(max(req.num_frames, 17), 121) - 1) // 4) * 4 + 1
+    width = max(320, min(1280, (req.width // 32) * 32))
+    height = max(192, min(704, (req.height // 32) * 32))
+    steps = max(8, min(40, req.num_inference_steps))
     with render_lock:
         try:
             gen = torch.Generator("cuda").manual_seed(req.seed)
             if req.image:
-                start = Image.open(io.BytesIO(base64.b64decode(req.image))).convert("RGB").resize((1280, 704))
-                frames = get_pipeline()(image=start, prompt=req.prompt, height=704, width=1280, num_frames=num_frames,
-                                        num_inference_steps=40, guidance_scale=5.0,
+                start = Image.open(io.BytesIO(base64.b64decode(req.image))).convert("RGB").resize((width, height))
+                frames = get_pipeline()(image=start, prompt=req.prompt, height=height, width=width, num_frames=num_frames,
+                                        num_inference_steps=steps, guidance_scale=5.0,
                                         generator=gen).frames[0]
             else:
-                frames = get_t2v_pipeline()(prompt=req.prompt, height=704, width=1280, num_frames=num_frames,
-                                            num_inference_steps=40, guidance_scale=5.0,
+                frames = get_t2v_pipeline()(prompt=req.prompt, height=height, width=width, num_frames=num_frames,
+                                            num_inference_steps=steps, guidance_scale=5.0,
                                             generator=gen).frames[0]
         finally:
             gc.collect()
@@ -102,7 +108,7 @@ def generate(req: ClipRequest, authorization: str | None = Header(default=None))
 
 
 @app.function(image=image, gpu="A100-40GB", volumes={"/cache": volume}, env={"HF_HOME": "/cache"},
-              timeout=1200, scaledown_window=60, secrets=[modal.Secret.from_name("anchorshot-wan-endpoint")])
+              timeout=1200, scaledown_window=300, secrets=[modal.Secret.from_name("anchorshot-wan-endpoint")])
 @modal.asgi_app()
 def fastapi_app():
     return web_app
