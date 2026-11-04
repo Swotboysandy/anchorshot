@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { getCanonicalMetaModels, resolveUpstreamChatModel } from './models';
 
 /**
  * Voice co-director behind `/api/agent/turn`: one model turn over the conversation
@@ -57,8 +58,9 @@ export function validateAgentMessages(input: unknown): AgentMessage[] {
 export const AGENT_PROMPT = `You are a spoken co-director inside a storyboard studio used by blind and low-vision filmmakers.
 Your words are read aloud, so reply in one or two short plain sentences, with no markdown or lists.
 Never describe visuals you were not told about; use describe_storyboard to read shots and their continuity status.
-The director may not be able to see the screen, so do what they ask with a tool straight away instead of asking for confirmation.
+The director may not be able to see the screen, so call the matching tool straight away; the studio will read back mutating actions for the director's confirmation before executing them.
 When the director gives scene direction, call set_direction with their words. If they also ask to make, create or generate it, call generate_storyboard in the same turn; otherwise offer to. This creates real videos, not sample storyboard drawings. Never claim a film is ready when generation reports missing configuration or a failure.
+When the director asks to remake, regenerate, or redo an individual scene (such as "remake scene 2", "redo this shot", "regenerate scene 3"), call remake_shot with the shot number. Only call generate_storyboard if they explicitly ask to generate the whole film or remake all scenes.
 Use select_shot to open a shot by number and read back what it returns. Use run_command for playback and continuity commands such as "play", "pause", "check continuity" or "the cup must be blue".
 For a new colour use run_command, such as "make the dress red" or "make the dress red in shot 2". To change what an object is, or to add or replace something on it, use edit_object. Never regenerate the film for a change to one object.
 Say plainly what the result reports, in your own words; never mention tools and never claim more than it says. A rule change does not repaint frames unless the result says so. If nothing changed, say so.`;
@@ -72,6 +74,10 @@ const tool = (name: string, description: string, properties: Record<string, obje
 export const AGENT_TOOLS = [
   tool('set_direction', "Save the director's spoken scene direction into the script.", { text: { type: 'string', description: "The direction, in the director's words." } }),
   tool('generate_storyboard', 'Generate real scene videos from the current script and apply them to the film timeline. This can take several minutes; report only the actual returned result.'),
+  tool('remake_shot', 'Remake or regenerate a single scene while keeping the rest of the storyboard intact. Use when the director asks to remake, regenerate, or redo one shot (or the active shot).', {
+    shot: { type: 'number', description: 'Shot number, starting at 1. If 0 or omitted, remakes the currently highlighted shot.' },
+    direction: { type: 'string', description: 'Optional new direction or prompt specifically for this scene.' },
+  }),
   tool('run_command', 'Run a studio command such as play, pause, check continuity, or a continuity colour rule.', { command: { type: 'string', description: 'The command text.' } }),
   tool('select_shot', 'Open a shot by its number and get its spoken description.', { number: { type: 'number', description: 'Shot number, starting at 1.' } }),
   tool('describe_storyboard', 'List every shot with its continuity status and description.'),
@@ -91,12 +97,13 @@ export const AGENT_TOOLS = [
 
 type Chat = Pick<OpenAI['chat']['completions'], 'create'>;
 
-export function chatAgent(options: { model: string; chat: Chat }): VoiceAgent {
+export function chatAgent(options: { model: string; upstreamModel?: string; chat: Chat }): VoiceAgent {
+  const targetModel = options.upstreamModel ?? options.model;
   return {
     model: options.model,
     async turn(messages, signal) {
       const reply = await options.chat.create(
-        { model: options.model, messages: [{ role: 'system', content: AGENT_PROMPT }, ...messages], tools: AGENT_TOOLS },
+        { model: targetModel, messages: [{ role: 'system', content: AGENT_PROMPT }, ...messages], tools: AGENT_TOOLS },
         { signal },
       );
       const message = reply.choices[0]?.message;
@@ -113,8 +120,10 @@ export function agentFromSettings(values: Record<string, string | undefined>): V
   if (provider !== 'meta' && provider !== 'openai-compatible') return undefined;
   const apiKey = provider === 'meta' ? pick('META_API_KEY') : pick('AGENT_API_KEY');
   const baseURL = provider === 'meta' ? pick('META_API_BASE_URL') || 'https://api.meta.ai/v1' : pick('AGENT_BASE_URL');
-  const model = pick('AGENT_MODEL') || (provider === 'meta' ? 'muse-spark-1.3' : '');
+  const canonicalSpark = getCanonicalMetaModels(values).spark;
+  const model = pick('AGENT_MODEL') || (provider === 'meta' ? canonicalSpark : '');
   if (!apiKey || !baseURL || !model) return undefined;
+  const upstreamModel = resolveUpstreamChatModel(baseURL, model, values);
   const client = new OpenAI({ baseURL, apiKey, maxRetries: 0, timeout: 60_000 });
-  return chatAgent({ model, chat: client.chat.completions });
+  return chatAgent({ model, upstreamModel, chat: client.chat.completions });
 }

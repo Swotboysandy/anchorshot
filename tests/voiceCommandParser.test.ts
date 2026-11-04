@@ -254,3 +254,27 @@ describe('explicit scene numbers never fall back to the active scene',()=>{
   it(text,()=>expect(parseVoiceCommand(text).kind).toBe('invalid_command'));
  }
 });
+
+describe('remake individual vs all scenes', () => {
+  it('parses individual scene remake directives', () => {
+    expect(parseVoiceCommand('remake scene 2')).toEqual({ kind: 'remake_shot', shotNumber: 2, prompt: undefined });
+    expect(parseVoiceCommand('regenerate shot 3')).toEqual({ kind: 'remake_shot', shotNumber: 3, prompt: undefined });
+    expect(parseVoiceCommand('redo scene 2 with a dramatic overhead angle')).toEqual({
+      kind: 'remake_shot',
+      shotNumber: 2,
+      prompt: 'a dramatic overhead angle',
+    });
+    expect(parseVoiceCommand('remake this shot')).toEqual({ kind: 'remake_shot', shotNumber: undefined, prompt: undefined });
+    expect(parseVoiceCommand('remake the highlighted scene')).toEqual({ kind: 'remake_shot', shotNumber: undefined, prompt: undefined });
+  });
+
+  it('parses remake all directives', () => {
+    expect(parseVoiceCommand('remake all scenes')).toEqual({ kind: 'remake_shot', all: true });
+    expect(parseVoiceCommand('regenerate all shots')).toEqual({ kind: 'remake_shot', all: true });
+    expect(parseVoiceCommand('remake all')).toEqual({ kind: 'remake_shot', all: true });
+  });
+
+  it('rejects invalid scene numbers for remake', () => {
+    expect(parseVoiceCommand('remake shot 0').kind).toBe('invalid_command');
+  });
+});

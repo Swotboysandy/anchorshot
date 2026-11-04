@@ -62,6 +62,17 @@ describe('voice agent client', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it('handles remake_shot tool invocation for an individual shot', async () => {
+    stubTurns(
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c2', type: 'function', function: { name: 'remake_shot', arguments: '{"shot":2,"direction":"dramatic angle"}' } }] },
+      { role: 'assistant', content: 'Scene 2 has been remade.' },
+    );
+    const remake = vi.fn().mockResolvedValue('Remade Scene 2.');
+    const messages = [{ role: 'user', content: 'Remake scene 2 with a dramatic angle' }];
+    expect(await runAgentTurn('t', messages, { remake_shot: remake })).toBe('Scene 2 has been remade.');
+    expect(remake).toHaveBeenCalledWith({ shot: 2, direction: 'dramatic angle' });
+  });
+
   it('reports an unknown or failing tool to the model instead of crashing', async () => {
     stubTurns(
       { role: 'assistant', tool_calls: [{ id: 'c1', function: { name: 'nope', arguments: '{}' } }, { id: 'c2', function: { name: 'bad', arguments: '{}' } }] },

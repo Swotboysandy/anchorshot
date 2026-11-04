@@ -21,13 +21,17 @@ web_app = FastAPI(title="AnchorShot Wan 2.2")
 # Wan 2.2 TI2V is designed for 24 fps; its frames are encoded at 25 without duplication.
 FPS = 25
 cached_pipe = None
+cached_t2v_pipe = None
 
 
 class ClipRequest(BaseModel):
     prompt: str
-    image: str  # base64 start frame
+    image: str | None = None  # optional base64 start frame
     seed: int = 7
-    num_frames: int = 97  # 4k + 1; about 3.9 seconds at 25 fps
+    num_frames: int = 49  # 4k + 1; ~1.96 seconds at 25 fps for fast rendering
+    width: int = 832      # multiple of 32 (480p 16:9 widescreen)
+    height: int = 480     # multiple of 32 (480p 16:9 widescreen)
+    num_inference_steps: int = 20  # reduced from 40 for ~10x faster rendering
 
 
 def require_key(authorization: str | None):
@@ -52,6 +56,22 @@ def get_pipeline():
     return cached_pipe
 
 
+def get_t2v_pipeline():
+    global cached_t2v_pipe
+    if cached_t2v_pipe is None:
+        from diffusers import WanPipeline
+
+        pipe = get_pipeline()
+        cached_t2v_pipe = WanPipeline(
+            tokenizer=pipe.tokenizer,
+            text_encoder=pipe.text_encoder,
+            transformer=pipe.transformer,
+            vae=pipe.vae,
+            scheduler=pipe.scheduler,
+        )
+    return cached_t2v_pipe
+
+
 # A cancelled request keeps running on the GPU, so renders must never overlap.
 render_lock = threading.Lock()
 
@@ -64,12 +84,21 @@ def generate(req: ClipRequest, authorization: str | None = Header(default=None))
     from PIL import Image
 
     num_frames = ((min(max(req.num_frames, 17), 121) - 1) // 4) * 4 + 1
-    start = Image.open(io.BytesIO(base64.b64decode(req.image))).convert("RGB").resize((1280, 704))
+    width = max(320, min(1280, (req.width // 32) * 32))
+    height = max(192, min(704, (req.height // 32) * 32))
+    steps = max(8, min(40, req.num_inference_steps))
     with render_lock:
         try:
-            frames = get_pipeline()(image=start, prompt=req.prompt, height=704, width=1280, num_frames=num_frames,
-                                    num_inference_steps=40, guidance_scale=5.0,
-                                    generator=torch.Generator("cuda").manual_seed(req.seed)).frames[0]
+            gen = torch.Generator("cuda").manual_seed(req.seed)
+            if req.image:
+                start = Image.open(io.BytesIO(base64.b64decode(req.image))).convert("RGB").resize((width, height))
+                frames = get_pipeline()(image=start, prompt=req.prompt, height=height, width=width, num_frames=num_frames,
+                                        num_inference_steps=steps, guidance_scale=5.0,
+                                        generator=gen).frames[0]
+            else:
+                frames = get_t2v_pipeline()(prompt=req.prompt, height=height, width=width, num_frames=num_frames,
+                                            num_inference_steps=steps, guidance_scale=5.0,
+                                            generator=gen).frames[0]
         finally:
             gc.collect()
             torch.cuda.empty_cache()
@@ -79,7 +108,7 @@ def generate(req: ClipRequest, authorization: str | None = Header(default=None))
 
 
 @app.function(image=image, gpu="A100-40GB", volumes={"/cache": volume}, env={"HF_HOME": "/cache"},
-              timeout=1200, scaledown_window=60, secrets=[modal.Secret.from_name("anchorshot-wan-endpoint")])
+              timeout=1200, scaledown_window=300, secrets=[modal.Secret.from_name("anchorshot-wan-endpoint")])
 @modal.asgi_app()
 def fastapi_app():
     return web_app

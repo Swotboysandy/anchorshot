@@ -27,23 +27,26 @@ function anchorShotSamApiPlugin(): Plugin {
         process.env.META_API_BASE_URL = rawBaseUrl;
       }
       const rawLimit = (process.env.SAM_MAX_REQUESTS ?? localEnv.SAM_MAX_REQUESTS ?? '').trim();
-      const parsedLimit = rawLimit ? Number.parseInt(rawLimit, 10) : 25;
+      const parsedLimit = rawLimit ? Number.parseInt(rawLimit, 10) : 250;
       const requestLimit =
-        Number.isInteger(parsedLimit) && parsedLimit >= 0 && parsedLimit <= 100 ? parsedLimit : 25;
+        Number.isInteger(parsedLimit) && parsedLimit >= 0 && parsedLimit <= 10000 ? parsedLimit : 250;
 
       // Same model providers as server/index.ts, so `npm run dev` and `dev:server` behave alike.
-      const [{ plannerFromSettings }, { imagerFromSettings }, { transcriberFromSettings }, { agentFromSettings }] =
+      const [{ plannerFromSettings }, { imagerFromSettings }, { transcriberFromSettings }, { agentFromSettings }, { samFromSettings }] =
         await Promise.all([
           import('./server/planner'),
           import('./server/imager'),
           import('./server/transcriber'),
           import('./server/agent'),
+          import('./server/sam'),
         ]);
       const apiApp = createApp({
         settings: () => ({
           key: (process.env.META_API_KEY ?? localEnv.META_API_KEY ?? '').trim(),
+          samProvider: (process.env.SAM_PROVIDER ?? localEnv.SAM_PROVIDER ?? '').trim().toLowerCase() || undefined,
           requestLimit,
         }),
+        segment: samFromSettings(localEnv),
         planner: plannerFromSettings(localEnv),
         video: videoFromSettings(localEnv, path.resolve(__dirname, '.artifacts/local-ai/ui-jobs')),
         imager: imagerFromSettings(localEnv),

@@ -1,0 +1,16 @@
+models:
+  - name: Systran/faster-whisper-tiny.en
+    path: Systran/faster-whisper-tiny.en
+    model_options:
+      device: cpu
+      compute_type: int8
+  - name: whisper-1
+    path: Systran/faster-whisper-tiny.en
+    model_options:
+      device: cpu
+      compute_type: int8
+  - name: muse-voice-transcribe-1.0
+    path: Systran/faster-whisper-tiny.en
+    model_options:
+      device: cpu
+      compute_type: int8

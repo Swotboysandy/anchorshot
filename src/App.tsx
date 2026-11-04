@@ -3,7 +3,8 @@ import {validNarrationUrl,type NarrationAttachment} from './services/narration';
 import type {VideoTrackPlan} from './types/videoTracks';
 import { updateShotDetails, restoreShotTake } from './lib/shotEdits';
 import {loadLocal,saveLocal,localSaveError,flushLocalSaves,type ProjectLibrary} from './services/projectStorage';
-import {CleanStudio} from './components/CleanStudio';
+import {CleanStudio, type PendingVoiceConfirmation, type SceneEditError} from './components/CleanStudio';
+import {type GenerationHistoryEntry} from './components/GenerationHistoryPanel';
 import {isGeneratedImage, isGeneratedShot, isLocalImage} from './services/localGeneration';
 import { useReducedMotion } from 'motion/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -17,7 +18,13 @@ import {
 import { applyVideoFindingsToShots, DIRECTOR_PRESETS, metaModelClient } from './services/metaModels';
 import { speechService } from './services/speechService';
 import { exportAnimaticMp4 } from './services/animaticExport';
-import { parseVoiceCommand } from './services/voiceCommandParser';
+import {
+  classifyVoiceConfirmationReply,
+  describeVoiceActionSummary,
+  normalizeVoiceObject,
+  parseVoiceCommand,
+  resolveVoiceColor,
+} from './services/voiceCommandParser';
 import { speechRecognitionService } from './services/speechRecognitionService';
 import {
   exportStoryboardAnimaticVideo,
@@ -67,7 +74,12 @@ export default function App() {
     saveLocal('library',{active:projectState.projectId,projects:[...sessionProjects.filter(item=>item.projectId!==projectState.projectId),{...projectState,isRecording:false,isPlayingAnimatic:false,isProcessing:false}]}).then(()=>{if(!cancelled)setStorageStatus('Saved locally');}).catch(error=>{if(!cancelled)setStorageStatus(localSaveError(error));});return()=>{cancelled=true};
   },[storageReady,projectState,sessionProjects]);
   const [directionDraft, setDirectionDraft] = useState('');
+  const directionDraftRef = useRef(directionDraft);
+  directionDraftRef.current = directionDraft;
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  const [pendingVoiceConfirmation, setPendingVoiceConfirmation] = useState<PendingVoiceConfirmation | null>(null);
+  const autoConfirmEpochRef = useRef(0);
+  const [sceneEditError, setSceneEditError] = useState<SceneEditError | null>(null);
   const switchingProject = useRef(false);
   const archiveLock = useRef(false);
   const [archiveBusy,setArchiveBusy]=useState(false);
@@ -201,15 +213,20 @@ export default function App() {
 
   // Rebuild storyboard from transcript (`muse-spark-1.3` + `muse-image-1.0` + `sam-3.1`)
   const handleRebuildFromTranscript = useCallback(
-    async (injectDiscrepancy: boolean = true, overrideTranscript?: string) => {
+    async (injectDiscrepancy: boolean = true, overrideTranscript?: string, submittedPrompt?: string) => {
+      const previousTranscript = projectState.transcript;
       const targetTranscript = overrideTranscript ?? projectState.transcript;
+      const preservedUserPrompt = (submittedPrompt ?? overrideTranscript ?? projectState.transcript).trim();
       if (!targetTranscript.trim()) return 'The script is empty, so nothing was generated.';
-      if (storyboardGenerationActive.current || currentProjectRef.current.isProcessing) return 'Wait for the current operation to finish before generating another storyboard.';
+      if (storyboardGenerationActive.current || currentProjectRef.current.isProcessing) {
+        if (submittedPrompt) setDirectionDraft(submittedPrompt);
+        return 'Wait for the current operation to finish before generating another storyboard.';
+      }
       storyboardGenerationActive.current = true;
+      setSceneEditError(null);
       orcaTracker.trackAction('generation', `Rebuilding storyboard from transcript: "${targetTranscript.slice(0, 60)}..."`, { targetTranscript });
       setProjectState((prev) => ({
         ...prev,
-        transcript: targetTranscript,
         isProcessing: true,
         statusAnnouncement:
           'Preparing your prompt-to-video generation…',
@@ -228,9 +245,68 @@ export default function App() {
             }
           ).finally(() => setGenerationPercent(undefined)));
         } catch (error) {
-          const message = `Film generation failed: ${error instanceof Error ? error.message : String(error)}`;
+          const rawMsg = error instanceof Error ? error.message : String(error);
+          const partialShots = (error as { partialShots?: StoryboardShot[] })?.partialShots;
+          const partialRules = (error as { partialRules?: ContinuityRule[] })?.partialRules;
+          const plannedCount = (error as { plannedCount?: number })?.plannedCount;
+          const isLimit = /session request limit/i.test(rawMsg);
+
+          // Preserve the user's submitted prompt in the composer on failure without overwriting new typing
+          if (preservedUserPrompt) {
+            setDirectionDraft((prev) => (prev.trim() ? prev : preservedUserPrompt));
+          }
+
+          const canApplyPartials = Boolean(partialShots && partialShots.length > 0 && currentProjectRef.current.shots.length === 0);
+
+          if (isLimit) {
+            setSceneEditError({
+              kind: 'session_limit',
+              title: 'Session request limit reached',
+              explanation:
+                canApplyPartials
+                  ? `Rendered ${partialShots!.length} of ${plannedCount ?? 4} scenes before this session's safety request limit was reached. Those ${partialShots!.length} scenes were kept in your storyboard and saved to Generation History, and your prompt has been preserved in the input box above.`
+                  : `This session reached its safety request allowance before your edit could be completed. Your existing storyboard was kept intact and your prompt has been preserved in the input box above.`,
+              nextStep:
+                'Click "Reset limit & retry edit" to reset the session allowance and run your preserved prompt immediately, or open Generation History to revisit earlier versions.',
+              preservedPrompt: preservedUserPrompt,
+              retryMode: injectDiscrepancy ? 'generate' : 'command',
+              partialShotsCount: partialShots?.length,
+              plannedShotsCount: plannedCount,
+            });
+          } else {
+            setSceneEditError({
+              kind: 'generation_error',
+              title: 'Scene edit could not be completed',
+              explanation: `${rawMsg} Your prompt has been preserved in the input box above.`,
+              nextStep:
+                'Click "Retry edit" to try again with your preserved prompt, or open Generation History to select an earlier version.',
+              preservedPrompt: preservedUserPrompt,
+              retryMode: injectDiscrepancy ? 'generate' : 'command',
+            });
+          }
+
+          const message =
+            canApplyPartials
+              ? isLimit
+                ? `Rendered ${partialShots!.length} of ${plannedCount ?? 4} scenes before the session request limit was reached. Your prompt is preserved; reset the limit to continue.`
+                : `Rendered ${partialShots!.length} of ${plannedCount ?? 4} scenes before an error occurred: ${rawMsg}`
+              : `Film generation failed: ${rawMsg}`;
           speechService.playEarcon('mismatch');
-          setProjectState((prev) => ({ ...prev, isProcessing: false, statusAnnouncement: message }));
+          setProjectState((prev) => {
+            const usePartials = Boolean(partialShots && partialShots.length > 0 && prev.shots.length === 0);
+            return {
+              ...prev,
+              transcript: usePartials ? targetTranscript : previousTranscript,
+              shots: usePartials ? partialShots! : prev.shots,
+              rules: usePartials && partialRules ? partialRules : prev.rules,
+              activeShotId:
+                usePartials
+                  ? partialShots![0]?.id ?? prev.activeShotId
+                  : prev.activeShotId,
+              isProcessing: false,
+              statusAnnouncement: message,
+            };
+          });
           speechService.speak(message, true);
           return message;
         }
@@ -265,6 +341,74 @@ export default function App() {
       }
     },
     [projectState.transcript, projectState.projectId]
+  );
+
+  const handleRemakeSingleShot = useCallback(
+    async (targetShotNumber?: number, promptOverride?: string): Promise<string> => {
+      if (storyboardGenerationActive.current || currentProjectRef.current.isProcessing) {
+        return 'Wait for the current operation to finish before remaking a scene.';
+      }
+      const shots = currentProjectRef.current.shots;
+      if (!shots.length) {
+        return 'The storyboard is empty, so no scene can be remade. Create scenes first.';
+      }
+
+      const targetShot = targetShotNumber
+        ? shots.find((s) => s.shotNumber === targetShotNumber)
+        : activeShot || shots[0];
+
+      if (!targetShot) {
+        const msg = `There is no shot ${targetShotNumber}.`;
+        announceStatus(msg, true);
+        return msg;
+      }
+
+      storyboardGenerationActive.current = true;
+      setSceneEditError(null);
+      orcaTracker.trackAction('generation', `Remaking Shot ${targetShot.shotNumber}: "${promptOverride || targetShot.promptDescription}"`, {
+        targetShotNumber: targetShot.shotNumber,
+        promptOverride,
+      });
+
+      setProjectState((prev) => ({
+        ...prev,
+        isProcessing: true,
+        statusAnnouncement: `Remaking Scene ${targetShot.shotNumber}…`,
+      }));
+
+      try {
+        const remade = await metaModelClient.remakeSingleShot(
+          targetShot,
+          promptOverride,
+          currentProjectRef.current.rules,
+          (message, percent) => {
+            setGenerationPercent(percent);
+            setProjectState((prev) => ({ ...prev, statusAnnouncement: message }));
+          }
+        ).finally(() => setGenerationPercent(undefined));
+
+        setProjectState((prev) => ({
+          ...prev,
+          shots: prev.shots.map((s) => (s.id === remade.id ? remade : s)),
+          activeShotId: remade.id,
+          statusAnnouncement: `Scene ${targetShot.shotNumber} has been remade. The other scenes were kept intact.`,
+        }));
+
+        speechService.playEarcon('fixApplied');
+        const summary = `Scene ${targetShot.shotNumber} has been remade. The other scenes were kept intact.`;
+        announceStatus(summary, true);
+        return summary;
+      } catch (error) {
+        const rawMsg = error instanceof Error ? error.message : String(error);
+        const failMsg = `Remaking scene ${targetShot.shotNumber} failed: ${rawMsg}`;
+        announceStatus(failMsg, true);
+        return failMsg;
+      } finally {
+        storyboardGenerationActive.current = false;
+        setProjectState((prev) => ({ ...prev, isProcessing: false }));
+      }
+    },
+    [activeShot, announceStatus]
   );
 
   // Switch Director Preset Sequence
@@ -534,24 +678,66 @@ export default function App() {
     const shot = shotNumber ? source.shots.find((s) => s.shotNumber === shotNumber) : source.shots.find((s) => s.id === source.activeShotId) ?? source.shots[0];
     if (!shot) return shotNumber ? `There is no shot ${shotNumber}.` : 'There is no shot to edit yet.';
     if (source.isProcessing) return 'Wait for the current operation to finish.';
+    const targetObject = normalizeVoiceObject(object) || object.trim().toLowerCase();
     const sourceImage = shot.currentImageUrl;
     const unchanged = (state: ProjectState) => state.projectId === source.projectId && state.shots.find((s) => s.id === shot.id)?.currentImageUrl === sourceImage;
-    setProjectState((prev) => ({ ...prev, isProcessing: true, activeShotId: shot.id, statusAnnouncement: `Finding the ${object} in Shot ${shot.shotNumber}...` }));
+    setProjectState((prev) => ({ ...prev, isProcessing: true, activeShotId: shot.id, statusAnnouncement: `Finding the ${targetObject} in Shot ${shot.shotNumber}...` }));
     try {
-      const mask = await metaModelClient.segmentObjectWithSam3(shot.shotNumber, object, undefined, undefined, 1, sourceImage);
-      if (mask.provenance !== 'live-sam-3.1' || !mask.maskBase64) throw new Error(`The ${object} could not be found in Shot ${shot.shotNumber}. Nothing was changed.`);
-      setProjectState((prev) => ({ ...prev, statusAnnouncement: `Changing the ${object} in Shot ${shot.shotNumber}...` }));
-      const res = await metaModelClient.editFrameGenerative(sourceImage, `${instruction}. Change only the ${object}. Keep the rest of the image identical.`, mask.maskBase64);
+      const voiceColor = resolveVoiceColor(instruction);
+      const revision = (source.rules.find((r) => r.targetObject === targetObject && r.property === 'color')?.revision ?? 0) + 1;
+      const mask = await metaModelClient.segmentObjectWithSam3(shot.shotNumber, targetObject, undefined, undefined, revision, sourceImage);
+      if ((!isGeneratedShot(shot) ? !mask.maskBase64 : mask.provenance !== 'live-sam-3.1' || !mask.maskBase64)) {
+        throw new Error(`The ${targetObject} could not be found in Shot ${shot.shotNumber}. Nothing was changed.`);
+      }
+      setProjectState((prev) => ({ ...prev, statusAnnouncement: `Changing the ${targetObject} in Shot ${shot.shotNumber}...` }));
+
+      // Try generative object inpainting first when not a pure colour change; if no remote imager is connected,
+      // or when a colour change was requested, apply SAM 3.1 masked pixel recolouring with 0 outside-mask drift.
+      if (!voiceColor) {
+        try {
+          const res = await metaModelClient.editFrameGenerative(
+            sourceImage,
+            `${instruction}. Change only the ${targetObject}. Keep the rest of the image identical.`,
+            mask.maskBase64
+          );
+          if (!unchanged(currentProjectRef.current)) return 'The shot changed during the edit, so the result was not applied.';
+          const message = `Changed the ${targetObject} in Shot ${shot.shotNumber}. ${res.outsideDrift} pixels outside it changed. Continuity needs review.`;
+          setProjectState((prev) => !unchanged(prev) ? prev : {
+            ...prev,
+            statusAnnouncement: message,
+            shots: prev.shots.map((s) => s.id !== shot.id ? s : {
+              ...s, currentImageUrl: res.editedImageUrl, status: 'uncertain', mediaSource: 'generated',
+              videoUrl: undefined, generatedJobId: undefined, videoMaskPlan: undefined, detectedObjects: undefined, proposedFix: undefined, discrepancyMessage: undefined,
+              revisions: [...s.revisions, { revisionId: `voice-edit-${Date.now()}`, timestamp: Date.now(), imageUrl: res.editedImageUrl, mediaSource: 'generated', actionApplied: `Object edit: ${targetObject}, ${instruction}; continuity unreviewed` }],
+            }),
+          });
+          speechService.playEarcon('fixApplied');
+          return message;
+        } catch (genErr) {
+          if (!/No image model is connected/i.test((genErr as Error).message ?? '')) {
+            throw genErr;
+          }
+        }
+      }
+
+      const resolvedColor = voiceColor ?? 'amber';
+      const shotWithProposal: StoryboardShot = {
+        ...shot,
+        proposedFix: {
+          action: 'recolor',
+          targetObject,
+          targetColor: resolvedColor,
+          mask: { ...mask, candidateCount: 1 },
+        },
+      };
+      const updated = await metaModelClient.applyContinuityFix(shotWithProposal, resolvedColor, revision);
       if (!unchanged(currentProjectRef.current)) return 'The shot changed during the edit, so the result was not applied.';
-      const message = `Changed the ${object} in Shot ${shot.shotNumber}. ${res.outsideDrift} pixels outside it changed. Continuity needs review.`;
+      const outsideDrift = updated.pixelVerification?.changedOutside ?? 0;
+      const message = `Changed the ${targetObject} to ${resolvedColor} in Shot ${shot.shotNumber}. ${outsideDrift} pixels outside the mask changed.`;
       setProjectState((prev) => !unchanged(prev) ? prev : {
         ...prev,
         statusAnnouncement: message,
-        shots: prev.shots.map((s) => s.id !== shot.id ? s : {
-          ...s, currentImageUrl: res.editedImageUrl, status: 'uncertain', mediaSource: 'generated',
-          videoUrl: undefined, generatedJobId: undefined, videoMaskPlan: undefined, detectedObjects: undefined, proposedFix: undefined, discrepancyMessage: undefined,
-          revisions: [...s.revisions, { revisionId: `voice-edit-${Date.now()}`, timestamp: Date.now(), imageUrl: res.editedImageUrl, mediaSource: 'generated', actionApplied: `Object edit: ${object}, ${instruction}; continuity unreviewed` }],
-        }),
+        shots: prev.shots.map((s) => (s.id === updated.id ? updated : s)),
       });
       speechService.playEarcon('fixApplied');
       return message;
@@ -698,8 +884,7 @@ export default function App() {
     const sourceMatches = (state: ProjectState) => state.projectId === projectId
       && state.shots === projectState.shots && state.rules === projectState.rules;
     const staleMessage = 'The sequence changed during the continuity check. Your edits were kept; run the check again.';
-    const primaryRule = projectState.rules[0];
-    if (!primaryRule) {
+    if (!projectState.shots.length) {
       announceStatus('There are no continuity rules to check. Say which prop must stay which colour, for example the jacket must be emerald.', true);
       return;
     }
@@ -710,9 +895,46 @@ export default function App() {
       statusAnnouncement: 'Running SAM 3.1 continuity audit across sequence...',
     }));
 
+    let activeRules = projectState.rules;
     let auditedShots: StoryboardShot[];
     try {
-      auditedShots = await metaModelClient.auditAllShots(projectState.shots, projectState.rules);
+      if (!activeRules.length) {
+        const text = `${projectState.transcript} ${projectState.shots.map((s) => s.promptDescription).join(' ')}`.toLowerCase();
+        const targetObject =
+          /\bumbrella\b/.test(text) ? 'umbrella' :
+          /\b(?:cup|mug)\b/.test(text) ? 'cup' :
+          'jacket';
+        let expectedValue = 'amber';
+        try {
+          const { sampleImageColorInMask } = await import('./services/canvasEngine');
+          const firstShot = projectState.shots[0];
+          const mask = await metaModelClient.segmentObjectWithSam3(
+            firstShot.shotNumber,
+            targetObject,
+            undefined,
+            0.986,
+            1,
+            firstShot.currentImageUrl
+          );
+          if (firstShot.currentImageUrl) {
+            const sample = await sampleImageColorInMask(firstShot.currentImageUrl, mask);
+            if (sample.colorName) expectedValue = sample.colorName;
+          }
+        } catch {
+          // Keep default anchor colour if first frame cannot be sampled.
+        }
+        activeRules = [
+          {
+            id: `rule-${targetObject}-color`,
+            scope: 'all_shots',
+            targetObject,
+            property: 'color',
+            expectedValue,
+            revision: 1,
+          },
+        ];
+      }
+      auditedShots = await metaModelClient.auditAllShots(projectState.shots, activeRules);
     } catch (error) {
       setProjectState((prev) => ({ ...prev, isProcessing: false }));
       announceStatus(`The continuity check failed: ${error instanceof Error ? error.message : String(error)}`, true);
@@ -738,13 +960,13 @@ export default function App() {
       // Recheck in the updater too: another edit may already be queued by React.
       if (!sourceMatches(prev)) return { ...prev, isProcessing: false, statusAnnouncement: staleMessage };
       return {
-        ...prev, isProcessing: false, shots: auditedShots, statusAnnouncement: message,
+        ...prev, isProcessing: false, rules: activeRules, shots: auditedShots, statusAnnouncement: message,
         activeShotId: !unreviewed && firstMismatch ? firstMismatch.id : prev.activeShotId,
       };
     });
     speechService.playEarcon(unreviewed ? 'focus' : firstMismatch ? 'mismatch' : 'consistent');
     speechService.speak(message, true);
-  }, [projectState.shots, projectState.rules, projectState.projectId, announceStatus]);
+  }, [projectState.shots, projectState.rules, projectState.transcript, projectState.projectId, announceStatus]);
 
   // Toggle Animatic Playback (`isPlayingAnimatic`)
   const handleTogglePlayAnimatic = useCallback(() => {
@@ -774,11 +996,12 @@ export default function App() {
       const intent = parseVoiceCommand(trimmed);
       // Commands can also arrive from the voice agent, outside disabled form controls.
       if (currentProjectRef.current.isProcessing && !['playback', 'help', 'narrate', 'invalid_command'].includes(intent.kind)) {
+        setDirectionDraft(trimmed);
         announceStatus('Wait for the current edit to finish before starting another change.', true);
         return;
       }
       if (!projectState.shots.length) {
-        await handleRebuildFromTranscript(true, trimmed);
+        await handleRebuildFromTranscript(true, trimmed, trimmed);
         return;
       }
 
@@ -815,6 +1038,15 @@ export default function App() {
         case 'narrate': {
           const summary = projectState.shots.map((s) => s.spokenDescription).join(' ');
           announceStatus(`Narrating full storyboard sequence: ${summary}`, true);
+          return;
+        }
+
+        case 'remake_shot': {
+          if (intent.all) {
+            await handleRebuildFromTranscript(false, projectState.transcript, trimmed);
+          } else {
+            await handleRemakeSingleShot(intent.shotNumber, intent.prompt);
+          }
           return;
         }
 
@@ -855,7 +1087,49 @@ export default function App() {
           const candidates = intent.shotNumber
             ? reaudited.filter((s) => s.id === targetShot.id)
             : reaudited.filter((s) => s.status === 'mismatch');
-          const targets = candidates.filter((s) => s.proposedFix?.targetObject === targetObject && !isLocalImage(s.currentImageUrl));
+          let targets = candidates.filter(
+            (s) =>
+              s.proposedFix?.targetObject === targetObject &&
+              (!isGeneratedShot(s) || s.proposedFix?.mask?.provenance === 'live-sam-3.1')
+          );
+
+          const revision = (projectState.rules.find(rule => rule.targetObject === targetObject && rule.property === 'color')?.revision ?? 0) + 1;
+
+          // When the user explicitly asks to change an object's colour by voice (e.g. "change the jacket to red"),
+          // ensure the target shot's object is segmented and recoloured even if it wasn't previously flagged as a mismatch.
+          if (!targets.length && targetShot) {
+            const refreshedTarget = reaudited.find((s) => s.id === targetShot.id) ?? targetShot;
+            try {
+              const directMask =
+                refreshedTarget.proposedFix?.mask?.maskBase64 &&
+                refreshedTarget.proposedFix.targetObject === targetObject
+                  ? refreshedTarget.proposedFix.mask
+                  : await metaModelClient.segmentObjectWithSam3(
+                      refreshedTarget.shotNumber,
+                      targetObject,
+                      undefined,
+                      undefined,
+                      revision,
+                      refreshedTarget.currentImageUrl
+                    );
+              if (directMask.maskBase64 && (!isGeneratedShot(refreshedTarget) || directMask.provenance === 'live-sam-3.1')) {
+                targets = [
+                  {
+                    ...refreshedTarget,
+                    proposedFix: {
+                      action: 'recolor',
+                      targetObject,
+                      targetColor: intent.color,
+                      mask: { ...directMask, candidateCount: 1 },
+                    },
+                  },
+                ];
+              }
+            } catch {
+              // Keep targets empty if segmentation fails
+            }
+          }
+
           const unconfirmed = reaudited.filter((s) => s.status === 'uncertain').length;
           if (!targets.length) {
             announceStatus(
@@ -865,7 +1139,6 @@ export default function App() {
             return;
           }
 
-          const revision = (projectState.rules.find(rule => rule.targetObject === targetObject && rule.property === 'color')?.revision ?? 0) + 1;
           setShowBeforeComparison(false);
           setProjectState((prev) => ({ ...prev, isProcessing: true }));
           let recoloured = 0;
@@ -936,16 +1209,36 @@ export default function App() {
         }
 
         case 'generative_edit': {
-          const targetShot = activeShot || projectState.shots[0];
+          const targetShot =
+            (intent.shotNumber
+              ? projectState.shots.find((s) => s.shotNumber === intent.shotNumber)
+              : null) || activeShot || projectState.shots[0];
           if (!targetShot) {
             announceStatus('No shot selected for generative edit.', true);
+            return;
+          }
+          if (intent.object && targetShot.proposedFix?.mask?.objectId !== intent.object) {
+            const reply = await handleEditObject(intent.object, intent.prompt, intent.shotNumber ?? targetShot.shotNumber);
+            announceStatus(reply, true);
             return;
           }
           try {
             await handleGenerativeEdit(targetShot.id, intent.prompt, intent.object);
           } catch (error) {
+            const rawMsg = error instanceof Error ? error.message : String(error);
+            setDirectionDraft((prev) => (prev.trim() ? prev : trimmed));
+            if (/session request limit/i.test(rawMsg)) {
+              setSceneEditError({
+                kind: 'session_limit',
+                title: 'Session request limit reached',
+                explanation: 'This session reached its safety request allowance before your edit could be completed. Your prompt has been preserved in the input box above.',
+                nextStep: 'Click "Reset limit & retry edit" to reset the session allowance and run your preserved prompt immediately.',
+                preservedPrompt: trimmed,
+                retryMode: 'command',
+              });
+            }
             // Inspector callers consume the rejection themselves; commands must do so too.
-            announceStatus(`Generative edit failed: ${error instanceof Error ? error.message : String(error)}`, true);
+            announceStatus(`Generative edit failed: ${rawMsg}`, true);
           }
           return;
         }
@@ -963,15 +1256,31 @@ export default function App() {
 
         case 'rebuild':
         default: {
-          const updatedTranscript = `${projectState.transcript} ${intent.transcript}`.trim();
-          await handleRebuildFromTranscript(false, updatedTranscript);
+          const baseTranscript = projectState.transcript.trim();
+          const addition = intent.transcript.trim();
+          const updatedTranscript = baseTranscript.endsWith(addition)
+            ? baseTranscript
+            : `${baseTranscript} ${addition}`.trim();
+          await handleRebuildFromTranscript(false, updatedTranscript, trimmed);
           return;
         }
       }
       } catch (error) {
+        const rawMsg = error instanceof Error ? error.message : String(error);
+        setDirectionDraft((prev) => (prev.trim() ? prev : trimmed));
+        if (/session request limit/i.test(rawMsg)) {
+          setSceneEditError({
+            kind: 'session_limit',
+            title: 'Session request limit reached',
+            explanation: 'This session reached its safety request allowance before your edit could be completed. Your prompt has been preserved in the input box above.',
+            nextStep: 'Click "Reset limit & retry edit" to reset the session allowance and run your preserved prompt immediately.',
+            preservedPrompt: trimmed,
+            retryMode: 'command',
+          });
+        }
         // Button submissions do not await this callback; consume failed rule/audit
         // operations here instead of leaving an unhandled rejection.
-        announceStatus(`Command failed: ${error instanceof Error ? error.message : String(error)}`, true);
+        announceStatus(`Command failed: ${rawMsg}`, true);
       }
     },
     [
@@ -987,43 +1296,347 @@ export default function App() {
       handleRunFullAudit,
       handleSegmentObjectManual,
       handleGenerativeEdit,
+      handleEditObject,
       handleUseLocalVideo,
       projectState.projectId,
       announceStatus,
     ]
   );
 
+  // Reset the session request limit and optionally immediately retry a preserved prompt
+  const handleResetSessionLimit = useCallback(
+    async (retryPrompt?: string) => {
+      const retryMode = sceneEditError?.retryMode;
+      try {
+        const res = await metaModelClient.resetSessionRequestLimit();
+        setSceneEditError(null);
+        const toRun = retryPrompt?.trim();
+        if (toRun) {
+          setDirectionDraft('');
+          if (retryMode === 'generate') {
+            await handleRebuildFromTranscript(true, toRun, toRun);
+          } else {
+            await handleExecuteVoiceCommand(toRun);
+          }
+        } else {
+          announceStatus(
+            `Session request limit reset (0 of ${res.requestLimit} requests used). Your preserved prompt is ready to run.`,
+            true
+          );
+        }
+      } catch (error) {
+        announceStatus(
+          `Could not reset session limit: ${error instanceof Error ? error.message : String(error)}`,
+          true
+        );
+      }
+    },
+    [announceStatus, handleExecuteVoiceCommand, handleRebuildFromTranscript, sceneEditError?.retryMode]
+  );
+
+  // Revisit an individual generation from GenerationHistoryPanel
+  const handleRevisitHistoryEntry = useCallback(
+    (entry: GenerationHistoryEntry, mode: 'replace-active' | 'append-shot') => {
+      if (projectState.isProcessing) return;
+      setShowSamMaskOverlay(false);
+      setSceneEditError(null);
+
+      setProjectState((prev) => {
+        if (mode === 'append-shot' || prev.shots.length === 0) {
+          const nextNum = mode === 'append-shot' ? prev.shots.length + 1 : 1;
+          const newShot: StoryboardShot = {
+            id: `shot-hist-${entry.id}-${Date.now()}`,
+            shotNumber: nextNum,
+            durationSeconds: entry.durationSeconds ?? 3.8,
+            promptDescription: entry.subject,
+            spokenDescription: `Scene ${nextNum}: ${entry.title}. Restored from generation history (${entry.formattedDate}).`,
+            currentImageUrl: entry.thumbnailUrl,
+            originalImageUrl: entry.thumbnailUrl,
+            videoUrl: entry.videoUrl,
+            generatedJobId: entry.jobId,
+            mediaSource: 'generated',
+            status: 'uncertain',
+            revisions: [
+              {
+                revisionId: `rev-hist-${entry.id}-${Date.now()}`,
+                timestamp: Date.parse(entry.createdAt) || Date.now(),
+                imageUrl: entry.thumbnailUrl,
+                videoUrl: entry.videoUrl,
+                generatedJobId: entry.jobId,
+                mediaSource: 'generated',
+                actionApplied: `Restored from history: ${entry.title} (${entry.formattedDate})`,
+              },
+            ],
+          };
+          const nextShots = mode === 'append-shot' ? [...prev.shots, newShot] : [newShot];
+          return {
+            ...prev,
+            isPlayingAnimatic: false,
+            transcript: prev.transcript || entry.subject,
+            shots: nextShots,
+            activeShotId: newShot.id,
+            statusAnnouncement: `Loaded "${entry.title}" (${entry.formattedDate}) as Scene ${nextNum}.`,
+          };
+        }
+
+        const targetId = prev.activeShotId ?? prev.shots[0]?.id;
+        return {
+          ...prev,
+          isPlayingAnimatic: false,
+          shots: prev.shots.map((shot) =>
+            shot.id !== targetId
+              ? shot
+              : {
+                  ...shot,
+                  durationSeconds: entry.durationSeconds ?? shot.durationSeconds,
+                  promptDescription: entry.subject,
+                  spokenDescription: `Scene ${shot.shotNumber}: ${entry.title}. Restored from generation history (${entry.formattedDate}).`,
+                  currentImageUrl: entry.thumbnailUrl,
+                  videoUrl: entry.videoUrl,
+                  generatedJobId: entry.jobId,
+                  mediaSource: 'generated',
+                  status: 'uncertain',
+                  videoMaskPlan: undefined,
+                  detectedObjects: undefined,
+                  proposedFix: undefined,
+                  discrepancyMessage: undefined,
+                  pixelVerification: undefined,
+                  revisions: [
+                    ...shot.revisions,
+                    {
+                      revisionId: `rev-hist-${entry.id}-${Date.now()}`,
+                      timestamp: Date.parse(entry.createdAt) || Date.now(),
+                      imageUrl: entry.thumbnailUrl,
+                      videoUrl: entry.videoUrl,
+                      generatedJobId: entry.jobId,
+                      mediaSource: 'generated',
+                      actionApplied: `Restored from history: ${entry.title} (${entry.formattedDate})`,
+                    },
+                  ],
+                }
+          ),
+          statusAnnouncement: `Restored "${entry.title}" (${entry.formattedDate}) into Scene ${
+            prev.shots.find((s) => s.id === targetId)?.shotNumber ?? 1
+          }.`,
+        };
+      });
+    },
+    [projectState.isProcessing]
+  );
+
+  // Restore a full multi-shot sequence from GenerationHistoryPanel
+  const handleRestoreHistorySequence = useCallback(
+    (entries: GenerationHistoryEntry[], sequenceTitle: string) => {
+      if (projectState.isProcessing || !entries.length) return;
+      setShowSamMaskOverlay(false);
+      setSceneEditError(null);
+      setCurrentTimeSeconds(0);
+
+      const restoredShots: StoryboardShot[] = entries.map((entry, idx) => ({
+        id: `shot-seq-${entry.id}-${idx + 1}`,
+        shotNumber: idx + 1,
+        durationSeconds: entry.durationSeconds ?? 3.8,
+        promptDescription: entry.subject,
+        spokenDescription: `Scene ${idx + 1}: ${entry.title}. Restored from generation history (${entry.formattedDate}).`,
+        currentImageUrl: entry.thumbnailUrl,
+        originalImageUrl: entry.thumbnailUrl,
+        videoUrl: entry.videoUrl,
+        generatedJobId: entry.jobId,
+        mediaSource: 'generated',
+        status: 'uncertain',
+        revisions: [
+          {
+            revisionId: `rev-seq-${entry.id}-${Date.now()}`,
+            timestamp: Date.parse(entry.createdAt) || Date.now(),
+            imageUrl: entry.thumbnailUrl,
+            videoUrl: entry.videoUrl,
+            generatedJobId: entry.jobId,
+            mediaSource: 'generated',
+            actionApplied: `Restored sequence scene ${idx + 1}: ${entry.title}`,
+          },
+        ],
+      }));
+
+      setProjectState((prev) => ({
+        ...prev,
+        isPlayingAnimatic: false,
+        transcript: prev.transcript || entries.map((e) => e.subject).join('. '),
+        shots: restoredShots,
+        activeShotId: restoredShots[0]?.id ?? null,
+        statusAnnouncement: `Restored ${restoredShots.length} scenes from "${sequenceTitle}".`,
+      }));
+    },
+    [projectState.isProcessing]
+  );
+
   // Dictation uses the configured server provider; unconfigured mode stays local.
+  const startVoiceDictationSession = useCallback(
+    (
+      baseDraft: string,
+      existingPending: PendingVoiceConfirmation | null,
+      isConfirmationFollowUp = false
+    ) => {
+      const unavailable = (reason: string) => {
+        setProjectState((prev) => ({ ...prev, isRecording: false }));
+        if (isConfirmationFollowUp && existingPending) {
+          setVoiceNotice(
+            `Heard: "${existingPending.transcript}" — Click Confirm to ${existingPending.actionSummary}, or Repeat to record again.`
+          );
+          return;
+        }
+        setVoiceNotice(`Voice unavailable: ${reason} Type your direction instead.`);
+        announceStatus(`Voice unavailable: ${reason}`);
+      };
+      if (!speechRecognitionService.isSupported()) {
+        unavailable('transcription is not connected or microphone recording is unavailable.');
+        return;
+      }
+      const started = speechRecognitionService.startListening({
+        continuous: true,
+        interimResults: true,
+        autoStopOnSilence: true,
+        quickConfirmation: Boolean(existingPending || isConfirmationFollowUp),
+        onResult: (text, isFinal) => {
+          const trimmedText = text.trim();
+          if (!trimmedText) return;
+          if (!isFinal) {
+            if (!existingPending) {
+              setDirectionDraft(baseDraft ? `${baseDraft} ${trimmedText}` : trimmedText);
+            }
+            return;
+          }
+          if (existingPending) {
+            const decision = classifyVoiceConfirmationReply(trimmedText);
+            if (decision === 'confirm') {
+              autoConfirmEpochRef.current += 1;
+              const toRun = (directionDraftRef.current.trim() || existingPending.transcript).trim();
+              setPendingVoiceConfirmation(null);
+              setVoiceNotice(null);
+              setDirectionDraft('');
+              announceStatus(`Confirmed: "${toRun}". Executing now...`, true);
+              void handleExecuteVoiceCommand(toRun);
+              return;
+            }
+            if (decision === 'repeat') {
+              const epoch = ++autoConfirmEpochRef.current;
+              const prevDraft = existingPending.previousDraft;
+              setPendingVoiceConfirmation(null);
+              setDirectionDraft(prevDraft);
+              setVoiceNotice('Cleared mistaken voice input. Speak your direction again...');
+              setProjectState((prev) => ({
+                ...prev,
+                statusAnnouncement: 'Cleared mistaken voice input. Listening again — please repeat your direction.',
+              }));
+              void speechService
+                .speakAndWait('Cleared mistaken voice input. Speak your direction again.')
+                .then(() => {
+                  if (autoConfirmEpochRef.current === epoch) {
+                    startVoiceDictationSession(prevDraft, null, false);
+                  }
+                });
+              return;
+            }
+            if (decision === 'cancel') {
+              autoConfirmEpochRef.current += 1;
+              setPendingVoiceConfirmation(null);
+              setVoiceNotice(null);
+              setDirectionDraft(existingPending.previousDraft);
+              announceStatus('Voice command cancelled.', true);
+              return;
+            }
+          }
+          const combined = baseDraft ? `${baseDraft} ${trimmedText}` : trimmedText;
+          const actionSummary = describeVoiceActionSummary(
+            combined,
+            currentProjectRef.current.shots.length > 0
+          );
+          const newPending: PendingVoiceConfirmation = {
+            transcript: combined,
+            previousDraft: baseDraft,
+            actionSummary,
+          };
+          const epoch = ++autoConfirmEpochRef.current;
+          setDirectionDraft(combined);
+          setPendingVoiceConfirmation(newPending);
+          setVoiceNotice(
+            `Heard: "${combined}" — Say "yes" or click Confirm to ${actionSummary}, or say "repeat" to record again.`
+          );
+          const promptText = `I heard: "${combined}". This will ${actionSummary}. Say "yes" to confirm, or say "repeat" to try again.`;
+          setProjectState((prev) => ({
+            ...prev,
+            statusAnnouncement: promptText,
+          }));
+          void speechService.speakAndWait(promptText).then(() => {
+            if (autoConfirmEpochRef.current === epoch) {
+              startVoiceDictationSession(baseDraft, newPending, true);
+            }
+          });
+        },
+        onError: (err) => unavailable(err),
+        onStateChange: (listening) => {
+          setProjectState((prev) => ({ ...prev, isRecording: listening }));
+          if (listening) {
+            setVoiceNotice(
+              existingPending
+                ? `Heard: "${existingPending.transcript}" — Listening now: say "yes" to confirm or "repeat" to try again.`
+                : 'Listening. Speak your direction (pauses automatically when you finish).'
+            );
+          }
+        },
+      });
+      if (!started) unavailable('the microphone could not start.');
+    },
+    [announceStatus, handleExecuteVoiceCommand]
+  );
+
   const handleToggleRecording = useCallback(() => {
+    autoConfirmEpochRef.current += 1;
+    speechService.stopSpeaking();
     if (speechRecognitionService.isListening() || projectState.isRecording) {
       speechRecognitionService.stopListening();
       setProjectState((prev) => ({ ...prev, isRecording: false }));
-      setVoiceNotice(null);
-      announceStatus('Voice dictation stopped.');
+      announceStatus('Voice recording stopped. Processing transcription...', false);
       return;
     }
-    const unavailable = (reason: string) => {
-      setProjectState((prev) => ({ ...prev, isRecording: false }));
-      setVoiceNotice(`Voice unavailable: ${reason} Type your direction instead.`);
-      announceStatus(`Voice unavailable: ${reason}`);
-    };
-    if (!speechRecognitionService.isSupported()) {
-      unavailable('transcription is not connected or microphone recording is unavailable.');
-      return;
+    const base = pendingVoiceConfirmation
+      ? pendingVoiceConfirmation.previousDraft
+      : directionDraft.trim();
+    startVoiceDictationSession(base, pendingVoiceConfirmation, Boolean(pendingVoiceConfirmation));
+  }, [announceStatus, directionDraft, pendingVoiceConfirmation, projectState.isRecording, startVoiceDictationSession]);
+
+  const handleConfirmVoiceAction = useCallback(async () => {
+    if (!pendingVoiceConfirmation) return;
+    autoConfirmEpochRef.current += 1;
+    speechRecognitionService.cancelListening();
+    speechService.stopSpeaking();
+    const toRun = (directionDraft.trim() || pendingVoiceConfirmation.transcript).trim();
+    setPendingVoiceConfirmation(null);
+    setVoiceNotice(null);
+    setDirectionDraft('');
+    if (toRun) {
+      await handleExecuteVoiceCommand(toRun);
     }
-    const base = directionDraft.trim();
-    const started = speechRecognitionService.startListening({
-      continuous: true,
-      interimResults: true,
-      onResult: (text) => setDirectionDraft(base ? `${base} ${text}` : text),
-      onError: (err) => unavailable(err),
-      onStateChange: (listening) => {
-        setProjectState((prev) => ({ ...prev, isRecording: listening }));
-        setVoiceNotice(listening ? 'Listening. Speak your direction.' : null);
-      },
-    });
-    if (!started) unavailable('the microphone could not start.');
-  }, [announceStatus, directionDraft, projectState.isRecording]);
+  }, [directionDraft, handleExecuteVoiceCommand, pendingVoiceConfirmation]);
+
+  const handleRepeatVoiceRecording = useCallback(() => {
+    autoConfirmEpochRef.current += 1;
+    const prevDraft = pendingVoiceConfirmation?.previousDraft ?? '';
+    speechRecognitionService.cancelListening();
+    speechService.stopSpeaking();
+    setPendingVoiceConfirmation(null);
+    setDirectionDraft(prevDraft);
+    announceStatus('Discarded previous voice recording. Speak your direction again.', false);
+    startVoiceDictationSession(prevDraft, null, false);
+  }, [announceStatus, pendingVoiceConfirmation, startVoiceDictationSession]);
+
+  const handleDismissVoiceConfirmation = useCallback(() => {
+    autoConfirmEpochRef.current += 1;
+    speechRecognitionService.cancelListening();
+    speechService.stopSpeaking();
+    setPendingVoiceConfirmation(null);
+    setVoiceNotice(null);
+    announceStatus('Voice confirmation dismissed. You can edit the text in the box before running.', false);
+  }, [announceStatus]);
 
   // A hidden tab cannot keep canvas, media and spoken narration synchronized.
   useEffect(() => {
@@ -1544,6 +2157,7 @@ export default function App() {
         onTranscript={(text) => setProjectState((prev) => ({ ...prev, transcript: text }))}
         onGenerate={() => void handleRebuildFromTranscript(true)}
         onGenerateFrom={(script) => handleRebuildFromTranscript(true, script)}
+        onRemakeShot={handleRemakeSingleShot}
         onCommand={(text) => handleExecuteVoiceCommand(text)}
         onEditObject={handleEditObject}
         onSelect={(id) => handleSelectShot(id)}
@@ -1570,6 +2184,15 @@ export default function App() {
         listening={projectState.isRecording}
         onToggleVoice={handleToggleRecording}
         voiceNotice={voiceNotice}
+        pendingVoiceConfirmation={pendingVoiceConfirmation}
+        onConfirmVoiceAction={handleConfirmVoiceAction}
+        onRepeatVoiceRecording={handleRepeatVoiceRecording}
+        onDismissVoiceConfirmation={handleDismissVoiceConfirmation}
+        sceneEditError={sceneEditError}
+        onDismissSceneEditError={() => setSceneEditError(null)}
+        onResetSessionLimit={handleResetSessionLimit}
+        onRevisitHistoryEntry={handleRevisitHistoryEntry}
+        onRestoreHistorySequence={handleRestoreHistorySequence}
         inspector={
           <ShotInspectorPanel
             key={`${projectState.projectId}:${activeShot?.id ?? "empty"}`}

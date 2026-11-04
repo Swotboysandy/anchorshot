@@ -11,6 +11,7 @@ import { imagerFromSettings } from './imager';
 import { agentFromSettings } from './agent';
 import { plannerFromSettings } from './planner';
 import { transcriberFromSettings } from './transcriber';
+import { samFromSettings } from './sam';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 function localSettings() {
@@ -25,12 +26,13 @@ function localSettings() {
     /* Keyless offline mode is supported. */
   }
   const rawLimit = (process.env.SAM_MAX_REQUESTS ?? values.SAM_MAX_REQUESTS ?? '').trim();
-  const parsedLimit = rawLimit ? Number.parseInt(rawLimit, 10) : 10;
+  const parsedLimit = rawLimit ? Number.parseInt(rawLimit, 10) : 250;
   const requestLimit =
-    Number.isInteger(parsedLimit) && parsedLimit >= 0 && parsedLimit <= 100 ? parsedLimit : 10;
+    Number.isInteger(parsedLimit) && parsedLimit >= 0 && parsedLimit <= 10000 ? parsedLimit : 250;
 
   return {
     key: (process.env.META_API_KEY ?? values.META_API_KEY ?? '').trim(),
+    samProvider: (process.env.SAM_PROVIDER ?? values.SAM_PROVIDER ?? '').trim().toLowerCase() || undefined,
     requestLimit,
     port: Number(process.env.PORT ?? values.PORT ?? 4317),
     values,
@@ -39,7 +41,7 @@ function localSettings() {
 const app = express();
 const localAi = createLocalAi(root);
 app.use('/api/local-ai', localAi.app);
-app.use(createApp({ settings: localSettings, planner: plannerFromSettings(localSettings().values),
+app.use(createApp({ settings: localSettings, segment: samFromSettings(localSettings().values), planner: plannerFromSettings(localSettings().values),
   video: videoFromSettings(localSettings().values, resolve(root,'.artifacts/local-ai/ui-jobs')),
   imager: imagerFromSettings(localSettings().values),
   transcriber: transcriberFromSettings(localSettings().values),

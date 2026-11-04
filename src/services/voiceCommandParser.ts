@@ -13,11 +13,12 @@ export type VoiceIntent =
   | { kind: 'invalid_command'; message: string }
   | { kind: 'audit' }
   | { kind: 'narrate' }
+  | { kind: 'remake_shot'; shotNumber?: number; all?: boolean; prompt?: string }
   | { kind: 'fix'; shotNumber?: number; color?: string; object?: string }
   | { kind: 'segment'; object: string; shotNumber?: number }
   | { kind: 'recolor'; object?: string; color: string; shotNumber?: number }
   | { kind: 'modify_video'; object: string; color: string }
-  | { kind: 'generative_edit'; prompt: string; object?: string }
+  | { kind: 'generative_edit'; prompt: string; object?: string; shotNumber?: number }
   | { kind: 'rule_update'; object?: string; color: string }
   | { kind: 'rebuild'; transcript: string };
 
@@ -31,6 +32,11 @@ const COLOR_MAP: Record<string, string> = {
   white: 'white', ivory: 'white',
 };
 const COLORS = Object.keys(COLOR_MAP).join('|');
+
+export function resolveVoiceColor(text: string): string | undefined {
+  const match = text.toLowerCase().match(new RegExp(`\\b(${COLORS})\\b`));
+  return match?.[1] ? COLOR_MAP[match[1]] : undefined;
+}
 
 const NUMBER_WORDS: Record<string, number> = {
   one: 1, first: 1, two: 2, second: 2, three: 3, third: 3, four: 4, fourth: 4,
@@ -52,6 +58,97 @@ function shotNumberIn(text: string): number | undefined {
 
 const cleanObject = (noun: string) => noun.replace(/^(?:the|my|a|an|this|that)\s+/i, '').trim().toLowerCase();
 
+const SCENE_LEVEL_NOUNS = new Set([
+  'scene', 'scenes', 'shot', 'shots', 'frame', 'frames', 'story', 'storyboard',
+  'sequence', 'film', 'video', 'setting', 'location', 'background', 'environment',
+  'weather', 'lighting', 'camera', 'mood', 'pacing',
+]);
+
+export function normalizeVoiceObject(noun: string): string {
+  const cleaned = cleanObject(noun);
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (words.length <= 1) return cleaned;
+  return words[words.length - 1];
+}
+
+export type VoiceConfirmationDecision = 'confirm' | 'repeat' | 'cancel' | null;
+
+/**
+ * Classifies a short spoken reply when the studio is waiting for voice confirmation
+ * ("yes", "confirm", "go ahead" vs "repeat", "try again", "mistake" vs "cancel").
+ */
+export function classifyVoiceConfirmationReply(rawText: string): VoiceConfirmationDecision {
+  const cleaned = rawText
+    .replace(/\b(uh|um|please)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s.,!?;:]+|[\s.,!?;:]+$/g, '')
+    .toLowerCase();
+  if (!cleaned) return null;
+  // Only classify relatively short confirmation/rejection utterances (<= 8 words)
+  if (cleaned.split(' ').length > 8) return null;
+  if (/^(?:cancel|stop|never mind|nevermind|dismiss|abort|forget it)\b/.test(cleaned)) {
+    return 'cancel';
+  }
+  if (/^(?:repeat|try again|record again|re-?record|mistake|wrong|no|nope|not that|start over|redo|let me repeat|say it again)\b/.test(cleaned)) {
+    return 'repeat';
+  }
+  if (
+    /^(?:yes|yeah|yep|yup|confirm|confirmed|go ahead|do it|run it|proceed|correct|right|ok|okay|sure|apply|apply it|sounds good|that's right|thats right)\b/.test(cleaned) &&
+    !/\b(?:no|not|repeat|wrong|mistake|cancel|stop)\b/.test(cleaned)
+  ) {
+    return 'confirm';
+  }
+  return null;
+}
+
+/**
+ * Summarizes what a voice command will do in plain spoken language so the user
+ * can confirm or repeat before any action is taken.
+ */
+export function describeVoiceActionSummary(rawText: string, hasExistingShots: boolean): string {
+  const intent = parseVoiceCommand(rawText);
+  if (!hasExistingShots && !['playback', 'help', 'narrate', 'invalid_command'].includes(intent.kind)) {
+    return 'generate a 4-scene storyboard from your spoken description';
+  }
+  switch (intent.kind) {
+    case 'playback':
+      return intent.action === 'play' ? 'start playing the animatic' : 'pause the animatic';
+    case 'help':
+      return 'open the keyboard and voice shortcuts guide';
+    case 'audit':
+      return 'run a SAM 3.1 continuity check across all scenes';
+    case 'narrate':
+      return 'read the full storyboard sequence aloud';
+    case 'remake_shot':
+      if (intent.all) return 'regenerate all 4 storyboard scenes';
+      if (intent.shotNumber) {
+        return `remake Scene ${intent.shotNumber} while keeping the other scenes${intent.prompt ? ` ("${intent.prompt}")` : ''}`;
+      }
+      return `remake the highlighted scene while keeping the other scenes${intent.prompt ? ` ("${intent.prompt}")` : ''}`;
+    case 'segment':
+      return `find and segment the ${intent.object}${intent.shotNumber ? ` in Shot ${intent.shotNumber}` : ' in the active scene'}`;
+    case 'recolor':
+      return `change the ${intent.object || 'tracked object'} to ${intent.color}${intent.shotNumber ? ` in Shot ${intent.shotNumber}` : ''}`;
+    case 'fix':
+      return `apply the continuity repair${intent.shotNumber ? ` in Shot ${intent.shotNumber}` : ''}${intent.color ? ` (${intent.color})` : ''}`;
+    case 'modify_video':
+      return `recolour the reviewed ${intent.object} video mask to ${intent.color}`;
+    case 'generative_edit':
+      return intent.object
+        ? `change the ${intent.object} to "${intent.prompt}"${intent.shotNumber ? ` in Shot ${intent.shotNumber}` : ''}`
+        : `apply a masked edit ("${intent.prompt}") to the active scene`;
+    case 'rule_update':
+      return `update the continuity rule so ${intent.object || 'the tracked object'} stays ${intent.color}`;
+    case 'invalid_command':
+      return intent.message;
+    case 'rebuild':
+    default:
+      return hasExistingShots
+        ? 'update and regenerate your storyboard scenes with this direction'
+        : 'generate a 4-scene storyboard from your spoken description';
+  }
+}
+
 export function parseVoiceCommand(rawText: string): VoiceIntent {
   const cleaned = rawText
     .replace(/\b(uh|um|please|can\s+you|could\s+you|would\s+you)\b/gi, ' ')
@@ -60,9 +157,9 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
   const lower = cleaned.toLowerCase();
   if (!lower) return { kind: 'rebuild', transcript: '' };
 
-  if (/^(?:fix|repair|make|turn|change|paint|recolou?r|segment|detect|select|find|track)\b/.test(lower)) {
+  if (!/\ball\b/.test(lower) && /^(?:in\s+(?:shot|scene|frame)\s*#?\s*\S+\s*,?\s*)?(?:fix|repair|make|turn|change|paint|recolou?r|replace|swap|edit|segment|detect|select|find|track|remake|regenerate|redo|re-render|rerender|re-create|recreate)\b/.test(lower)) {
     const reference=lower.match(/\b(?:shot|scene|frame)\s*#?\s*([^\s,;!?]+)/)?.[1] ?? lower.match(/#\s*([^\s,;!?]+)/)?.[1];
-    if(reference){
+    if(reference && !['this', 'active', 'current', 'highlighted', 'selected'].includes(reference)){
       const number=NUMBER_WORDS[reference] ?? (/^\d+$/.test(reference)?Number(reference):NaN);
       if(!Number.isSafeInteger(number)||number<1)return {kind:'invalid_command',message:'Use a positive whole scene number, for example: fix shot 2. Your film has not changed.'};
     }
@@ -79,6 +176,18 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
     /^(?:read|tell|describe)\s+(?:(?:to\s+)?me\s+)?(?:the\s+)?(?:scene|shots?|storyboard|sequence|all)\b/.test(lower)
   )
     return { kind: 'narrate' };
+
+  // Remake / regenerate single shot vs all shots:
+  // "remake scene 2", "regenerate shot 3", "redo scene 1 with a wider view", "remake this shot", "remake all scenes"
+  if (/^(?:in\s+(?:shot|scene|frame)\s*#?\s*\S+\s*,?\s*)?(?:remake|regenerate|re-render|rerender|redo|re-create|recreate)\b/.test(lower)) {
+    const isAll = /\ball(?:\s+(?:shots|scenes|storyboard))?$/.test(lower) || /\b(?:all\s+(?:shots|scenes)|whole\s+(?:film|storyboard))\b/.test(lower);
+    if (isAll) {
+      return { kind: 'remake_shot', all: true };
+    }
+    const shotNum = shotNumberIn(lower);
+    const customPrompt = lower.match(/\b(?:with|to|as)\s+(.+)$/)?.[1]?.trim();
+    return { kind: 'remake_shot', shotNumber: shotNum, prompt: customPrompt || undefined };
+  }
 
   // Video edits require an explicit object and colour; tracking never implies recolouring.
   if (/^(?:modify|recolou?r|track)\s+video\b/.test(lower)) {
@@ -98,19 +207,42 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
     return { kind: 'fix', shotNumber: shotNumberIn(lower), color: color ? COLOR_MAP[color] : undefined };
   }
 
-  // "make the car red in shot 2", "turn the cup to blue", "recolor the umbrella in shot 3 to amber"
+  // "make the car red in shot 2", "turn the cup to blue", "recolor the umbrella in shot 3 to amber",
+  // "in shot 2 change the coffee cup to red"
+  const leadShot = `(?:in\\s+(?:shot|scene|frame)\\s*#?\\s*(${NUMBERS})\\s*,?\\s*)?`;
   const shotClause = `(?:\\s+in\\s+(?:shot|scene|frame)\\s*#?\\s*(${NUMBERS}))?`;
-  const direct = lower.match(new RegExp(`^(?:make|turn|change|paint)\\s+(?:the\\s+)?([a-z-]+)\\s+(${COLORS})${shotClause}\\b`));
-  if (direct)
-    return { kind: 'recolor', object: cleanObject(direct[1]), color: COLOR_MAP[direct[2]], shotNumber: toShot(direct[3]) ?? shotNumberIn(lower) };
-  const toColour = lower.match(new RegExp(`^(?:recolou?r|change|turn|make|paint)\\s+(?:the\\s+)?([a-z-]+)?${shotClause}\\s*(?:to|into)\\s+(${COLORS})\\b`));
-  if (toColour)
+  const objPhrase = `([a-z-]+(?:\\s+(?!to\\b|into\\b|with\\b|in\\b|${COLORS}\\b)[a-z-]+)?)`;
+  const direct = lower.match(new RegExp(`^${leadShot}(?:make|turn|change|paint)\\s+(?:the\\s+)?${objPhrase}\\s+(${COLORS})${shotClause}\\b`));
+  if (direct && !SCENE_LEVEL_NOUNS.has(normalizeVoiceObject(direct[2])))
     return {
       kind: 'recolor',
-      object: toColour[1] ? cleanObject(toColour[1]) : undefined,
-      color: COLOR_MAP[toColour[3]],
-      shotNumber: toShot(toColour[2]) ?? shotNumberIn(lower),
+      object: normalizeVoiceObject(direct[2]),
+      color: COLOR_MAP[direct[3]],
+      shotNumber: toShot(direct[1]) ?? toShot(direct[4]) ?? shotNumberIn(lower),
     };
+  const toColour = lower.match(new RegExp(`^${leadShot}(?:recolou?r|change|turn|make|paint|set|switch|swap)\\s+(?:the\\s+)?(?:${objPhrase}\\s*)?${shotClause}\\s*(?:to|into|with)\\s+(?:a\\s+|an\\s+)?(${COLORS})(?:\\s+[a-z-]+)?${shotClause}\\b`));
+  if (toColour && (!toColour[2] || !SCENE_LEVEL_NOUNS.has(normalizeVoiceObject(toColour[2]))))
+    return {
+      kind: 'recolor',
+      object: toColour[2] ? normalizeVoiceObject(toColour[2]) : undefined,
+      color: COLOR_MAP[toColour[4]],
+      shotNumber: toShot(toColour[1]) ?? toShot(toColour[3]) ?? toShot(toColour[5]) ?? shotNumberIn(lower),
+    };
+
+  // Spoken object replacement/editing: "replace the cup with a lantern in shot 2", "edit the jacket to a leather coat"
+  const objectEdit = lower.match(new RegExp(`^${leadShot}(?:replace|swap|edit)\\s+(?:the\\s+)?${objPhrase}${shotClause}\\s+(?:with|into|to)\\s+(.+?)${shotClause}$`));
+  if (objectEdit) {
+    const targetObj = normalizeVoiceObject(objectEdit[2]);
+    if (!SCENE_LEVEL_NOUNS.has(targetObj)) {
+      const promptText = objectEdit[4].replace(new RegExp(`\\s+in\\s+(?:shot|scene|frame)\\s*#?\\s*(${NUMBERS})$`, 'i'), '').trim();
+      const maybeColor = COLOR_MAP[promptText];
+      const shotNum = toShot(objectEdit[1]) ?? toShot(objectEdit[3]) ?? toShot(objectEdit[5]) ?? shotNumberIn(lower);
+      if (maybeColor) {
+        return { kind: 'recolor', object: targetObj, color: maybeColor, shotNumber: shotNum };
+      }
+      return { kind: 'generative_edit', object: targetObj, prompt: promptText, shotNumber: shotNum };
+    }
+  }
 
   // "segment the cup", "detect the car in scene 2", "select umbrella in shot 1"
   const segment = lower.match(new RegExp(`^(?:segment|detect|select|find|track)\\s+(?:the\\s+)?([a-z0-9_-]+)${shotClause}`));

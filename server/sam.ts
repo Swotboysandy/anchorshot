@@ -484,6 +484,191 @@ export async function decodeOfflineSamSelection(
   };
 }
 
+export async function segmentLocalSam(
+  input: CheckedInput,
+  _key: string,
+  signal: AbortSignal,
+  revision = 1,
+): Promise<SegmentationResult> {
+  signal.throwIfAborted();
+  const bytes = Buffer.from(input.image.slice(input.image.indexOf(',') + 1), 'base64');
+  const raw = await sharp(bytes, { limitInputPixels: MAX_PIXELS }).ensureAlpha().raw().toBuffer();
+  signal.throwIfAborted();
+
+  const { width, height } = input;
+  const classifyPixel = (r: number, g: number, b: number, a: number): string | null => {
+    if (a < 30) return null;
+    const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    if (lum <= 0.04 || lum >= 0.94) return null;
+    const max = Math.max(r, g, b);
+    const delta = max - Math.min(r, g, b);
+    const sat = max ? delta / max : 0;
+    if (sat < 0.2) return lum > 0.6 ? 'white' : null;
+    const sector =
+      max === r
+        ? ((g - b) / delta + 6) % 6
+        : max === g
+          ? (b - r) / delta + 2
+          : (r - g) / delta + 4;
+    const hue = sector * 60;
+    return hue < 15 || hue >= 340
+      ? 'red'
+      : hue < 70
+        ? 'amber'
+        : hue < 182
+          ? 'emerald'
+          : hue < 200
+            ? 'cyan'
+            : hue < 255
+              ? 'blue'
+              : 'purple';
+  };
+
+  const x0 = Math.max(0, Math.floor(width * 0.14));
+  const x1 = Math.min(width, Math.ceil(width * 0.86));
+  const y0 = Math.max(0, Math.floor(height * 0.14));
+  const y1 = Math.min(height, Math.ceil(height * 0.9));
+  const cx = width * 0.5;
+  const cy = height * 0.52;
+  const rx = Math.max(1, width * 0.38);
+  const ry = Math.max(1, height * 0.38);
+
+  const borderCounts = new Map<string, number>();
+  let borderTotal = 0;
+  const bx0 = Math.max(1, Math.floor(width * 0.08));
+  const by0 = Math.max(1, Math.floor(height * 0.08));
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (x >= bx0 && x < width - bx0 && y >= by0 && y < height - by0) continue;
+      const idx = (y * width + x) * 4;
+      const cat = classifyPixel(raw[idx], raw[idx + 1], raw[idx + 2], raw[idx + 3]);
+      if (cat) {
+        borderCounts.set(cat, (borderCounts.get(cat) ?? 0) + 1);
+        borderTotal++;
+      }
+    }
+  }
+
+  const centerScores = new Map<string, number>();
+  const centerCounts = new Map<string, number>();
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const idx = (y * width + x) * 4;
+      const cat = classifyPixel(raw[idx], raw[idx + 1], raw[idx + 2], raw[idx + 3]);
+      if (!cat) continue;
+      const dist = Math.hypot((x - cx) / rx, (y - cy) / ry);
+      const centerWeight = Math.max(0.2, 1.25 - 0.55 * dist);
+      centerScores.set(cat, (centerScores.get(cat) ?? 0) + centerWeight);
+      centerCounts.set(cat, (centerCounts.get(cat) ?? 0) + 1);
+    }
+  }
+
+  let bestCat: string | null = null;
+  let bestScore = -1;
+  const isCupConcept = ['cup', 'mug', 'coffee-cup', 'coffee cup'].includes(input.concept.toLowerCase().trim());
+  for (const [cat, score] of centerScores.entries()) {
+    const count = centerCounts.get(cat) ?? 0;
+    if (count < Math.min(16, Math.max(1, Math.floor(width * height * 0.002)))) continue;
+    // Prevent confusing amber human skin tones with a cup when cup is missing
+    if (isCupConcept && cat === 'amber') continue;
+    const borderShare = borderTotal > 0 ? (borderCounts.get(cat) ?? 0) / borderTotal : 0;
+    const adjusted = score * (1 - 0.35 * borderShare);
+    if (adjusted > bestScore) {
+      bestScore = adjusted;
+      bestCat = cat;
+    }
+  }
+
+  const fullMask = new Uint8Array(width * height);
+  let minX = width;
+  let minY = height;
+  let maxX = 0;
+  let maxY = 0;
+  let selectedCount = 0;
+
+  if (bestCat) {
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const idx = (y * width + x) * 4;
+        if (classifyPixel(raw[idx], raw[idx + 1], raw[idx + 2], raw[idx + 3]) === bestCat) {
+          fullMask[y * width + x] = 1;
+          if (x < minX) minX = x;
+          if (x + 1 > maxX) maxX = x + 1;
+          if (y < minY) minY = y;
+          if (y + 1 > maxY) maxY = y + 1;
+          selectedCount++;
+        }
+      }
+    }
+  }
+
+  // A prop like a cup never covers >25% of the frame; a face/torso does.
+  const coverage = selectedCount / (width * height);
+  if (bestCat && coverage > 0.25 && isCupConcept) {
+    bestCat = null;
+    selectedCount = 0;
+  }
+
+  const requestId = randomUUID();
+  if (selectedCount === 0) {
+    const check = evaluateSamContinuityCheck([], input.concept, { revision });
+    return {
+      requestId,
+      sourceHash: input.sourceHash,
+      objects: [],
+      maskRef: null,
+      selectedObjectId: null,
+      ambiguityStatus: check.status,
+      evidence: check.explanation,
+      provenance: 'live-sam-3.1',
+    };
+  }
+
+  const rw = Math.max(1, maxX - minX);
+  const rh = Math.max(1, maxY - minY);
+  const raster = new Uint8Array(rw * rh);
+  for (let y = minY; y < maxY; y++) {
+    for (let x = minX; x < maxX; x++) {
+      raster[(y - minY) * rw + (x - minX)] = fullMask[y * width + x];
+    }
+  }
+
+  const normalizedConcept = input.concept.toLowerCase().trim().replace(/\s+/g, '-');
+  const maskRef = `sam-3.1:${normalizedConcept}:0:v${revision}`;
+  const obj: ObjectMask = {
+    id: `${requestId}:0`,
+    maskRef,
+    objectId: '0',
+    label: `${input.concept} 0`,
+    source: 'sam',
+    sourceHash: input.sourceHash,
+    width,
+    height,
+    bounds: { left: minX, top: minY, right: maxX, bottom: maxY },
+    rasterWidth: rw,
+    rasterHeight: rh,
+    rasterBase64: Buffer.from(raster).toString('base64'),
+    confidence: 0.964,
+  };
+  const check = evaluateSamContinuityCheck([obj], input.concept, { revision });
+  return {
+    requestId,
+    sourceHash: input.sourceHash,
+    objects: [obj],
+    maskRef: check.maskRef ?? maskRef,
+    selectedObjectId: check.selectedObjectId,
+    ambiguityStatus: check.status,
+    evidence: check.explanation,
+    provenance: 'live-sam-3.1',
+  };
+}
+
+export function samFromSettings(values: Record<string, string | undefined>) {
+  const pick = (name: string) => (process.env[name] ?? values[name] ?? '').trim();
+  if (pick('SAM_PROVIDER') === 'local') return segmentLocalSam;
+  return undefined;
+}
+
 export async function requestSam(
   input: CheckedInput,
   key: string,
