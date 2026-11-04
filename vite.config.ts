@@ -42,7 +42,8 @@ function anchorShotSamApiPlugin(): Plugin {
         ]);
       const apiApp = createApp({
         settings: () => ({
-          key: (process.env.META_API_KEY || localEnv.META_API_KEY || process.env.SAM_PROVIDER || localEnv.SAM_PROVIDER || '').trim(),
+          key: (process.env.META_API_KEY ?? localEnv.META_API_KEY ?? '').trim(),
+          samProvider: (process.env.SAM_PROVIDER ?? localEnv.SAM_PROVIDER ?? '').trim().toLowerCase() || undefined,
           requestLimit,
         }),
         segment: samFromSettings(localEnv),

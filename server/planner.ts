@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { ANGLES, COLOR_TEMPS, LENSES, LIGHTS, MOVEMENTS, normalizeCast, normalizeShot, SHOT_SIZES, type CastMember, type ShotSpec } from '../src/lib/shotLanguage';
+import { resolveUpstreamChatModel } from './models';
 
 /**
  * Shot-planning role behind `/api/muse/spark`. Prompts and the rule schema live
@@ -142,8 +143,9 @@ type Chat = Pick<OpenAI['chat']['completions'], 'create'>;
  * Any OpenAI-compatible chat model. An invalid reply is sent back once with the
  * validation error, then the request fails instead of guessing.
  */
-export function chatPlanner(options: { model: string; chat: Chat; attempts?: number }): Planner {
+export function chatPlanner(options: { model: string; upstreamModel?: string; chat: Chat; attempts?: number }): Planner {
   const attempts = options.attempts ?? 2;
+  const targetModel = options.upstreamModel ?? options.model;
   return {
     async plan(transcript, revision, signal, beforeRetry) {
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -154,7 +156,7 @@ export function chatPlanner(options: { model: string; chat: Chat; attempts?: num
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (attempt > 0) beforeRetry?.();
         const reply = await options.chat.create(
-          { model: options.model, messages, temperature: 0 },
+          { model: targetModel, messages, temperature: 0 },
           { signal },
         );
         const text = reply.choices[0]?.message?.content ?? '';
@@ -184,6 +186,7 @@ export function plannerFromSettings(values: Record<string, string | undefined>):
   if (pick('PLANNER_PROVIDER') !== 'openai-compatible') return fixturePlanner;
   const [baseURL, apiKey, model] = ['PLANNER_BASE_URL', 'PLANNER_API_KEY', 'PLANNER_MODEL'].map(pick);
   if (!baseURL || !apiKey || !model) return fixturePlanner;
+  const upstreamModel = resolveUpstreamChatModel(baseURL, model, values);
   const client = new OpenAI({ baseURL, apiKey, maxRetries: 0, timeout: 60_000 });
-  return chatPlanner({ model, chat: client.chat.completions });
+  return chatPlanner({ model, upstreamModel, chat: client.chat.completions });
 }

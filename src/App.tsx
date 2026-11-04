@@ -18,7 +18,7 @@ import {
 import { applyVideoFindingsToShots, DIRECTOR_PRESETS, metaModelClient } from './services/metaModels';
 import { speechService } from './services/speechService';
 import { exportAnimaticMp4 } from './services/animaticExport';
-import { parseVoiceCommand } from './services/voiceCommandParser';
+import { normalizeVoiceObject, parseVoiceCommand, resolveVoiceColor } from './services/voiceCommandParser';
 import { speechRecognitionService } from './services/speechRecognitionService';
 import {
   exportStoryboardAnimaticVideo,
@@ -241,22 +241,25 @@ export default function App() {
           const plannedCount = (error as { plannedCount?: number })?.plannedCount;
           const isLimit = /session request limit/i.test(rawMsg);
 
-          // Always preserve the user's submitted prompt in the composer on failure
+          // Preserve the user's submitted prompt in the composer on failure without overwriting new typing
           if (preservedUserPrompt) {
-            setDirectionDraft(preservedUserPrompt);
+            setDirectionDraft((prev) => (prev.trim() ? prev : preservedUserPrompt));
           }
+
+          const canApplyPartials = Boolean(partialShots && partialShots.length > 0 && currentProjectRef.current.shots.length === 0);
 
           if (isLimit) {
             setSceneEditError({
               kind: 'session_limit',
               title: 'Session request limit reached',
               explanation:
-                partialShots && partialShots.length > 0
-                  ? `Rendered ${partialShots.length} of ${plannedCount ?? 4} scenes before this session's safety request limit was reached. Those ${partialShots.length} scenes were kept in your storyboard and saved to Generation History, and your prompt ("${preservedUserPrompt}") has been preserved above.`
-                  : `This session reached its safety request allowance before your edit could be completed. Your prompt ("${preservedUserPrompt}") has been preserved in the input box above so you don't lose your work.`,
+                canApplyPartials
+                  ? `Rendered ${partialShots!.length} of ${plannedCount ?? 4} scenes before this session's safety request limit was reached. Those ${partialShots!.length} scenes were kept in your storyboard and saved to Generation History, and your prompt has been preserved in the input box above.`
+                  : `This session reached its safety request allowance before your edit could be completed. Your existing storyboard was kept intact and your prompt has been preserved in the input box above.`,
               nextStep:
                 'Click "Reset limit & retry edit" to reset the session allowance and run your preserved prompt immediately, or open Generation History to revisit earlier versions.',
               preservedPrompt: preservedUserPrompt,
+              retryMode: injectDiscrepancy ? 'generate' : 'command',
               partialShotsCount: partialShots?.length,
               plannedShotsCount: plannedCount,
             });
@@ -264,30 +267,36 @@ export default function App() {
             setSceneEditError({
               kind: 'generation_error',
               title: 'Scene edit could not be completed',
-              explanation: `${rawMsg} Your prompt ("${preservedUserPrompt}") has been preserved in the input box above.`,
+              explanation: `${rawMsg} Your prompt has been preserved in the input box above.`,
               nextStep:
                 'Click "Retry edit" to try again with your preserved prompt, or open Generation History to select an earlier version.',
               preservedPrompt: preservedUserPrompt,
+              retryMode: injectDiscrepancy ? 'generate' : 'command',
             });
           }
 
           const message =
-            partialShots && partialShots.length > 0
-              ? `Rendered ${partialShots.length} of ${plannedCount ?? 4} scenes before the session request limit was reached. Your prompt is preserved; reset the limit to continue.`
+            canApplyPartials
+              ? isLimit
+                ? `Rendered ${partialShots!.length} of ${plannedCount ?? 4} scenes before the session request limit was reached. Your prompt is preserved; reset the limit to continue.`
+                : `Rendered ${partialShots!.length} of ${plannedCount ?? 4} scenes before an error occurred: ${rawMsg}`
               : `Film generation failed: ${rawMsg}`;
           speechService.playEarcon('mismatch');
-          setProjectState((prev) => ({
-            ...prev,
-            transcript: partialShots && partialShots.length > 0 ? targetTranscript : previousTranscript,
-            shots: partialShots && partialShots.length > 0 ? partialShots : prev.shots,
-            rules: partialShots && partialShots.length > 0 && partialRules ? partialRules : prev.rules,
-            activeShotId:
-              partialShots && partialShots.length > 0
-                ? partialShots[0]?.id ?? prev.activeShotId
-                : prev.activeShotId,
-            isProcessing: false,
-            statusAnnouncement: message,
-          }));
+          setProjectState((prev) => {
+            const usePartials = Boolean(partialShots && partialShots.length > 0 && prev.shots.length === 0);
+            return {
+              ...prev,
+              transcript: usePartials ? targetTranscript : previousTranscript,
+              shots: usePartials ? partialShots! : prev.shots,
+              rules: usePartials && partialRules ? partialRules : prev.rules,
+              activeShotId:
+                usePartials
+                  ? partialShots![0]?.id ?? prev.activeShotId
+                  : prev.activeShotId,
+              isProcessing: false,
+              statusAnnouncement: message,
+            };
+          });
           speechService.speak(message, true);
           return message;
         }
@@ -591,24 +600,66 @@ export default function App() {
     const shot = shotNumber ? source.shots.find((s) => s.shotNumber === shotNumber) : source.shots.find((s) => s.id === source.activeShotId) ?? source.shots[0];
     if (!shot) return shotNumber ? `There is no shot ${shotNumber}.` : 'There is no shot to edit yet.';
     if (source.isProcessing) return 'Wait for the current operation to finish.';
+    const targetObject = normalizeVoiceObject(object) || object.trim().toLowerCase();
     const sourceImage = shot.currentImageUrl;
     const unchanged = (state: ProjectState) => state.projectId === source.projectId && state.shots.find((s) => s.id === shot.id)?.currentImageUrl === sourceImage;
-    setProjectState((prev) => ({ ...prev, isProcessing: true, activeShotId: shot.id, statusAnnouncement: `Finding the ${object} in Shot ${shot.shotNumber}...` }));
+    setProjectState((prev) => ({ ...prev, isProcessing: true, activeShotId: shot.id, statusAnnouncement: `Finding the ${targetObject} in Shot ${shot.shotNumber}...` }));
     try {
-      const mask = await metaModelClient.segmentObjectWithSam3(shot.shotNumber, object, undefined, undefined, 1, sourceImage);
-      if (mask.provenance !== 'live-sam-3.1' || !mask.maskBase64) throw new Error(`The ${object} could not be found in Shot ${shot.shotNumber}. Nothing was changed.`);
-      setProjectState((prev) => ({ ...prev, statusAnnouncement: `Changing the ${object} in Shot ${shot.shotNumber}...` }));
-      const res = await metaModelClient.editFrameGenerative(sourceImage, `${instruction}. Change only the ${object}. Keep the rest of the image identical.`, mask.maskBase64);
+      const voiceColor = resolveVoiceColor(instruction);
+      const revision = (source.rules.find((r) => r.targetObject === targetObject && r.property === 'color')?.revision ?? 0) + 1;
+      const mask = await metaModelClient.segmentObjectWithSam3(shot.shotNumber, targetObject, undefined, undefined, revision, sourceImage);
+      if ((!isGeneratedShot(shot) ? !mask.maskBase64 : mask.provenance !== 'live-sam-3.1' || !mask.maskBase64)) {
+        throw new Error(`The ${targetObject} could not be found in Shot ${shot.shotNumber}. Nothing was changed.`);
+      }
+      setProjectState((prev) => ({ ...prev, statusAnnouncement: `Changing the ${targetObject} in Shot ${shot.shotNumber}...` }));
+
+      // Try generative object inpainting first when not a pure colour change; if no remote imager is connected,
+      // or when a colour change was requested, apply SAM 3.1 masked pixel recolouring with 0 outside-mask drift.
+      if (!voiceColor) {
+        try {
+          const res = await metaModelClient.editFrameGenerative(
+            sourceImage,
+            `${instruction}. Change only the ${targetObject}. Keep the rest of the image identical.`,
+            mask.maskBase64
+          );
+          if (!unchanged(currentProjectRef.current)) return 'The shot changed during the edit, so the result was not applied.';
+          const message = `Changed the ${targetObject} in Shot ${shot.shotNumber}. ${res.outsideDrift} pixels outside it changed. Continuity needs review.`;
+          setProjectState((prev) => !unchanged(prev) ? prev : {
+            ...prev,
+            statusAnnouncement: message,
+            shots: prev.shots.map((s) => s.id !== shot.id ? s : {
+              ...s, currentImageUrl: res.editedImageUrl, status: 'uncertain', mediaSource: 'generated',
+              videoUrl: undefined, generatedJobId: undefined, videoMaskPlan: undefined, detectedObjects: undefined, proposedFix: undefined, discrepancyMessage: undefined,
+              revisions: [...s.revisions, { revisionId: `voice-edit-${Date.now()}`, timestamp: Date.now(), imageUrl: res.editedImageUrl, mediaSource: 'generated', actionApplied: `Object edit: ${targetObject}, ${instruction}; continuity unreviewed` }],
+            }),
+          });
+          speechService.playEarcon('fixApplied');
+          return message;
+        } catch (genErr) {
+          if (!/No image model is connected/i.test((genErr as Error).message ?? '')) {
+            throw genErr;
+          }
+        }
+      }
+
+      const resolvedColor = voiceColor ?? 'amber';
+      const shotWithProposal: StoryboardShot = {
+        ...shot,
+        proposedFix: {
+          action: 'recolor',
+          targetObject,
+          targetColor: resolvedColor,
+          mask: { ...mask, candidateCount: 1 },
+        },
+      };
+      const updated = await metaModelClient.applyContinuityFix(shotWithProposal, resolvedColor, revision);
       if (!unchanged(currentProjectRef.current)) return 'The shot changed during the edit, so the result was not applied.';
-      const message = `Changed the ${object} in Shot ${shot.shotNumber}. ${res.outsideDrift} pixels outside it changed. Continuity needs review.`;
+      const outsideDrift = updated.pixelVerification?.changedOutside ?? 0;
+      const message = `Changed the ${targetObject} to ${resolvedColor} in Shot ${shot.shotNumber}. ${outsideDrift} pixels outside the mask changed.`;
       setProjectState((prev) => !unchanged(prev) ? prev : {
         ...prev,
         statusAnnouncement: message,
-        shots: prev.shots.map((s) => s.id !== shot.id ? s : {
-          ...s, currentImageUrl: res.editedImageUrl, status: 'uncertain', mediaSource: 'generated',
-          videoUrl: undefined, generatedJobId: undefined, videoMaskPlan: undefined, detectedObjects: undefined, proposedFix: undefined, discrepancyMessage: undefined,
-          revisions: [...s.revisions, { revisionId: `voice-edit-${Date.now()}`, timestamp: Date.now(), imageUrl: res.editedImageUrl, mediaSource: 'generated', actionApplied: `Object edit: ${object}, ${instruction}; continuity unreviewed` }],
-        }),
+        shots: prev.shots.map((s) => (s.id === updated.id ? updated : s)),
       });
       speechService.playEarcon('fixApplied');
       return message;
@@ -949,7 +1000,49 @@ export default function App() {
           const candidates = intent.shotNumber
             ? reaudited.filter((s) => s.id === targetShot.id)
             : reaudited.filter((s) => s.status === 'mismatch');
-          const targets = candidates.filter((s) => s.proposedFix?.targetObject === targetObject && !isLocalImage(s.currentImageUrl));
+          let targets = candidates.filter(
+            (s) =>
+              s.proposedFix?.targetObject === targetObject &&
+              (!isGeneratedShot(s) || s.proposedFix?.mask?.provenance === 'live-sam-3.1')
+          );
+
+          const revision = (projectState.rules.find(rule => rule.targetObject === targetObject && rule.property === 'color')?.revision ?? 0) + 1;
+
+          // When the user explicitly asks to change an object's colour by voice (e.g. "change the jacket to red"),
+          // ensure the target shot's object is segmented and recoloured even if it wasn't previously flagged as a mismatch.
+          if (!targets.length && targetShot) {
+            const refreshedTarget = reaudited.find((s) => s.id === targetShot.id) ?? targetShot;
+            try {
+              const directMask =
+                refreshedTarget.proposedFix?.mask?.maskBase64 &&
+                refreshedTarget.proposedFix.targetObject === targetObject
+                  ? refreshedTarget.proposedFix.mask
+                  : await metaModelClient.segmentObjectWithSam3(
+                      refreshedTarget.shotNumber,
+                      targetObject,
+                      undefined,
+                      undefined,
+                      revision,
+                      refreshedTarget.currentImageUrl
+                    );
+              if (directMask.maskBase64 && (!isGeneratedShot(refreshedTarget) || directMask.provenance === 'live-sam-3.1')) {
+                targets = [
+                  {
+                    ...refreshedTarget,
+                    proposedFix: {
+                      action: 'recolor',
+                      targetObject,
+                      targetColor: intent.color,
+                      mask: { ...directMask, candidateCount: 1 },
+                    },
+                  },
+                ];
+              }
+            } catch {
+              // Keep targets empty if segmentation fails
+            }
+          }
+
           const unconfirmed = reaudited.filter((s) => s.status === 'uncertain').length;
           if (!targets.length) {
             announceStatus(
@@ -959,7 +1052,6 @@ export default function App() {
             return;
           }
 
-          const revision = (projectState.rules.find(rule => rule.targetObject === targetObject && rule.property === 'color')?.revision ?? 0) + 1;
           setShowBeforeComparison(false);
           setProjectState((prev) => ({ ...prev, isProcessing: true }));
           let recoloured = 0;
@@ -1030,23 +1122,32 @@ export default function App() {
         }
 
         case 'generative_edit': {
-          const targetShot = activeShot || projectState.shots[0];
+          const targetShot =
+            (intent.shotNumber
+              ? projectState.shots.find((s) => s.shotNumber === intent.shotNumber)
+              : null) || activeShot || projectState.shots[0];
           if (!targetShot) {
             announceStatus('No shot selected for generative edit.', true);
+            return;
+          }
+          if (intent.object && targetShot.proposedFix?.mask?.objectId !== intent.object) {
+            const reply = await handleEditObject(intent.object, intent.prompt, intent.shotNumber ?? targetShot.shotNumber);
+            announceStatus(reply, true);
             return;
           }
           try {
             await handleGenerativeEdit(targetShot.id, intent.prompt, intent.object);
           } catch (error) {
             const rawMsg = error instanceof Error ? error.message : String(error);
-            setDirectionDraft(trimmed);
+            setDirectionDraft((prev) => (prev.trim() ? prev : trimmed));
             if (/session request limit/i.test(rawMsg)) {
               setSceneEditError({
                 kind: 'session_limit',
                 title: 'Session request limit reached',
-                explanation: `This session reached its safety request allowance before your edit could be completed. Your prompt ("${trimmed}") has been preserved in the input box above.`,
+                explanation: 'This session reached its safety request allowance before your edit could be completed. Your prompt has been preserved in the input box above.',
                 nextStep: 'Click "Reset limit & retry edit" to reset the session allowance and run your preserved prompt immediately.',
                 preservedPrompt: trimmed,
+                retryMode: 'command',
               });
             }
             // Inspector callers consume the rejection themselves; commands must do so too.
@@ -1068,21 +1169,26 @@ export default function App() {
 
         case 'rebuild':
         default: {
-          const updatedTranscript = `${projectState.transcript} ${intent.transcript}`.trim();
+          const baseTranscript = projectState.transcript.trim();
+          const addition = intent.transcript.trim();
+          const updatedTranscript = baseTranscript.endsWith(addition)
+            ? baseTranscript
+            : `${baseTranscript} ${addition}`.trim();
           await handleRebuildFromTranscript(false, updatedTranscript, trimmed);
           return;
         }
       }
       } catch (error) {
         const rawMsg = error instanceof Error ? error.message : String(error);
-        setDirectionDraft(trimmed);
+        setDirectionDraft((prev) => (prev.trim() ? prev : trimmed));
         if (/session request limit/i.test(rawMsg)) {
           setSceneEditError({
             kind: 'session_limit',
             title: 'Session request limit reached',
-            explanation: `This session reached its safety request allowance before your edit could be completed. Your prompt ("${trimmed}") has been preserved in the input box above.`,
+            explanation: 'This session reached its safety request allowance before your edit could be completed. Your prompt has been preserved in the input box above.',
             nextStep: 'Click "Reset limit & retry edit" to reset the session allowance and run your preserved prompt immediately.',
             preservedPrompt: trimmed,
+            retryMode: 'command',
           });
         }
         // Button submissions do not await this callback; consume failed rule/audit
@@ -1103,6 +1209,7 @@ export default function App() {
       handleRunFullAudit,
       handleSegmentObjectManual,
       handleGenerativeEdit,
+      handleEditObject,
       handleUseLocalVideo,
       projectState.projectId,
       announceStatus,
@@ -1112,13 +1219,18 @@ export default function App() {
   // Reset the session request limit and optionally immediately retry a preserved prompt
   const handleResetSessionLimit = useCallback(
     async (retryPrompt?: string) => {
+      const retryMode = sceneEditError?.retryMode;
       try {
         const res = await metaModelClient.resetSessionRequestLimit();
         setSceneEditError(null);
         const toRun = retryPrompt?.trim();
         if (toRun) {
           setDirectionDraft('');
-          await handleExecuteVoiceCommand(toRun);
+          if (retryMode === 'generate') {
+            await handleRebuildFromTranscript(true, toRun, toRun);
+          } else {
+            await handleExecuteVoiceCommand(toRun);
+          }
         } else {
           announceStatus(
             `Session request limit reset (0 of ${res.requestLimit} requests used). Your preserved prompt is ready to run.`,
@@ -1132,7 +1244,7 @@ export default function App() {
         );
       }
     },
-    [announceStatus, handleExecuteVoiceCommand]
+    [announceStatus, handleExecuteVoiceCommand, handleRebuildFromTranscript, sceneEditError?.retryMode]
   );
 
   // Revisit an individual generation from GenerationHistoryPanel

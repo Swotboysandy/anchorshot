@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { getCanonicalMetaModels, resolveUpstreamChatModel } from './models';
 
 /**
  * Voice co-director behind `/api/agent/turn`: one model turn over the conversation
@@ -91,12 +92,13 @@ export const AGENT_TOOLS = [
 
 type Chat = Pick<OpenAI['chat']['completions'], 'create'>;
 
-export function chatAgent(options: { model: string; chat: Chat }): VoiceAgent {
+export function chatAgent(options: { model: string; upstreamModel?: string; chat: Chat }): VoiceAgent {
+  const targetModel = options.upstreamModel ?? options.model;
   return {
     model: options.model,
     async turn(messages, signal) {
       const reply = await options.chat.create(
-        { model: options.model, messages: [{ role: 'system', content: AGENT_PROMPT }, ...messages], tools: AGENT_TOOLS },
+        { model: targetModel, messages: [{ role: 'system', content: AGENT_PROMPT }, ...messages], tools: AGENT_TOOLS },
         { signal },
       );
       const message = reply.choices[0]?.message;
@@ -113,8 +115,10 @@ export function agentFromSettings(values: Record<string, string | undefined>): V
   if (provider !== 'meta' && provider !== 'openai-compatible') return undefined;
   const apiKey = provider === 'meta' ? pick('META_API_KEY') : pick('AGENT_API_KEY');
   const baseURL = provider === 'meta' ? pick('META_API_BASE_URL') || 'https://api.meta.ai/v1' : pick('AGENT_BASE_URL');
-  const model = pick('AGENT_MODEL') || (provider === 'meta' ? 'muse-spark-1.3' : '');
+  const canonicalSpark = getCanonicalMetaModels(values).spark;
+  const model = pick('AGENT_MODEL') || (provider === 'meta' ? canonicalSpark : '');
   if (!apiKey || !baseURL || !model) return undefined;
+  const upstreamModel = resolveUpstreamChatModel(baseURL, model, values);
   const client = new OpenAI({ baseURL, apiKey, maxRetries: 0, timeout: 60_000 });
-  return chatAgent({ model, chat: client.chat.completions });
+  return chatAgent({ model, upstreamModel, chat: client.chat.completions });
 }

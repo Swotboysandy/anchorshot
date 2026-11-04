@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import sharp from 'sharp';
+import { createHash } from 'node:crypto';
 import { createApp } from '../server/app';
-import { MetaModelClient } from '../src/services/metaModels';
+import { getCanonicalMetaModels, resolveUpstreamChatModel } from '../server/models';
+import { chatPlanner } from '../server/planner';
+import { chatAgent } from '../server/agent';
+import { openAiTranscriber } from '../server/transcriber';
+import { MetaModelClient, getMetaApiEnvConfig } from '../src/services/metaModels';
+import { parseVoiceCommand, resolveVoiceColor, normalizeVoiceObject } from '../src/services/voiceCommandParser';
 import {
   describeGenerationPrompt,
   formatGenerationTimestamp,
@@ -45,10 +52,62 @@ describe('session request limit handling and reset', () => {
       .post('/api/session/reset')
       .set('X-Anchorshot-Session', health.sessionToken);
     expect(resetRes.status).toBe(200);
-    expect(resetRes.body).toEqual({ ok: true, requestsUsed: 0, requestLimit: 1 });
+    expect(resetRes.body).toEqual({
+      ok: true,
+      requestsUsed: 0,
+      requestLimit: 1,
+      resetsRemaining: 4,
+    });
 
     expect((await postVideo()).status).toBe(200);
     expect(generate).toHaveBeenCalledTimes(2);
+  });
+
+  it('exempts SAM_PROVIDER=local from consuming cloud session requests even when META_API_KEY is set', async () => {
+    const png = await sharp({
+      create: { width: 8, height: 8, channels: 4, background: '#2255cc' },
+    })
+      .png()
+      .toBuffer();
+    const image = `data:image/png;base64,${png.toString('base64')}`;
+    const sourceHash = createHash('sha256').update(png).digest('hex');
+    const segment = vi.fn().mockResolvedValue({
+      requestId: 'local-req',
+      concept: 'cup',
+      width: 8,
+      height: 8,
+      sourceHash,
+      provenance: 'live-sam-3.1',
+      objects: [
+        {
+          objectId: '0',
+          label: 'cup',
+          score: 0.96,
+          bounds: { x: 0.1, y: 0.1, width: 0.5, height: 0.5 },
+          mask: `data:image/png;base64,${png.toString('base64')}`,
+          maskRef: 'sam-3.1:cup:0:v1',
+        },
+      ],
+    });
+    const app = createApp({
+      settings: () => ({ key: 'cloud-key', samProvider: 'local', requestLimit: 0 }),
+      segment,
+    });
+    const health = (await request(app).get('/api/health')).body;
+    expect(health.configured).toBe(true);
+
+    const segRes = await request(app)
+      .post('/api/segment')
+      .set('X-Anchorshot-Session', health.sessionToken)
+      .send({ image, concept: 'cup', sourceHash });
+    expect(segRes.status).toBe(200);
+
+    const checkRes = await request(app)
+      .post('/api/segment/check')
+      .set('X-Anchorshot-Session', health.sessionToken)
+      .send({ image, concept: 'cup', sourceHash, shotNumber: 1, ruleRevision: 1 });
+    expect(checkRes.status).toBe(200);
+    expect(segment).toHaveBeenCalledTimes(2);
   });
 
   it('preserves completed partial shots when a multi-shot film hits the session request limit on a later shot', async () => {
@@ -181,5 +240,106 @@ describe('generation history descriptive naming, timestamps, and sequence groupi
     expect(sequences[0].entries).toHaveLength(3);
     expect(sequences[0].entries[0].subject).toBe('Jen and the courier outside');
     expect(sequences[0].entries[2].subject).toBe('The courier handing Jen a package');
+  });
+});
+
+describe('OpenRouter and canonical Meta model ID consistency', () => {
+  it('exposes the 4 canonical Meta model IDs consistently across server and client config', () => {
+    const serverModels = getCanonicalMetaModels({
+      VITE_MUSE_VOICE_MODEL: 'muse-voice-transcribe-1.0',
+      VITE_MUSE_SPARK_MODEL: 'muse-spark-1.3',
+      VITE_MUSE_IMAGE_MODEL: 'muse-image-1.0',
+      VITE_SAM3_MODEL: 'sam-3.1',
+    });
+    expect(serverModels).toEqual({
+      voice: 'muse-voice-transcribe-1.0',
+      spark: 'muse-spark-1.3',
+      image: 'muse-image-1.0',
+      sam: 'sam-3.1',
+    });
+
+    const clientModels = getMetaApiEnvConfig().models;
+    expect(clientModels).toEqual({
+      voiceTranscribe: 'muse-voice-transcribe-1.0',
+      spark: 'muse-spark-1.3',
+      image: 'muse-image-1.0',
+      sam: 'sam-3.1',
+    });
+  });
+
+  it('routes OpenRouter requests using the upstream Llama slug while reporting canonical Meta model IDs', async () => {
+    expect(
+      resolveUpstreamChatModel('https://openrouter.ai/api/v1', 'muse-spark-1.3', {
+        OPENROUTER_SPARK_MODEL: 'meta-llama/llama-3.3-70b-instruct',
+      })
+    ).toBe('meta-llama/llama-3.3-70b-instruct');
+
+    const plannerChat = vi.fn().mockResolvedValue({
+      choices: [{ message: { content: '{"rules":[{"targetObject":"cup","expectedValue":"blue"}]}' } }],
+    });
+    const planner = chatPlanner({
+      model: 'muse-spark-1.3',
+      upstreamModel: 'meta-llama/llama-3.3-70b-instruct',
+      chat: { create: plannerChat } as never,
+    });
+    const planRes = await planner.plan('Keep the cup blue.', 1);
+    expect(planRes.model).toBe('muse-spark-1.3');
+    expect(plannerChat.mock.calls[0][0].model).toBe('meta-llama/llama-3.3-70b-instruct');
+
+    const agentChat = vi.fn().mockResolvedValue({
+      choices: [{ message: { role: 'assistant', content: 'Ready.' } }],
+    });
+    const agent = chatAgent({
+      model: 'muse-spark-1.3',
+      upstreamModel: 'meta-llama/llama-3.3-70b-instruct',
+      chat: { create: agentChat } as never,
+    });
+    expect(agent.model).toBe('muse-spark-1.3');
+    await agent.turn([{ role: 'user', content: 'Hello' }]);
+    expect(agentChat.mock.calls[0][0].model).toBe('meta-llama/llama-3.3-70b-instruct');
+
+    const transcribeCreate = vi.fn().mockResolvedValue({ text: 'change the jacket to red' });
+    const transcriber = openAiTranscriber({
+      model: 'muse-voice-transcribe-1.0',
+      upstreamModel: 'whisper-1',
+      transcriptions: { create: transcribeCreate } as never,
+    });
+    const transRes = await transcriber.transcribe({
+      bytes: Buffer.from('fake-webm'),
+      mimeType: 'audio/webm',
+    });
+    expect(transRes.model).toBe('muse-voice-transcribe-1.0');
+    expect(transcribeCreate.mock.calls[0][0].model).toBe('whisper-1');
+  });
+});
+
+describe('voice object editing in the scene', () => {
+  it('parses natural spoken commands to change or replace objects in a scene', () => {
+    expect(parseVoiceCommand('change the coffee cup to red in shot 2')).toEqual({
+      kind: 'recolor',
+      object: 'cup',
+      color: 'red',
+      shotNumber: 2,
+    });
+    expect(parseVoiceCommand('in shot 3 change the courier jacket to emerald')).toEqual({
+      kind: 'recolor',
+      object: 'jacket',
+      color: 'emerald',
+      shotNumber: 3,
+    });
+    expect(parseVoiceCommand('replace the cup with a glowing lantern in shot 2')).toEqual({
+      kind: 'generative_edit',
+      object: 'cup',
+      prompt: 'a glowing lantern',
+      shotNumber: 2,
+    });
+    expect(parseVoiceCommand('edit the jacket to a leather trench coat')).toEqual({
+      kind: 'generative_edit',
+      object: 'jacket',
+      prompt: 'a leather trench coat',
+      shotNumber: undefined,
+    });
+    expect(resolveVoiceColor('make it crimson red')).toBe('red');
+    expect(normalizeVoiceObject('the courier jacket')).toBe('jacket');
   });
 });

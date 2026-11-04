@@ -129,15 +129,16 @@ export function getMetaApiEnvConfig(): MetaApiEnvConfig {
   const apiKey = '';
   const baseUrl = '';
   const isLiveConfigured = false;
+  const env = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env) ?? {};
 
   return {
     apiKey,
     baseUrl,
     models: {
-      voiceTranscribe: 'muse-voice-transcribe-1.0',
-      spark: 'muse-spark-1.3',
-      image: 'muse-image-1.0',
-      sam: 'sam-3.1',
+      voiceTranscribe: String(env.VITE_MUSE_VOICE_MODEL || 'muse-voice-transcribe-1.0').trim(),
+      spark: String(env.VITE_MUSE_SPARK_MODEL || 'muse-spark-1.3').trim(),
+      image: String(env.VITE_MUSE_IMAGE_MODEL || 'muse-image-1.0').trim(),
+      sam: String(env.VITE_SAM3_MODEL || 'sam-3.1').trim(),
     },
     isLiveConfigured,
   };

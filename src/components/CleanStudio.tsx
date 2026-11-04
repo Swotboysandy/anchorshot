@@ -47,6 +47,7 @@ export interface SceneEditError {
   explanation: string;
   nextStep: string;
   preservedPrompt: string;
+  retryMode?: 'generate' | 'command';
   partialShotsCount?: number;
   plannedShotsCount?: number;
 }
@@ -232,6 +233,7 @@ export function CleanStudio(p: Props) {
   latestStatus.current = p.status;
   // Results are shown briefly as well as announced, so a finished action is visible.
   const [notice, setNotice] = useState('');
+  const [resettingLimit, setResettingLimit] = useState(false);
   const saveFailed = !['Saved locally', 'Saving locally...', 'Loading local projects...', 'Switching projects...'].includes(p.storageStatus);
   const firstStatus = useRef(true);
   useEffect(() => {
@@ -482,7 +484,6 @@ export function CleanStudio(p: Props) {
                     {p.sceneEditError && (
                       <div
                         role="alert"
-                        aria-live="assertive"
                         className="mt-3 rounded-2xl border border-[#444] bg-[#171717] p-4 text-left flex flex-col gap-2.5"
                       >
                         <div className="flex items-start gap-2.5">
@@ -506,12 +507,18 @@ export function CleanStudio(p: Props) {
                                 type="button"
                                 size="sm"
                                 className="h-8 text-xs"
-                                disabled={p.processing}
-                                onClick={() =>
-                                  void p.onResetSessionLimit?.(
-                                    p.draft.trim() || p.sceneEditError?.preservedPrompt
-                                  )
-                                }
+                                disabled={p.processing || resettingLimit}
+                                onClick={async () => {
+                                  if (resettingLimit) return;
+                                  setResettingLimit(true);
+                                  try {
+                                    await p.onResetSessionLimit?.(
+                                      p.draft.trim() || p.sceneEditError?.preservedPrompt
+                                    );
+                                  } finally {
+                                    setResettingLimit(false);
+                                  }
+                                }}
                               >
                                 <RotateCcw size={13} />
                                 Reset limit &amp; retry edit
@@ -521,8 +528,16 @@ export function CleanStudio(p: Props) {
                                 variant="outline"
                                 size="sm"
                                 className="h-8 text-xs"
-                                disabled={p.processing}
-                                onClick={() => void p.onResetSessionLimit?.()}
+                                disabled={p.processing || resettingLimit}
+                                onClick={async () => {
+                                  if (resettingLimit) return;
+                                  setResettingLimit(true);
+                                  try {
+                                    await p.onResetSessionLimit?.();
+                                  } finally {
+                                    setResettingLimit(false);
+                                  }
+                                }}
                               >
                                 Reset limit only
                               </Button>
@@ -953,7 +968,7 @@ export function CleanStudio(p: Props) {
                 </Button>
               </section>
               <section className="tools-surface" aria-label="Dedicated generation history browser">
-                {p.onRevisitHistoryEntry && (
+                {workspace === 'history' && p.onRevisitHistoryEntry && (
                   <GenerationHistoryPanel
                     shots={p.shots}
                     activeShot={shot ?? p.activeShot}

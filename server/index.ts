@@ -31,7 +31,8 @@ function localSettings() {
     Number.isInteger(parsedLimit) && parsedLimit >= 0 && parsedLimit <= 10000 ? parsedLimit : 250;
 
   return {
-    key: (process.env.META_API_KEY || values.META_API_KEY || process.env.SAM_PROVIDER || values.SAM_PROVIDER || '').trim(),
+    key: (process.env.META_API_KEY ?? values.META_API_KEY ?? '').trim(),
+    samProvider: (process.env.SAM_PROVIDER ?? values.SAM_PROVIDER ?? '').trim().toLowerCase() || undefined,
     requestLimit,
     port: Number(process.env.PORT ?? values.PORT ?? 4317),
     values,

@@ -20,6 +20,7 @@ import type { AgentMessage, VoiceAgent } from './agent';
 import { validateAgentMessages } from './agent';
 import { AnimaticError, ffmpegAvailable, renderAnimatic, type AnimaticShot, type RenderAnimaticOptions } from './animatic';
 import { fixturePlanner, PlannerOutputError, type Planner } from './planner';
+import { getCanonicalMetaModels } from './models';
 import type { ContinuityEvidenceStatus, SegmentationResult } from '../src/types';
 
 // Only app-owned images and embedded image bytes are accepted. Never read arbitrary
@@ -37,6 +38,7 @@ async function resolveImageBuffer(input: string, frameFolder: string, jobFolder:
 interface Settings {
   key: string;
   requestLimit: number;
+  samProvider?: string;
 }
 interface Options {
   settings: () => Settings;
@@ -69,6 +71,8 @@ export function createApp(options: Options) {
   const maskSessionId = randomBytes(16).toString('hex');
   const planner = options.planner ?? fixturePlanner;
   let requestsUsed = 0;
+  let sessionResets = 0;
+  const MAX_SESSION_RESETS = 5;
   let active = false;
   let imageActive = false;
   let videoActive = false;
@@ -76,6 +80,8 @@ export function createApp(options: Options) {
   let exportActive = false;
   const frameFolder = options.frameFolder ?? resolve('.artifacts/frames');
   const jobFolder = options.jobFolder ?? resolve('.artifacts/local-ai/ui-jobs');
+  const isLocalSam = (s: Settings) => s.samProvider === 'local' || s.key === 'local';
+  const isSamConfigured = (s: Settings) => Boolean(s.key || isLocalSam(s));
 
   app.disable('x-powered-by');
   app.use('/api', (req, res, next) => {
@@ -90,10 +96,16 @@ export function createApp(options: Options) {
 
   app.get('/api/health', (_req, res) => {
     const settings = options.settings();
+    const canonicalModels = getCanonicalMetaModels();
     res.json({
-      configured: Boolean(settings.key),
-      model: 'sam-3.1',
-      models: ['sam-3.1', 'muse-spark-1.3', 'muse-voice-transcribe-1.0', 'muse-image-1.0'],
+      configured: isSamConfigured(settings),
+      model: canonicalModels.sam,
+      models: [
+        canonicalModels.sam,
+        canonicalModels.spark,
+        canonicalModels.voice,
+        canonicalModels.image,
+      ],
       sessionToken,
       maskSessionId,
       requestsUsed,
@@ -128,16 +140,21 @@ export function createApp(options: Options) {
   app.post('/api/session/reset', (req, res) => {
     if (!hasValidSession(req))
       return res.status(403).json({ error: 'Refresh the page before resetting the session limit.' });
+    if (sessionResets >= MAX_SESSION_RESETS)
+      return res.status(429).json({
+        error: 'The session request limit has already been reset the maximum number of times. Restart the server to begin a new session.',
+      });
+    sessionResets++;
     requestsUsed = 0;
     const settings = options.settings();
-    res.json({ ok: true, requestsUsed, requestLimit: settings.requestLimit });
+    res.json({ ok: true, requestsUsed, requestLimit: settings.requestLimit, resetsRemaining: MAX_SESSION_RESETS - sessionResets });
   });
 
   app.post('/api/segment', async (req, res, next) => {
     if (!hasValidSession(req))
       return res.status(403).json({ error: 'Refresh the page before selecting an object.' });
     const settings = options.settings();
-    if (!settings.key)
+    if (!isSamConfigured(settings))
       return res.status(503).json({
         error: 'SAM is not connected. Add META_API_KEY to .env.local, or use the offline sample.',
       });
@@ -145,7 +162,7 @@ export function createApp(options: Options) {
       return res
         .status(409)
         .json({ error: 'A selection is already running. Wait for it to finish.' });
-    if (settings.key !== 'local' && requestsUsed >= settings.requestLimit)
+    if (!isLocalSam(settings) && requestsUsed >= settings.requestLimit)
       return res
         .status(429)
         .json({ error: 'The session request limit has been reached. No further call was sent.' });
@@ -164,7 +181,7 @@ export function createApp(options: Options) {
         rawRuleRevision >= 1
           ? Math.floor(rawRuleRevision)
           : 1;
-      if (settings.key !== 'local') reserveRequest();
+      if (!isLocalSam(settings)) reserveRequest();
       const result = await (options.segment ?? requestSam)(
         input,
         settings.key,
@@ -194,7 +211,7 @@ export function createApp(options: Options) {
       return res
         .status(409)
         .json({ error: 'A selection is already running. Wait for it to finish.' });
-    if (settings.key && settings.key !== 'local' && requestsUsed >= settings.requestLimit)
+    if (isSamConfigured(settings) && !isLocalSam(settings) && requestsUsed >= settings.requestLimit)
       return res
         .status(429)
         .json({ error: 'The session request limit has been reached. No further call was sent.' });
@@ -225,8 +242,8 @@ export function createApp(options: Options) {
           : 0.984;
 
       let segmentation: SegmentationResult;
-      if (settings.key) {
-        if (settings.key !== 'local') reserveRequest();
+      if (isSamConfigured(settings)) {
+        if (!isLocalSam(settings)) reserveRequest();
         segmentation = await (options.segment ?? requestSam)(
           input,
           settings.key,

@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import OpenAI, { toFile } from 'openai';
+import { getCanonicalMetaModels } from './models';
 
 /**
  * Voice role behind `/api/muse/transcribe`. A provider receives recorded audio
@@ -63,12 +64,13 @@ function accept(model: string, text: unknown, timestamps: WordTiming[]): Transcr
 type Transcriptions = Pick<OpenAI['audio']['transcriptions'], 'create'>;
 
 /** Any endpoint serving OpenAI-style `/audio/transcriptions` (Whisper-compatible servers). */
-export function openAiTranscriber(options: { model: string; transcriptions: Transcriptions }): Transcriber {
+export function openAiTranscriber(options: { model: string; upstreamModel?: string; transcriptions: Transcriptions }): Transcriber {
+  const targetModel = options.upstreamModel ?? options.model;
   return {
     model: options.model,
     async transcribe({ bytes, mimeType }, signal) {
       const file = await toFile(bytes, `director.${AUDIO_TYPES[mimeType]}`, { type: mimeType });
-      const reply = await options.transcriptions.create({ file, model: options.model }, { signal });
+      const reply = await options.transcriptions.create({ file, model: targetModel }, { signal });
       return accept(options.model, (reply as { text?: unknown }).text, []);
     },
   };
@@ -128,14 +130,17 @@ export function metaTranscriber(options: {
 export function transcriberFromSettings(values: Record<string, string | undefined>): Transcriber | undefined {
   const pick = (name: string) => (process.env[name] ?? values[name] ?? '').trim();
   const provider = pick('TRANSCRIBE_PROVIDER');
+  const canonicalVoice = getCanonicalMetaModels(values).voice;
   if (provider === 'meta') {
     const apiKey = pick('META_API_KEY');
     const baseURL = pick('META_API_BASE_URL') || 'https://api.meta.ai/v1';
-    return apiKey ? metaTranscriber({ apiKey, baseURL, model: pick('TRANSCRIBE_MODEL') || 'muse-voice-transcribe-1.0' }) : undefined;
+    return apiKey ? metaTranscriber({ apiKey, baseURL, model: pick('TRANSCRIBE_MODEL') || canonicalVoice }) : undefined;
   }
   if (provider !== 'openai-compatible') return undefined;
   const [baseURL, apiKey, model] = ['TRANSCRIBE_BASE_URL', 'TRANSCRIBE_API_KEY', 'TRANSCRIBE_MODEL'].map(pick);
   if (!baseURL || !apiKey || !model) return undefined;
+  const upstreamModel =
+    /127\.0\.0\.1|localhost/i.test(baseURL) && model === canonicalVoice ? 'whisper-1' : model;
   const client = new OpenAI({ baseURL, apiKey, maxRetries: 0, timeout: 120_000 });
-  return openAiTranscriber({ model, transcriptions: client.audio.transcriptions });
+  return openAiTranscriber({ model, upstreamModel, transcriptions: client.audio.transcriptions });
 }

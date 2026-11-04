@@ -17,7 +17,7 @@ export type VoiceIntent =
   | { kind: 'segment'; object: string; shotNumber?: number }
   | { kind: 'recolor'; object?: string; color: string; shotNumber?: number }
   | { kind: 'modify_video'; object: string; color: string }
-  | { kind: 'generative_edit'; prompt: string; object?: string }
+  | { kind: 'generative_edit'; prompt: string; object?: string; shotNumber?: number }
   | { kind: 'rule_update'; object?: string; color: string }
   | { kind: 'rebuild'; transcript: string };
 
@@ -31,6 +31,11 @@ const COLOR_MAP: Record<string, string> = {
   white: 'white', ivory: 'white',
 };
 const COLORS = Object.keys(COLOR_MAP).join('|');
+
+export function resolveVoiceColor(text: string): string | undefined {
+  const match = text.toLowerCase().match(new RegExp(`\\b(${COLORS})\\b`));
+  return match?.[1] ? COLOR_MAP[match[1]] : undefined;
+}
 
 const NUMBER_WORDS: Record<string, number> = {
   one: 1, first: 1, two: 2, second: 2, three: 3, third: 3, four: 4, fourth: 4,
@@ -52,6 +57,19 @@ function shotNumberIn(text: string): number | undefined {
 
 const cleanObject = (noun: string) => noun.replace(/^(?:the|my|a|an|this|that)\s+/i, '').trim().toLowerCase();
 
+const SCENE_LEVEL_NOUNS = new Set([
+  'scene', 'scenes', 'shot', 'shots', 'frame', 'frames', 'story', 'storyboard',
+  'sequence', 'film', 'video', 'setting', 'location', 'background', 'environment',
+  'weather', 'lighting', 'camera', 'mood', 'pacing',
+]);
+
+export function normalizeVoiceObject(noun: string): string {
+  const cleaned = cleanObject(noun);
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (words.length <= 1) return cleaned;
+  return words[words.length - 1];
+}
+
 export function parseVoiceCommand(rawText: string): VoiceIntent {
   const cleaned = rawText
     .replace(/\b(uh|um|please|can\s+you|could\s+you|would\s+you)\b/gi, ' ')
@@ -60,7 +78,7 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
   const lower = cleaned.toLowerCase();
   if (!lower) return { kind: 'rebuild', transcript: '' };
 
-  if (/^(?:fix|repair|make|turn|change|paint|recolou?r|segment|detect|select|find|track)\b/.test(lower)) {
+  if (/^(?:in\s+(?:shot|scene|frame)\s*#?\s*\S+\s*,?\s*)?(?:fix|repair|make|turn|change|paint|recolou?r|replace|swap|edit|segment|detect|select|find|track)\b/.test(lower)) {
     const reference=lower.match(/\b(?:shot|scene|frame)\s*#?\s*([^\s,;!?]+)/)?.[1] ?? lower.match(/#\s*([^\s,;!?]+)/)?.[1];
     if(reference){
       const number=NUMBER_WORDS[reference] ?? (/^\d+$/.test(reference)?Number(reference):NaN);
@@ -98,19 +116,42 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
     return { kind: 'fix', shotNumber: shotNumberIn(lower), color: color ? COLOR_MAP[color] : undefined };
   }
 
-  // "make the car red in shot 2", "turn the cup to blue", "recolor the umbrella in shot 3 to amber"
+  // "make the car red in shot 2", "turn the cup to blue", "recolor the umbrella in shot 3 to amber",
+  // "in shot 2 change the coffee cup to red"
+  const leadShot = `(?:in\\s+(?:shot|scene|frame)\\s*#?\\s*(${NUMBERS})\\s*,?\\s*)?`;
   const shotClause = `(?:\\s+in\\s+(?:shot|scene|frame)\\s*#?\\s*(${NUMBERS}))?`;
-  const direct = lower.match(new RegExp(`^(?:make|turn|change|paint)\\s+(?:the\\s+)?([a-z-]+)\\s+(${COLORS})${shotClause}\\b`));
-  if (direct)
-    return { kind: 'recolor', object: cleanObject(direct[1]), color: COLOR_MAP[direct[2]], shotNumber: toShot(direct[3]) ?? shotNumberIn(lower) };
-  const toColour = lower.match(new RegExp(`^(?:recolou?r|change|turn|make|paint)\\s+(?:the\\s+)?([a-z-]+)?${shotClause}\\s*(?:to|into)\\s+(${COLORS})\\b`));
-  if (toColour)
+  const objPhrase = `([a-z-]+(?:\\s+(?!to\\b|into\\b|with\\b|in\\b|${COLORS}\\b)[a-z-]+)?)`;
+  const direct = lower.match(new RegExp(`^${leadShot}(?:make|turn|change|paint)\\s+(?:the\\s+)?${objPhrase}\\s+(${COLORS})${shotClause}\\b`));
+  if (direct && !SCENE_LEVEL_NOUNS.has(normalizeVoiceObject(direct[2])))
     return {
       kind: 'recolor',
-      object: toColour[1] ? cleanObject(toColour[1]) : undefined,
-      color: COLOR_MAP[toColour[3]],
-      shotNumber: toShot(toColour[2]) ?? shotNumberIn(lower),
+      object: normalizeVoiceObject(direct[2]),
+      color: COLOR_MAP[direct[3]],
+      shotNumber: toShot(direct[1]) ?? toShot(direct[4]) ?? shotNumberIn(lower),
     };
+  const toColour = lower.match(new RegExp(`^${leadShot}(?:recolou?r|change|turn|make|paint|set|switch|swap)\\s+(?:the\\s+)?(?:${objPhrase}\\s*)?${shotClause}\\s*(?:to|into|with)\\s+(?:a\\s+|an\\s+)?(${COLORS})(?:\\s+[a-z-]+)?${shotClause}\\b`));
+  if (toColour && (!toColour[2] || !SCENE_LEVEL_NOUNS.has(normalizeVoiceObject(toColour[2]))))
+    return {
+      kind: 'recolor',
+      object: toColour[2] ? normalizeVoiceObject(toColour[2]) : undefined,
+      color: COLOR_MAP[toColour[4]],
+      shotNumber: toShot(toColour[1]) ?? toShot(toColour[3]) ?? toShot(toColour[5]) ?? shotNumberIn(lower),
+    };
+
+  // Spoken object replacement/editing: "replace the cup with a lantern in shot 2", "edit the jacket to a leather coat"
+  const objectEdit = lower.match(new RegExp(`^${leadShot}(?:replace|swap|edit)\\s+(?:the\\s+)?${objPhrase}${shotClause}\\s+(?:with|into|to)\\s+(.+?)${shotClause}$`));
+  if (objectEdit) {
+    const targetObj = normalizeVoiceObject(objectEdit[2]);
+    if (!SCENE_LEVEL_NOUNS.has(targetObj)) {
+      const promptText = objectEdit[4].replace(new RegExp(`\\s+in\\s+(?:shot|scene|frame)\\s*#?\\s*(${NUMBERS})$`, 'i'), '').trim();
+      const maybeColor = COLOR_MAP[promptText];
+      const shotNum = toShot(objectEdit[1]) ?? toShot(objectEdit[3]) ?? toShot(objectEdit[5]) ?? shotNumberIn(lower);
+      if (maybeColor) {
+        return { kind: 'recolor', object: targetObj, color: maybeColor, shotNumber: shotNum };
+      }
+      return { kind: 'generative_edit', object: targetObj, prompt: promptText, shotNumber: shotNum };
+    }
+  }
 
   // "segment the cup", "detect the car in scene 2", "select umbrella in shot 1"
   const segment = lower.match(new RegExp(`^(?:segment|detect|select|find|track)\\s+(?:the\\s+)?([a-z0-9_-]+)${shotClause}`));

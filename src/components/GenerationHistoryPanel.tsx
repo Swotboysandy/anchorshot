@@ -64,7 +64,7 @@ export function buildHistoryEntries(
   for (const job of completedJobs) {
     seenIds.add(job.id);
     const descriptor = describeGenerationPrompt(job.prompt, job.kind);
-    const createdAt = job.createdAt || new Date().toISOString();
+    const createdAt = job.createdAt ?? '';
     const thumbnailUrl =
       job.kind === 'image'
         ? localAsset(job, 'generated-image.png')
@@ -210,23 +210,31 @@ export function GenerationHistoryPanel({
   const [selectedId, setSelectedId] = useState<string>('');
   const [actionFeedback, setActionFeedback] = useState<string>('');
 
+  const requestVersionRef = React.useRef(0);
+
   const fetchHistory = useCallback(async (silent = false) => {
+    const version = ++requestVersionRef.current;
     if (!silent) setLoading(true);
     try {
       const recent = await localRequest<LocalJob[]>('/jobs');
+      if (requestVersionRef.current !== version) return;
       setJobs(recent);
       setError('');
     } catch (err) {
+      if (requestVersionRef.current !== version) return;
       if (!silent) {
         setError(err instanceof Error ? err.message : 'Could not load generation history.');
       }
     } finally {
-      if (!silent) setLoading(false);
+      if (requestVersionRef.current === version && !silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void fetchHistory(false);
+    return () => {
+      requestVersionRef.current++;
+    };
   }, [fetchHistory, shots.length]);
 
   const { entries, sequences } = useMemo(

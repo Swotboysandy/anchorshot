@@ -63,10 +63,12 @@ export function createLocalAi(root: string, launch = spawn) {
   app.use('/jobs/:id/correct',express.json({limit:'24mb'}));
   app.use('/jobs/:id/track',express.json({limit:'24mb'}));
   app.use(express.json({limit: '8kb'}));
+  const scannedDiskIds = new Set<string>(jobs.keys());
   const syncJobsFromDisk = () => {
     try {
       for (const id of readdirSync(output).filter(id => ID.test(id))) {
-        if (jobs.has(id)) continue;
+        if (jobs.has(id) || scannedDiskIds.has(id)) continue;
+        scannedDiskIds.add(id);
         try {
           const saved: Job = JSON.parse(readFileSync(path.join(output, id, 'job.json'), 'utf8'));
           if (saved.id === id && saved.status === 'completed') jobs.set(id, saved);
