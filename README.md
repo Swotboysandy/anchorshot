@@ -1,107 +1,128 @@
-# Anchorshot — Accessible Voice-Directed Storyboard Studio
+# AnchorShot
 
-**Anchorshot** is a storyboard and dream-transition editor designed around voice direction, keyboard controls and object continuity. Built for the Meta Global AI Developer Hackathon (Indie Developer track). Offline use supports typed direction, sample planning, manual masks and optional installed local GPU models. Live transcription requires a configured provider; complete voice-only and screen-reader workflows have not yet been verified.
+**Direct a film by voice, and get evidence that it stays consistent, even if you can't see the screen.**
 
-**Current verification scope:** AnchorShot measures selected-frame colour and pixel containment. General visual understanding, character identity and spatial continuity remain incomplete. Supported colour rules can be checked against selected pixels; manual masks can protect cup and umbrella layers through a deterministic kitchen-to-ocean composite. Zero raw-pixel drift proves preservation of the selected pixels, not selection accuracy or cinematic quality. See [the current audit](docs/FULL_AUDIT.md) for source, browser, GPU and export evidence and remaining gaps.
+AnchorShot is an accessible storyboard and film studio for blind and low-vision filmmakers. You describe a scene out loud, and a voice co-director plans the shots, draws them, turns them into video and reads back what happened. When a prop must stay the same across shots, AnchorShot checks the real pixels with SAM 3.1 instead of asking you to look.
 
----
+Built for the **Meta Global AI Developer Hackathon**, Indie Developer track, under the **Build for Your World** problem statement.
 
-## 1. What runs on which model
+## Why it exists
 
-Each AI role sits behind a small provider adapter on the local server. Prompts and output schemas live in the app, each role validates its expected response shape. Provider settings live in `.env.local`; a different model still needs compatibility and quality testing. With nothing configured, planning and storyboard samples work without keys. Unsupported model actions fail explicitly; connected-provider failures never count as sample-model success.
+AI video tools generate frames, but they assume someone can look at the result. A blind director can't tell whether the jacket turned from emerald to blue in shot three. AnchorShot makes continuity something the software measures and speaks aloud:
 
-| Role | Server endpoint | Configured provider adapter | Offline fallback |
-| :--- | :--- | :--- | :--- |
-| Shot planning and continuity rules | `POST /api/muse/spark` | Meta Muse Spark / compatible chat adapter; provider-specific validation required | Keyword planner |
-| Object segmentation and colour check | `POST /api/segment`, `/api/segment/check` | **Meta `sam-3.1`**: real masks on generated frames; colour is measured from the masked pixels | Fixture masks, clearly labelled "offline fixture" |
-| Storyboard frames | `POST /api/muse/image` | **Meta `muse-image-1.0`** / compatible image adapter; generated frames remain unreviewed until supported checks are performed | Canvas-drawn sample frames |
-| Voice to script | `POST /api/muse/transcribe` | **Meta `muse-voice-transcribe-1.0`** through `POST /asr/transcribe` or the configured Whisper-compatible adapter; compatibility must be tested | Typed input / local orb metering only; no browser cloud recognition |
-| Spoken narration | Browser | Browser `speechSynthesis`; recorded narration can also be attached to a scene | Same |
-| Voice co-director | `POST /api/agent/turn` | **Meta `muse-spark-1.3`** with studio actions as tools; hands-free turns through Meta voice, spoken by the browser, with live captions | Orb meters the microphone locally |
-| Film export | `POST /api/export/animatic` | Local ffmpeg: 1280x720 H.264 MP4 with camera moves, video clips and attached narration/source audio | Silent still-frame browser WebM; video, narration and BITC cannot silently fall back |
+1. **A rule:** "the jacket must be emerald" becomes a continuity rule.
+2. **A real mask:** SAM 3.1 finds the object in the frame.
+3. **A measurement:** the colour is read from the masked pixels and reported out loud. Results stay "uncertain" when the object can't be confirmed.
+4. **A contained fix:** a recolour changes only the masked pixels, and the app records how many pixels changed outside the mask.
 
-The configured adapters can route planning, frames, segmentation, transcription and agent requests to external providers; offline operation does not. Local GPU image/video generation uses installed SD1.5/AnimateDiff weights separately. Speech synthesis uses the browser voice. Earlier builds recorded limited live calls; the current audit has not repeated paid-provider validation. Video generation is opt-in from Generate new media and never starts by itself. A standalone offline dream workbench is at `/dream`.
+## How Meta models are used
 
----
+| Job | Model | Access |
+| :--- | :--- | :--- |
+| Shot planning, cast briefs, continuity rules | `muse-spark-1.3` | Meta Model API |
+| Voice co-director with 14 studio tools | `muse-spark-1.3` | Meta Model API |
+| Storyboard frames and video start frames | `muse-image-1.0` | Meta Model API |
+| Object masks and colour checks | `sam-3.1` | Meta Model API |
+| Speech to text | `muse-voice-transcribe-1.0` | Meta Model API |
+| Backup planner | `meta-models/muse-spark-open-1026` | Baseten |
 
-## 2. Configuration (`.env.local`)
+**Not Meta models:** video clips are rendered by **Wan 2.2 on Modal**, starting from each Muse Image frame. Spoken replies use the browser's own voice, and film export uses local ffmpeg.
 
-Copy `.env.example` to `.env.local` (git-ignored) and fill only the roles you want live. API keys stay on the local server and are never sent to the browser.
+## What you can do by voice
 
-```dotenv
-# Meta muse-spark for planning
-PLANNER_PROVIDER="openai-compatible"
-PLANNER_BASE_URL="https://api.meta.ai/v1"
-PLANNER_API_KEY="<your Meta key>"
-PLANNER_MODEL="muse-spark-1.3"
+- **Create:** "Make a film of a courier in a rainy night market, and generate it now."
+- **Navigate:** "Open shot two." "Play the film." "Pause." "Read me the storyboard."
+- **Set rules and check them:** "The jacket must be emerald." "Check continuity."
+- **Change a colour:** "Make the jacket red in shot one."
+- **Change an object:** "In shot two, change the bicycle into a motorbike."
+- **Redo one scene:** "Remake scene two."
+- **Organise:** move shots, change shot lengths, switch takes and workspaces, and export the film.
 
-# Meta SAM 3.1 gateway
-META_API_KEY="<your Meta key>"
+Changes are read back for your confirmation before they run. The conversation and script stay visible in the left panel, and the main actions have keyboard shortcuts. Press `?` in the app for the list.
 
-# Meta voice and the voice agent use META_API_KEY
-TRANSCRIBE_PROVIDER="meta"
-AGENT_PROVIDER="meta"
+## How it works
 
-# Meta muse-image for storyboard frames
-IMAGE_PROVIDER="openai-compatible"
-IMAGE_BASE_URL="https://api.meta.ai/v1"
-IMAGE_API_KEY="<your Meta key>"
-IMAGE_MODEL="muse-image-1.0"
+```text
+Voice or text
+  -> Muse Voice Transcribe
+  -> Muse Spark (voice agent and shot plan)
+  -> Muse Image (a start frame per shot, reusing character references)
+  -> Wan 2.2 on Modal (25 fps clip, frame rate verified with ffprobe)
+  -> SAM 3.1 (masks, colour checks, contained edits)
+  -> ffmpeg (exported MP4)
 ```
 
-`.env.example` documents the remaining settings, including `AGENT_MODEL` and `IMAGE_SIZE`. Paid calls share a per-session request limit (`SAM_MAX_REQUESTS`, default 25 under `npm run dev`).
+Models sit behind small server-side adapters, so API keys never reach the browser. Paid calls share a per-session request limit.
 
----
+## Run it
 
-## 3. Running locally
-
-**Prerequisites:** Node.js 22.12 or newer and npm. MP4 export needs `ffmpeg` and `ffprobe` on `PATH`; without them still-only exports can use a silent WebM. Video-clip, recorded narration or BITC exports require ffmpeg.
+**You need:** Node.js 22.12 or newer, plus `ffmpeg` and `ffprobe` on your `PATH`.
 
 ```bash
 npm install
 npm run dev
 ```
 
-For credit-free GPU testing, run `npm run dev:local`. This explicitly disables paid providers even if `.env.local` contains keys. In the editor, choose **Review shot → Generate new media → Generate video**, then **Use video in Shot** after completion. Story submission alone creates the offline sample storyboard, not an AI video.
+Open http://127.0.0.1:4317. With no keys, the app runs with offline sample planning and frames.
 
-Open http://127.0.0.1:4317. `npm run dev` and `npm run dev:server` both load the providers from `.env.local`.
+To connect the models, create `.env.local` (git-ignored; see [.env.example](.env.example) for more settings):
+
+```dotenv
+META_API_KEY="<your Meta key>"
+SAM_MAX_REQUESTS="60"
+
+PLANNER_PROVIDER="openai-compatible"
+PLANNER_BASE_URL="https://api.meta.ai/v1"
+PLANNER_API_KEY="<your Meta key>"
+PLANNER_MODEL="muse-spark-1.3"
+
+IMAGE_PROVIDER="openai-compatible"
+IMAGE_BASE_URL="https://api.meta.ai/v1"
+IMAGE_API_KEY="<your Meta key>"
+IMAGE_MODEL="muse-image-1.0"
+
+TRANSCRIBE_PROVIDER="meta"
+AGENT_PROVIDER="meta"
+```
+
+For video clips, deploy [scripts/modal_wan.py](scripts/modal_wan.py) to Modal, then add:
+
+```dotenv
+VIDEO_PROVIDER="modal"
+VIDEO_MODEL="Wan 2.2 on Modal"
+MODAL_VIDEO_ENDPOINT="<your Modal endpoint>"
+MODAL_VIDEO_KEY="<the key stored in the anchorshot-wan-endpoint Modal secret>"
+```
+
+Without a video provider, scenes are real Muse Image frames, and exports use camera moves across them.
 
 **Checks:**
 
 ```bash
 npm run typecheck
 npm test
-npm run test:e2e
 ```
 
-Browser tests start their own server on port 4327 with every model provider switched off, so they never call a paid service.
+## Built during the hackathon
 
----
+This repository started on **28 October 2026**, during the building period. Its commit history shows the work step by step.
 
-## 4. Accessible Keyboard Shortcuts & Voice Workflow
+**Built during the event:** the studio UI, voice agent and tools, planner and image adapters, SAM continuity checks and contained recolouring, automatic film flow, Wan and Modal integration, export, and tests.
 
-The shortcuts below are implemented and covered in part by keyboard/browser tests. A complete walkthrough with an actual screen reader remains unverified:
+**Adapted from earlier or third-party work:**
+- The shot vocabulary, prompt order, identity lock and cast brief were adapted from the author's earlier project, Fylmer, then ported and extended here. See [src/lib/shotLanguage.ts](src/lib/shotLanguage.ts).
+- UI primitives come from open-source libraries, listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-| Shortcut | Action |
-| :--- | :--- |
-| **`[V]`** | Start / Stop dictation when a transcription provider is connected; offline input remains typed |
-| **`[SPACE]`** | Play / Pause Animatic Sequence with synchronized spoken narration |
-| **`[←]` / `[→]`** | Navigate Previous / Next Storyboard Shot with automatic status readback |
-| **`[1]` – `[4]`** | Jump directly to Shot 1 through Shot 4 |
-| **`[N]`** | Narrate active shot visual description and continuity state aloud |
-| **`[Y]`** | Accept and apply the proposed `sam-3.1` continuity fix on the active shot |
-| **`[B]`** | Compare before/after repair; measured pixel-containment results are separate from visual correctness |
-| **`[M]`** | Toggle the `sam-3.1` segmentation bounding box and alpha mask overlay |
-| **`[A]`** | Run supported sequence continuity checks; unsupported properties remain uncertain |
-| **`[G]`** | Parse transcript and prepare storyboard frames using the configured provider or offline samples |
-| **`[?]`** | Open / Close the Accessible Keyboard & Voice Command Reference modal |
+## Current limits
 
-### Example Voice / Text Directives
-Speak via `[V]` or type into the **Direct Voice / Text Command** input:
-- `"Fix continuity mismatch in Shot 2 using SAM 3.1"`
-- `"Change continuity rule: cup color must be emerald"`
-- `"Narrate all shots and continuity status"`
+- **Accessibility:** no screen-reader walkthrough or testing with blind filmmakers has been completed yet.
+- **Continuity:** checks measure colour and pixel containment. They don't yet verify character identity or spatial continuity.
+- **Video edits:** object edits apply to still frames, so an edited video shot needs its clip remade.
+- **Speed:** model-backed edits and clips take from about a minute to several minutes, and they aren't instant.
+- **Browser tests:** the end-to-end suite still needs updating for the automatic film flow.
 
-## Free local GPU generation
+More detail is in [the audit notes](docs/FULL_AUDIT.md).
 
-See [Local AI setup and in-app testing](docs/LOCAL_AI_GENERATION.md). The shot inspector can generate actual images and short videos using the installed local models without hackathon credits. The original sample storyboard controls remain available.
+## License
+
+[Apache 2.0](LICENSE). Third-party licenses are in [licenses/](licenses/) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
