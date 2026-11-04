@@ -409,6 +409,176 @@ export class MetaModelClient {
     return {rules,shots};
   }
 
+  public async remakeSingleShot(
+    targetShot: StoryboardShot,
+    customDirection?: string,
+    rules: ContinuityRule[] = [],
+    onProgress?: (message: string, percent: number) => void,
+    signal?: AbortSignal
+  ): Promise<StoryboardShot> {
+    const healthResponse = await fetch('/api/health', { signal });
+    if (!healthResponse.ok) throw new Error('The local server is unavailable.');
+    const health = await healthResponse.json();
+    const headers = { 'Content-Type': 'application/json', 'X-Anchorshot-Session': String(health.sessionToken ?? '') };
+
+    const shotNumber = targetShot.shotNumber;
+    const baseSubject = customDirection?.trim() || targetShot.promptDescription;
+    const colourRules = rules.filter((r) => r.property === 'color');
+    const anchor = colourRules[0] ?? rules[0];
+    const targetObject = anchor?.targetObject ?? 'scene';
+    const seed = Date.now() % 100000;
+
+    onProgress?.(`Remaking Scene ${shotNumber}…`, 15);
+
+    if (health.videoReady) {
+      let image: string | undefined = targetShot.currentImageUrl;
+      if (health.imageModel) {
+        onProgress?.(`Drawing new frame for Scene ${shotNumber}…`, 25);
+        try {
+          const drawn = await fetch('/api/muse/image', {
+            method: 'POST',
+            headers,
+            signal,
+            body: JSON.stringify({
+              prompt: `${baseSubject}. Consistent continuity object: ${targetObject}.`,
+              targetObject,
+              seed,
+            }),
+          });
+          const frame = await drawn.json();
+          if (drawn.ok && typeof frame.url === 'string') {
+            image = frame.url;
+          }
+        } catch {
+          // Keep existing image if drawing fresh frame fails
+        }
+      }
+
+      onProgress?.(`Rendering video for Scene ${shotNumber} at 25 fps…`, 50);
+      const res = await fetch('/api/muse/video', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          prompt: baseSubject,
+          image,
+          seed,
+        }),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(930000)]) : AbortSignal.timeout(930000),
+      });
+      const clip = await res.json();
+      if (!res.ok) throw new Error(clip.error || `Scene ${shotNumber} could not be rendered.`);
+      if (typeof clip.videoUrl !== 'string' || typeof clip.imageUrl !== 'string') {
+        throw new Error('The renderer returned invalid video metadata.');
+      }
+
+      const newRevision = {
+        revisionId: `rev-${clip.id}`,
+        timestamp: Date.now(),
+        imageUrl: clip.imageUrl,
+        videoUrl: clip.videoUrl,
+        generatedJobId: clip.id,
+        mediaSource: 'generated' as const,
+        actionApplied: `Remade scene ${shotNumber} by ${clip.model ?? 'video model'}; 25 fps; continuity unreviewed`,
+        ruleRevision: anchor?.revision ?? 1,
+      };
+
+      onProgress?.(`Scene ${shotNumber} remade successfully.`, 100);
+
+      return {
+        ...targetShot,
+        promptDescription: baseSubject,
+        spokenDescription: `Scene ${shotNumber}: ${baseSubject}. Remade video at 25 fps; continuity unreviewed.`,
+        currentImageUrl: clip.imageUrl,
+        videoUrl: clip.videoUrl,
+        generatedJobId: clip.id,
+        durationSeconds: Number.isFinite(clip.seconds) ? clip.seconds : targetShot.durationSeconds,
+        mediaSource: 'generated',
+        status: 'uncertain',
+        proposedFix: undefined,
+        discrepancyMessage: undefined,
+        revisions: [newRevision, ...targetShot.revisions],
+      };
+    }
+
+    if (health.imageModel) {
+      onProgress?.(`Rendering new frame for Scene ${shotNumber}…`, 50);
+      const res = await fetch('/api/muse/image', {
+        method: 'POST',
+        headers,
+        signal,
+        body: JSON.stringify({
+          prompt: baseSubject,
+          targetObject,
+          seed,
+        }),
+      });
+      const frame = await res.json().catch(() => ({}));
+      if (!res.ok || typeof frame.url !== 'string') {
+        throw new Error(frame.error || `Scene ${shotNumber} could not be drawn.`);
+      }
+
+      const newRevision = {
+        revisionId: `rev-${shotNumber}-${Date.now()}`,
+        timestamp: Date.now(),
+        imageUrl: frame.url,
+        mediaSource: 'generated' as const,
+        actionApplied: `Remade scene ${shotNumber} by ${health.imageModel}; unreviewed`,
+        ruleRevision: anchor?.revision ?? 1,
+      };
+
+      onProgress?.(`Scene ${shotNumber} remade successfully.`, 100);
+
+      return {
+        ...targetShot,
+        promptDescription: baseSubject,
+        spokenDescription: `Scene ${shotNumber}: ${baseSubject}. Remade image; continuity unreviewed.`,
+        currentImageUrl: frame.url,
+        mediaSource: 'generated',
+        status: 'uncertain',
+        proposedFix: undefined,
+        discrepancyMessage: undefined,
+        revisions: [newRevision, ...targetShot.revisions],
+      };
+    }
+
+    // Offline sample fallback:
+    onProgress?.(`Redrawing offline preview for Scene ${shotNumber}…`, 50);
+    const cameraAngle = (['wide', 'medium', 'closeup', 'over_shoulder'] as const)[(shotNumber - 1) % 4];
+    const { imageUrl } = renderMuseStoryboardFrame({
+      shotNumber,
+      cameraAngle,
+      settingTitle: 'Studio Stage',
+      targetObject,
+      objectColorName: anchor?.expectedValue ?? 'blue',
+      weatherOrMood: 'rain_noir',
+      characterPose: 'seated_detective',
+      seed,
+    });
+
+    const newRevision = {
+      revisionId: `rev-${shotNumber}-${Date.now()}`,
+      timestamp: Date.now(),
+      imageUrl,
+      mediaSource: 'sample' as const,
+      actionApplied: `Remade offline sample for scene ${shotNumber}`,
+      ruleRevision: anchor?.revision ?? 1,
+    };
+
+    onProgress?.(`Scene ${shotNumber} remade successfully.`, 100);
+
+    return {
+      ...targetShot,
+      promptDescription: baseSubject,
+      spokenDescription: `Scene ${shotNumber}: ${baseSubject}. Remade offline preview.`,
+      currentImageUrl: imageUrl,
+      mediaSource: 'sample',
+      status: 'consistent',
+      proposedFix: undefined,
+      discrepancyMessage: undefined,
+      revisions: [newRevision, ...targetShot.revisions],
+    };
+  }
+
   public async resetSessionRequestLimit(): Promise<{ ok: boolean; requestsUsed: number; requestLimit: number }> {
     const healthResponse = await fetch('/api/health');
     if (!healthResponse.ok) throw new Error('The local server is unavailable.');

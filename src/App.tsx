@@ -343,6 +343,74 @@ export default function App() {
     [projectState.transcript, projectState.projectId]
   );
 
+  const handleRemakeSingleShot = useCallback(
+    async (targetShotNumber?: number, promptOverride?: string): Promise<string> => {
+      if (storyboardGenerationActive.current || currentProjectRef.current.isProcessing) {
+        return 'Wait for the current operation to finish before remaking a scene.';
+      }
+      const shots = currentProjectRef.current.shots;
+      if (!shots.length) {
+        return 'The storyboard is empty, so no scene can be remade. Create scenes first.';
+      }
+
+      const targetShot = targetShotNumber
+        ? shots.find((s) => s.shotNumber === targetShotNumber)
+        : activeShot || shots[0];
+
+      if (!targetShot) {
+        const msg = `There is no shot ${targetShotNumber}.`;
+        announceStatus(msg, true);
+        return msg;
+      }
+
+      storyboardGenerationActive.current = true;
+      setSceneEditError(null);
+      orcaTracker.trackAction('generation', `Remaking Shot ${targetShot.shotNumber}: "${promptOverride || targetShot.promptDescription}"`, {
+        targetShotNumber: targetShot.shotNumber,
+        promptOverride,
+      });
+
+      setProjectState((prev) => ({
+        ...prev,
+        isProcessing: true,
+        statusAnnouncement: `Remaking Scene ${targetShot.shotNumber}…`,
+      }));
+
+      try {
+        const remade = await metaModelClient.remakeSingleShot(
+          targetShot,
+          promptOverride,
+          currentProjectRef.current.rules,
+          (message, percent) => {
+            setGenerationPercent(percent);
+            setProjectState((prev) => ({ ...prev, statusAnnouncement: message }));
+          }
+        ).finally(() => setGenerationPercent(undefined));
+
+        setProjectState((prev) => ({
+          ...prev,
+          shots: prev.shots.map((s) => (s.id === remade.id ? remade : s)),
+          activeShotId: remade.id,
+          statusAnnouncement: `Scene ${targetShot.shotNumber} has been remade. The other scenes were kept intact.`,
+        }));
+
+        speechService.playEarcon('fixApplied');
+        const summary = `Scene ${targetShot.shotNumber} has been remade. The other scenes were kept intact.`;
+        announceStatus(summary, true);
+        return summary;
+      } catch (error) {
+        const rawMsg = error instanceof Error ? error.message : String(error);
+        const failMsg = `Remaking scene ${targetShot.shotNumber} failed: ${rawMsg}`;
+        announceStatus(failMsg, true);
+        return failMsg;
+      } finally {
+        storyboardGenerationActive.current = false;
+        setProjectState((prev) => ({ ...prev, isProcessing: false }));
+      }
+    },
+    [activeShot, announceStatus]
+  );
+
   // Switch Director Preset Sequence
   const handleSelectPreset = useCallback(
     async (preset: DirectorPresetScenario) => {
@@ -970,6 +1038,15 @@ export default function App() {
         case 'narrate': {
           const summary = projectState.shots.map((s) => s.spokenDescription).join(' ');
           announceStatus(`Narrating full storyboard sequence: ${summary}`, true);
+          return;
+        }
+
+        case 'remake_shot': {
+          if (intent.all) {
+            await handleRebuildFromTranscript(false, projectState.transcript, trimmed);
+          } else {
+            await handleRemakeSingleShot(intent.shotNumber, intent.prompt);
+          }
           return;
         }
 
@@ -2080,6 +2157,7 @@ export default function App() {
         onTranscript={(text) => setProjectState((prev) => ({ ...prev, transcript: text }))}
         onGenerate={() => void handleRebuildFromTranscript(true)}
         onGenerateFrom={(script) => handleRebuildFromTranscript(true, script)}
+        onRemakeShot={handleRemakeSingleShot}
         onCommand={(text) => handleExecuteVoiceCommand(text)}
         onEditObject={handleEditObject}
         onSelect={(id) => handleSelectShot(id)}

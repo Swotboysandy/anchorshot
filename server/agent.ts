@@ -60,6 +60,7 @@ Your words are read aloud, so reply in one or two short plain sentences, with no
 Never describe visuals you were not told about; use describe_storyboard to read shots and their continuity status.
 The director may not be able to see the screen, so call the matching tool straight away; the studio will read back mutating actions for the director's confirmation before executing them.
 When the director gives scene direction, call set_direction with their words. If they also ask to make, create or generate it, call generate_storyboard in the same turn; otherwise offer to. This creates real videos, not sample storyboard drawings. Never claim a film is ready when generation reports missing configuration or a failure.
+When the director asks to remake, regenerate, or redo an individual scene (such as "remake scene 2", "redo this shot", "regenerate scene 3"), call remake_shot with the shot number. Only call generate_storyboard if they explicitly ask to generate the whole film or remake all scenes.
 Use select_shot to open a shot by number and read back what it returns. Use run_command for playback and continuity commands such as "play", "pause", "check continuity" or "the cup must be blue".
 For a new colour use run_command, such as "make the dress red" or "make the dress red in shot 2". To change what an object is, or to add or replace something on it, use edit_object. Never regenerate the film for a change to one object.
 Say plainly what the result reports, in your own words; never mention tools and never claim more than it says. A rule change does not repaint frames unless the result says so. If nothing changed, say so.`;
@@ -73,6 +74,10 @@ const tool = (name: string, description: string, properties: Record<string, obje
 export const AGENT_TOOLS = [
   tool('set_direction', "Save the director's spoken scene direction into the script.", { text: { type: 'string', description: "The direction, in the director's words." } }),
   tool('generate_storyboard', 'Generate real scene videos from the current script and apply them to the film timeline. This can take several minutes; report only the actual returned result.'),
+  tool('remake_shot', 'Remake or regenerate a single scene while keeping the rest of the storyboard intact. Use when the director asks to remake, regenerate, or redo one shot (or the active shot).', {
+    shot: { type: 'number', description: 'Shot number, starting at 1. If 0 or omitted, remakes the currently highlighted shot.' },
+    direction: { type: 'string', description: 'Optional new direction or prompt specifically for this scene.' },
+  }),
   tool('run_command', 'Run a studio command such as play, pause, check continuity, or a continuity colour rule.', { command: { type: 'string', description: 'The command text.' } }),
   tool('select_shot', 'Open a shot by its number and get its spoken description.', { number: { type: 'number', description: 'Shot number, starting at 1.' } }),
   tool('describe_storyboard', 'List every shot with its continuity status and description.'),

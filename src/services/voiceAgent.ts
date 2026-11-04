@@ -26,6 +26,13 @@ export function describeAgentToolAction(name: string, parameters: Record<string,
   switch (name) {
     case 'generate_storyboard':
       return 'generate the storyboard video scenes';
+    case 'remake_shot': {
+      const shotNum = Number(parameters.shot);
+      const dir = typeof parameters.direction === 'string' && parameters.direction.trim() ? ` ("${parameters.direction.trim()}")` : '';
+      return shotNum > 0
+        ? `remake Scene ${shotNum} while keeping the other scenes${dir}`
+        : `remake the highlighted scene while keeping the other scenes${dir}`;
+    }
     case 'edit_object':
       return `change the ${String(parameters.object || 'object')} (${String(parameters.instruction || 'edit')})${parameters.shot ? ` in Shot ${parameters.shot}` : ''}`;
     case 'run_command':

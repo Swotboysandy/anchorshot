@@ -83,6 +83,7 @@ type Props = {
   onTranscript: (s: string) => void;
   onGenerateFrom: (script: string) => Promise<string>;
   onGenerate: () => void;
+  onRemakeShot?: (shotNumber?: number, direction?: string) => Promise<string>;
   onCommand: (s: string) => void;
   onEditObject: (object: string, instruction: string, shotNumber?: number) => Promise<string>;
   onSelect: (id: string) => void;
@@ -270,6 +271,17 @@ export function CleanStudio(p: Props) {
       spokenDirection.current = '';
       if (!script.trim()) return 'The script is empty, so nothing was generated. Ask the director for a scene.';
       return await p.onGenerateFrom(script);
+    },
+    remake_shot: async ({ shot, direction }) => {
+      if (p.processing) return 'A storyboard change is already in progress.';
+      const shotNum = Number(shot) || undefined;
+      const dir = typeof direction === 'string' && direction.trim() ? direction.trim() : undefined;
+      if (p.onRemakeShot) {
+        return await p.onRemakeShot(shotNum, dir);
+      }
+      await p.onCommand(`remake scene ${shotNum ?? ''} ${dir ? `with ${dir}` : ''}`.trim());
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return latestStatus.current;
     },
     run_command: async ({ command }) => {
       if (typeof command !== 'string' || !command.trim()) return 'No command was given.';

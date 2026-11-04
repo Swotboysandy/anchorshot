@@ -13,6 +13,7 @@ export type VoiceIntent =
   | { kind: 'invalid_command'; message: string }
   | { kind: 'audit' }
   | { kind: 'narrate' }
+  | { kind: 'remake_shot'; shotNumber?: number; all?: boolean; prompt?: string }
   | { kind: 'fix'; shotNumber?: number; color?: string; object?: string }
   | { kind: 'segment'; object: string; shotNumber?: number }
   | { kind: 'recolor'; object?: string; color: string; shotNumber?: number }
@@ -118,6 +119,12 @@ export function describeVoiceActionSummary(rawText: string, hasExistingShots: bo
       return 'run a SAM 3.1 continuity check across all scenes';
     case 'narrate':
       return 'read the full storyboard sequence aloud';
+    case 'remake_shot':
+      if (intent.all) return 'regenerate all 4 storyboard scenes';
+      if (intent.shotNumber) {
+        return `remake Scene ${intent.shotNumber} while keeping the other scenes${intent.prompt ? ` ("${intent.prompt}")` : ''}`;
+      }
+      return `remake the highlighted scene while keeping the other scenes${intent.prompt ? ` ("${intent.prompt}")` : ''}`;
     case 'segment':
       return `find and segment the ${intent.object}${intent.shotNumber ? ` in Shot ${intent.shotNumber}` : ' in the active scene'}`;
     case 'recolor':
@@ -150,9 +157,9 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
   const lower = cleaned.toLowerCase();
   if (!lower) return { kind: 'rebuild', transcript: '' };
 
-  if (/^(?:in\s+(?:shot|scene|frame)\s*#?\s*\S+\s*,?\s*)?(?:fix|repair|make|turn|change|paint|recolou?r|replace|swap|edit|segment|detect|select|find|track)\b/.test(lower)) {
+  if (!/\ball\b/.test(lower) && /^(?:in\s+(?:shot|scene|frame)\s*#?\s*\S+\s*,?\s*)?(?:fix|repair|make|turn|change|paint|recolou?r|replace|swap|edit|segment|detect|select|find|track|remake|regenerate|redo|re-render|rerender|re-create|recreate)\b/.test(lower)) {
     const reference=lower.match(/\b(?:shot|scene|frame)\s*#?\s*([^\s,;!?]+)/)?.[1] ?? lower.match(/#\s*([^\s,;!?]+)/)?.[1];
-    if(reference){
+    if(reference && !['this', 'active', 'current', 'highlighted', 'selected'].includes(reference)){
       const number=NUMBER_WORDS[reference] ?? (/^\d+$/.test(reference)?Number(reference):NaN);
       if(!Number.isSafeInteger(number)||number<1)return {kind:'invalid_command',message:'Use a positive whole scene number, for example: fix shot 2. Your film has not changed.'};
     }
@@ -169,6 +176,18 @@ export function parseVoiceCommand(rawText: string): VoiceIntent {
     /^(?:read|tell|describe)\s+(?:(?:to\s+)?me\s+)?(?:the\s+)?(?:scene|shots?|storyboard|sequence|all)\b/.test(lower)
   )
     return { kind: 'narrate' };
+
+  // Remake / regenerate single shot vs all shots:
+  // "remake scene 2", "regenerate shot 3", "redo scene 1 with a wider view", "remake this shot", "remake all scenes"
+  if (/^(?:in\s+(?:shot|scene|frame)\s*#?\s*\S+\s*,?\s*)?(?:remake|regenerate|re-render|rerender|redo|re-create|recreate)\b/.test(lower)) {
+    const isAll = /\ball(?:\s+(?:shots|scenes|storyboard))?$/.test(lower) || /\b(?:all\s+(?:shots|scenes)|whole\s+(?:film|storyboard))\b/.test(lower);
+    if (isAll) {
+      return { kind: 'remake_shot', all: true };
+    }
+    const shotNum = shotNumberIn(lower);
+    const customPrompt = lower.match(/\b(?:with|to|as)\s+(.+)$/)?.[1]?.trim();
+    return { kind: 'remake_shot', shotNumber: shotNum, prompt: customPrompt || undefined };
+  }
 
   // Video edits require an explicit object and colour; tracking never implies recolouring.
   if (/^(?:modify|recolou?r|track)\s+video\b/.test(lower)) {
