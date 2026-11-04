@@ -427,7 +427,8 @@ export function createApp(options: Options) {
         if (controller.signal.aborted) return;
         if (error instanceof TranscriberOutputError)
           return res.status(502).json({ error: error.message });
-        next(error);
+        const errMsg = error instanceof Error ? error.message : String(error);
+        return res.status(502).json({ error: `Transcription service error: ${errMsg}` });
       } finally {
         transcribeActive = false;
       }
