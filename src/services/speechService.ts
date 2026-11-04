@@ -55,17 +55,34 @@ class AccessibleAudioService {
     const voices = window.speechSynthesis.getVoices().filter((voice) => voice.localService);
     if (!voices.length) return Promise.resolve();
     return new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearInterval(poll);
+        this.onSpeakingChange?.(false);
+        resolve();
+      };
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = this.speechRate;
       utterance.volume = this.narrationVolume;
       utterance.voice = voices.find((voice) => voice.lang.startsWith('en')) || voices[0];
-      // Browsers can drop the end event when speech is cancelled.
-      const timer = setTimeout(resolve, 3000 + text.length * 150);
-      utterance.onend = utterance.onerror = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-      window.speechSynthesis.cancel();
+      // Browsers on Windows/Chromium often drop `onend` after cancel(); poll `speaking` so we never block the mic after speech ends.
+      const maxWaitMs = Math.min(9000, 1500 + text.length * 65);
+      const timer = setTimeout(done, maxWaitMs);
+      const startedAt = Date.now();
+      const poll = setInterval(() => {
+        if (Date.now() - startedAt > 450 && !window.speechSynthesis.speaking && !window.speechSynthesis.pending) {
+          done();
+        }
+      }, 120);
+      utterance.onstart = () => this.onSpeakingChange?.(true);
+      utterance.onend = done;
+      utterance.onerror = done;
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+        window.speechSynthesis.cancel();
+      }
       window.speechSynthesis.speak(utterance);
     });
   }

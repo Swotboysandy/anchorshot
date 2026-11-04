@@ -83,14 +83,19 @@ export function classifyVoiceConfirmationReply(rawText: string): VoiceConfirmati
     .replace(/^[\s.,!?;:]+|[\s.,!?;:]+$/g, '')
     .toLowerCase();
   if (!cleaned) return null;
-  if (/^(?:yes|yeah|yep|confirm|confirmed|go ahead|do it|run it|proceed|correct|ok|okay|sure|apply|apply it)$/.test(cleaned)) {
-    return 'confirm';
+  // Only classify relatively short confirmation/rejection utterances (<= 8 words)
+  if (cleaned.split(' ').length > 8) return null;
+  if (/^(?:cancel|stop|never mind|nevermind|dismiss|abort|forget it)\b/.test(cleaned)) {
+    return 'cancel';
   }
-  if (/^(?:repeat|try again|record again|re-?record|mistake|wrong|no|nope|not that|start over|redo)$/.test(cleaned)) {
+  if (/^(?:repeat|try again|record again|re-?record|mistake|wrong|no|nope|not that|start over|redo|let me repeat|say it again)\b/.test(cleaned)) {
     return 'repeat';
   }
-  if (/^(?:cancel|stop|never mind|nevermind|dismiss|abort|forget it)$/.test(cleaned)) {
-    return 'cancel';
+  if (
+    /^(?:yes|yeah|yep|yup|confirm|confirmed|go ahead|do it|run it|proceed|correct|right|ok|okay|sure|apply|apply it|sounds good|that's right|thats right)\b/.test(cleaned) &&
+    !/\b(?:no|not|repeat|wrong|mistake|cancel|stop)\b/.test(cleaned)
+  ) {
+    return 'confirm';
   }
   return null;
 }

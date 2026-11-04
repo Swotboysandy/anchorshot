@@ -352,10 +352,11 @@ describe('voice object editing in the scene', () => {
 
   it('classifies spoken confirmation vs repeat/cancel replies and summarizes pending voice actions', () => {
     expect(classifyVoiceConfirmationReply('yes')).toBe('confirm');
+    expect(classifyVoiceConfirmationReply('yes, go ahead')).toBe('confirm');
     expect(classifyVoiceConfirmationReply('uh please confirm')).toBe('confirm');
     expect(classifyVoiceConfirmationReply('go ahead')).toBe('confirm');
     expect(classifyVoiceConfirmationReply('repeat')).toBe('repeat');
-    expect(classifyVoiceConfirmationReply('no, try again')).toBe(null);
+    expect(classifyVoiceConfirmationReply('no, try again')).toBe('repeat');
     expect(classifyVoiceConfirmationReply('try again')).toBe('repeat');
     expect(classifyVoiceConfirmationReply('mistake')).toBe('repeat');
     expect(classifyVoiceConfirmationReply('cancel')).toBe('cancel');

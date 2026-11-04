@@ -12,6 +12,10 @@ export interface SpeechRecognitionOptions {
   continuous?: boolean;
   interimResults?: boolean;
   lang?: string;
+  /** Automatically stop and transcribe after the user speaks and pauses. */
+  autoStopOnSilence?: boolean;
+  /** Shorter silence window when listening for a quick "yes" / "repeat" confirmation. */
+  quickConfirmation?: boolean;
 }
 
 export interface TranscriptionWordTimestamp {
@@ -63,7 +67,7 @@ class SpeechRecognitionService {
     return Boolean(this.backendModel) && typeof MediaRecorder !== 'undefined' && typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia);
   }
 
-  /** Records until stopListening(), then transcribes the clip with the server's model. */
+  /** Records until stopListening() or silence after speech, then transcribes the clip with the server's model. */
   private startBackendRecording(options: SpeechRecognitionOptions): boolean {
     const model = this.backendModel!;
     const generation = this.generation;
@@ -80,8 +84,78 @@ class SpeechRecognitionService {
       const chunks: Blob[] = [];
       const recorder = new MediaRecorder(stream);
       this.recorder = recorder;
+
+      let vadInterval: ReturnType<typeof setInterval> | null = null;
+      let audioCtx: AudioContext | null = null;
+      const cleanupVad = () => {
+        if (vadInterval) {
+          clearInterval(vadInterval);
+          vadInterval = null;
+        }
+        if (audioCtx) {
+          void audioCtx.close().catch(() => {});
+          audioCtx = null;
+        }
+      };
+
+      if (options.autoStopOnSilence !== false && typeof AudioContext !== 'undefined') {
+        try {
+          audioCtx = new AudioContext();
+          void audioCtx.resume().catch(() => {});
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 1024;
+          audioCtx.createMediaStreamSource(stream).connect(analyser);
+          const samples = new Float32Array(analyser.fftSize);
+          const startedAt = Date.now();
+          const calibrateMs = 150;
+          const silenceWindowMs = options.quickConfirmation ? 950 : 1400;
+          const requiredTicks = options.quickConfirmation ? 1 : 2;
+          const maxTurnMs = options.quickConfirmation ? 10000 : 25000;
+          let noise = 0;
+          let loudTicks = 0;
+          let heardSpeech = false;
+          let quietSince = 0;
+
+          vadInterval = setInterval(() => {
+            if (!this.isListeningState || !current()) {
+              cleanupVad();
+              return;
+            }
+            analyser.getFloatTimeDomainData(samples);
+            const rms = Math.sqrt(samples.reduce((sum, v) => sum + v * v, 0) / samples.length);
+            const elapsed = Date.now() - startedAt;
+            if (elapsed < calibrateMs) {
+              noise = Math.min(0.025, Math.max(noise, rms));
+              return;
+            }
+            if (elapsed > maxTurnMs) {
+              cleanupVad();
+              if (this.isListeningState) this.stopListening();
+              return;
+            }
+            if (rms > Math.max(0.022, noise * 1.8)) {
+              if (++loudTicks >= requiredTicks) {
+                heardSpeech = true;
+              }
+              quietSince = 0;
+            } else if (!heardSpeech) {
+              loudTicks = 0;
+            } else {
+              quietSince ||= Date.now();
+              if (Date.now() - quietSince >= silenceWindowMs) {
+                cleanupVad();
+                if (this.isListeningState) this.stopListening();
+              }
+            }
+          }, 90);
+        } catch {
+          cleanupVad();
+        }
+      }
+
       recorder.ondataavailable = (event) => event.data.size && chunks.push(event.data);
       recorder.onstop = async () => {
+        cleanupVad();
         stream.getTracks().forEach((track) => track.stop());
         if (this.recordingStream === stream) this.recordingStream = null;
         if (!current()) return;

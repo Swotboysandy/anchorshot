@@ -74,8 +74,11 @@ export default function App() {
     saveLocal('library',{active:projectState.projectId,projects:[...sessionProjects.filter(item=>item.projectId!==projectState.projectId),{...projectState,isRecording:false,isPlayingAnimatic:false,isProcessing:false}]}).then(()=>{if(!cancelled)setStorageStatus('Saved locally');}).catch(error=>{if(!cancelled)setStorageStatus(localSaveError(error));});return()=>{cancelled=true};
   },[storageReady,projectState,sessionProjects]);
   const [directionDraft, setDirectionDraft] = useState('');
+  const directionDraftRef = useRef(directionDraft);
+  directionDraftRef.current = directionDraft;
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
   const [pendingVoiceConfirmation, setPendingVoiceConfirmation] = useState<PendingVoiceConfirmation | null>(null);
+  const autoConfirmEpochRef = useRef(0);
   const [sceneEditError, setSceneEditError] = useState<SceneEditError | null>(null);
   const switchingProject = useRef(false);
   const archiveLock = useRef(false);
@@ -1391,9 +1394,19 @@ export default function App() {
 
   // Dictation uses the configured server provider; unconfigured mode stays local.
   const startVoiceDictationSession = useCallback(
-    (baseDraft: string, existingPending: PendingVoiceConfirmation | null) => {
+    (
+      baseDraft: string,
+      existingPending: PendingVoiceConfirmation | null,
+      isConfirmationFollowUp = false
+    ) => {
       const unavailable = (reason: string) => {
         setProjectState((prev) => ({ ...prev, isRecording: false }));
+        if (isConfirmationFollowUp && existingPending) {
+          setVoiceNotice(
+            `Heard: "${existingPending.transcript}" — Click Confirm to ${existingPending.actionSummary}, or Repeat to record again.`
+          );
+          return;
+        }
         setVoiceNotice(`Voice unavailable: ${reason} Type your direction instead.`);
         announceStatus(`Voice unavailable: ${reason}`);
       };
@@ -1404,17 +1417,22 @@ export default function App() {
       const started = speechRecognitionService.startListening({
         continuous: true,
         interimResults: true,
+        autoStopOnSilence: true,
+        quickConfirmation: Boolean(existingPending || isConfirmationFollowUp),
         onResult: (text, isFinal) => {
           const trimmedText = text.trim();
           if (!trimmedText) return;
           if (!isFinal) {
-            setDirectionDraft(baseDraft ? `${baseDraft} ${trimmedText}` : trimmedText);
+            if (!existingPending) {
+              setDirectionDraft(baseDraft ? `${baseDraft} ${trimmedText}` : trimmedText);
+            }
             return;
           }
           if (existingPending) {
             const decision = classifyVoiceConfirmationReply(trimmedText);
             if (decision === 'confirm') {
-              const toRun = existingPending.transcript;
+              autoConfirmEpochRef.current += 1;
+              const toRun = (directionDraftRef.current.trim() || existingPending.transcript).trim();
               setPendingVoiceConfirmation(null);
               setVoiceNotice(null);
               setDirectionDraft('');
@@ -1423,16 +1441,26 @@ export default function App() {
               return;
             }
             if (decision === 'repeat') {
+              const epoch = ++autoConfirmEpochRef.current;
               const prevDraft = existingPending.previousDraft;
               setPendingVoiceConfirmation(null);
               setDirectionDraft(prevDraft);
-              announceStatus('Cleared mistaken voice input. Listening again — please repeat your direction.', true);
-              setTimeout(() => {
-                startVoiceDictationSession(prevDraft, null);
-              }, 250);
+              setVoiceNotice('Cleared mistaken voice input. Speak your direction again...');
+              setProjectState((prev) => ({
+                ...prev,
+                statusAnnouncement: 'Cleared mistaken voice input. Listening again — please repeat your direction.',
+              }));
+              void speechService
+                .speakAndWait('Cleared mistaken voice input. Speak your direction again.')
+                .then(() => {
+                  if (autoConfirmEpochRef.current === epoch) {
+                    startVoiceDictationSession(prevDraft, null, false);
+                  }
+                });
               return;
             }
             if (decision === 'cancel') {
+              autoConfirmEpochRef.current += 1;
               setPendingVoiceConfirmation(null);
               setVoiceNotice(null);
               setDirectionDraft(existingPending.previousDraft);
@@ -1445,19 +1473,27 @@ export default function App() {
             combined,
             currentProjectRef.current.shots.length > 0
           );
-          setDirectionDraft(combined);
-          setPendingVoiceConfirmation({
+          const newPending: PendingVoiceConfirmation = {
             transcript: combined,
             previousDraft: baseDraft,
             actionSummary,
-          });
+          };
+          const epoch = ++autoConfirmEpochRef.current;
+          setDirectionDraft(combined);
+          setPendingVoiceConfirmation(newPending);
           setVoiceNotice(
-            `Heard: "${combined}" — Confirm to ${actionSummary}, or Repeat to record again.`
+            `Heard: "${combined}" — Say "yes" or click Confirm to ${actionSummary}, or say "repeat" to record again.`
           );
-          announceStatus(
-            `I heard: "${combined}". This will ${actionSummary}. Click Confirm or say "yes" to proceed, or click Repeat to record again if there was a mistake.`,
-            true
-          );
+          const promptText = `I heard: "${combined}". This will ${actionSummary}. Say "yes" to confirm, or say "repeat" to try again.`;
+          setProjectState((prev) => ({
+            ...prev,
+            statusAnnouncement: promptText,
+          }));
+          void speechService.speakAndWait(promptText).then(() => {
+            if (autoConfirmEpochRef.current === epoch) {
+              startVoiceDictationSession(baseDraft, newPending, true);
+            }
+          });
         },
         onError: (err) => unavailable(err),
         onStateChange: (listening) => {
@@ -1465,8 +1501,8 @@ export default function App() {
           if (listening) {
             setVoiceNotice(
               existingPending
-                ? 'Listening for confirmation: say "yes" to confirm, or "repeat" to try again.'
-                : 'Listening. Speak your direction.'
+                ? `Heard: "${existingPending.transcript}" — Listening now: say "yes" to confirm or "repeat" to try again.`
+                : 'Listening. Speak your direction (pauses automatically when you finish).'
             );
           }
         },
@@ -1477,6 +1513,8 @@ export default function App() {
   );
 
   const handleToggleRecording = useCallback(() => {
+    autoConfirmEpochRef.current += 1;
+    speechService.stopSpeaking();
     if (speechRecognitionService.isListening() || projectState.isRecording) {
       speechRecognitionService.stopListening();
       setProjectState((prev) => ({ ...prev, isRecording: false }));
@@ -1486,11 +1524,14 @@ export default function App() {
     const base = pendingVoiceConfirmation
       ? pendingVoiceConfirmation.previousDraft
       : directionDraft.trim();
-    startVoiceDictationSession(base, pendingVoiceConfirmation);
+    startVoiceDictationSession(base, pendingVoiceConfirmation, Boolean(pendingVoiceConfirmation));
   }, [announceStatus, directionDraft, pendingVoiceConfirmation, projectState.isRecording, startVoiceDictationSession]);
 
   const handleConfirmVoiceAction = useCallback(async () => {
     if (!pendingVoiceConfirmation) return;
+    autoConfirmEpochRef.current += 1;
+    speechRecognitionService.cancelListening();
+    speechService.stopSpeaking();
     const toRun = (directionDraft.trim() || pendingVoiceConfirmation.transcript).trim();
     setPendingVoiceConfirmation(null);
     setVoiceNotice(null);
@@ -1501,16 +1542,20 @@ export default function App() {
   }, [directionDraft, handleExecuteVoiceCommand, pendingVoiceConfirmation]);
 
   const handleRepeatVoiceRecording = useCallback(() => {
+    autoConfirmEpochRef.current += 1;
     const prevDraft = pendingVoiceConfirmation?.previousDraft ?? '';
     speechRecognitionService.cancelListening();
     speechService.stopSpeaking();
     setPendingVoiceConfirmation(null);
     setDirectionDraft(prevDraft);
     announceStatus('Discarded previous voice recording. Speak your direction again.', false);
-    startVoiceDictationSession(prevDraft, null);
+    startVoiceDictationSession(prevDraft, null, false);
   }, [announceStatus, pendingVoiceConfirmation, startVoiceDictationSession]);
 
   const handleDismissVoiceConfirmation = useCallback(() => {
+    autoConfirmEpochRef.current += 1;
+    speechRecognitionService.cancelListening();
+    speechService.stopSpeaking();
     setPendingVoiceConfirmation(null);
     setVoiceNotice(null);
     announceStatus('Voice confirmation dismissed. You can edit the text in the box before running.', false);
